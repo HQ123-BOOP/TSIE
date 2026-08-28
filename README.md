@@ -87,6 +87,42 @@ VirtIO 块设备按 virtio-v1.x MMIO 规范实现（寄存器布局与 U-Boot `v
 U-Boot 下载：Debian 包 `u-boot-qemu`（`ftp.debian.org/debian/pool/main/u/u-boot/`），
 源码：<https://github.com/u-boot/u-boot>（GPL-2.0，产物勿提交入 Apache-2.0 仓库）。
 
+
+### 启动 Linux（Alpine，实测引导中 ✅）
+
+配套工具：`tools/make-initramfs.py`（Windows 上自制 cpio-newc initramfs）、
+`tools/verify-cpio.py`（校验归档结构）。
+
+```bash
+# 1) 下载 Alpine riscv64 内核与最小根文件系统
+curl -O https://dl-cdn.alpinelinux.org/alpine/v3.24/main/riscv64/linux-lts-6.18.44-r0.apk
+curl -O https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/riscv64/alpine-minirootfs-3.24.1-riscv64.tar.gz
+# apk 本质是 tar.gz：解出 boot/vmlinuz-lts，再 gzip -dc 得到扁平 Image
+mkdir rootfs && tar -xzf alpine-minirootfs-*.tar.gz -C rootfs/
+
+# 2) 自制 initramfs（含 /init 与 dev/console 等控制台设备节点）
+python tools/make-initramfs.py rootfs initramfs.cpio.gz
+python tools/verify-cpio.py initramfs.cpio.gz        # 结构校验
+
+# 3) 启动（约 0.5 MIPS，完整引导需数亿条指令、十几分钟）
+tsx src/cli.ts --bios .../fw_jump.bin \
+  --kernel tmp/alpine/Image-lts --initrd tmp/alpine/initramfs.cpio.gz \
+  --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 300000000 --stats
+```
+
+实测进度（Linux 6.18.44，rv64gc）：内核启动 → 内存管理（DMA32 512MB /
+131072 页）→ SBI TIME/IPI/RFENCE/DBCN/HSM 全部识别 → 定时器与时钟源 →
+VFS / TCP-IP / PCI / USB 子系统 → **initramfs 解包成功**。
+
+排障要点（踩过的坑，避免重复）：
+- `head.S` 的 `relocate_enable_mmu` 用指令页错误当"传送门"（stvec 指向虚拟地址，
+  切页表后靠 trap 进入虚拟地址空间）——**启动初期的一次指令页错误是内核设计，不是 bug**
+- TLB 键必须用 bigint：Sv48 下 `Number(vaddr>>12)*65536+asid` 逼近 2^53，
+  会导致不同虚拟地址碰撞 + `sfence.vma` 按地址失效失灵
+- cpio-newc 的 name 填充按 `110 + len(name+\0)` 对齐（内核 `N_ALIGN(len)=(((len+1)&~3)+2)`，
+  `+2` 补偿 header 110%4=2），且 name 必须以 NUL 结尾，否则分别报
+  "broken padding" 与 "name without nulterm"
+
 ### 命令行
 
 ```bash
