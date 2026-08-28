@@ -183,6 +183,10 @@ test('VirtIO：设备识别与配置空间', () => {
   assert.equal(Number(dev.read(0x04n, 4)), 2, 'MMIO 版本');
   assert.equal(Number(dev.read(0x08n, 4)), 2, 'DeviceID = block');
   assert.equal(Number(dev.read(0x10n, 4)) & 0x2, 0x2, '应支持 SIZE_MAX 特性');
+  // modern 设备必须把 VERSION_1 暴露在高 32 位特性页上
+  dev.write(0x14n, 1n, 4); // DeviceFeaturesSel = 1（高 32 位）
+  assert.equal(Number(dev.read(0x10n, 4)) & 0x1, 0x1, '高 32 位应置 VIRTIO_F_VERSION_1');
+  dev.write(0x14n, 0n, 4); // 复位回低页
   assert.equal(Number(dev.read(0x34n, 4)), 256, 'QueueNumMax');
   assert.equal(dev.read(0x100n, 8), 8n, 'capacity = 8 个扇区');
   assert.equal(Number(dev.read(0x114n, 4)), 512, 'blk_size = 512');

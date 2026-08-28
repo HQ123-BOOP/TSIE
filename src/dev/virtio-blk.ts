@@ -1,20 +1,20 @@
-import { MASK64 } from '../core/bits.ts';
 import type { Bus } from '../mem/bus.ts';
 import type { Device, MemSize } from '../mem/types.ts';
 import type { DiskImage } from './disk.ts';
 import { SECTOR_SIZE } from './disk.ts';
 import type { IrqLine } from './uart.ts';
 
-// --- MMIO 寄存器偏移 ---
+// --- VirtIO-MMIO 寄存器偏移（virtio-v1.x spec §4.2.2，与 U-Boot v2025.01
+//     drivers/virtio/virtio_mmio.h 逐一核对）---
 const R_MAGIC = 0x00;
 const R_VERSION = 0x04;
 const R_DEVICE_ID = 0x08;
 const R_VENDOR_ID = 0x0c;
-const R_HOST_FEATURES = 0x10;
-const R_HOST_FEATURES_SEL = 0x14;
-const R_GUEST_FEATURES = 0x20;
-const R_GUEST_FEATURES_SEL = 0x24;
-const R_GUEST_PAGE_SIZE = 0x28;
+const R_DEVICE_FEATURES = 0x10;
+const R_DEVICE_FEATURES_SEL = 0x14;
+const R_DRIVER_FEATURES = 0x20;
+const R_DRIVER_FEATURES_SEL = 0x24;
+const R_GUEST_PAGE_SIZE = 0x28; // 仅 legacy 使用，modern 忽略
 const R_QUEUE_SEL = 0x30;
 const R_QUEUE_NUM_MAX = 0x34;
 const R_QUEUE_NUM = 0x38;
@@ -25,11 +25,33 @@ const R_INTERRUPT_ACK = 0x64;
 const R_STATUS = 0x70;
 const R_QUEUE_DESC_LOW = 0x80;
 const R_QUEUE_DESC_HIGH = 0x84;
-const R_QUEUE_DRIVER_LOW = 0x90;
-const R_QUEUE_DRIVER_HIGH = 0x94;
-const R_QUEUE_DEVICE_LOW = 0xa0;
-const R_QUEUE_DEVICE_HIGH = 0xa4;
+const R_QUEUE_AVAIL_LOW = 0x90;
+const R_QUEUE_AVAIL_HIGH = 0x94;
+const R_QUEUE_USED_LOW = 0xa0;
+const R_QUEUE_USED_HIGH = 0xa4;
+const R_CONFIG_GENERATION = 0xfc;
 const R_CONFIG = 0x100;
+
+// --- 特性位 ---
+const VIRTIO_F_VERSION_1 = 1n << 32n; // 现代设备必选位（缺少则 U-Boot 判为 legacy）
+const F_SIZE_MAX = 1n << 1n;
+const F_SEG_MAX = 1n << 2n;
+const F_GEOMETRY = 1n << 4n;
+const F_BLK_SIZE = 1n << 6n;
+const F_FLUSH = 1n << 9n;
+const F_TOPOLOGY = 1n << 10n;
+const F_CONFIG_WCE = 1n << 11n;
+
+// 暴露给驱动的 64 位特性集。不暴露 RING_EVENT_IDX（避免 avail/used 环布局变化）。
+const FEATURES_HOST =
+  VIRTIO_F_VERSION_1 |
+  F_SIZE_MAX |
+  F_SEG_MAX |
+  F_GEOMETRY |
+  F_BLK_SIZE |
+  F_FLUSH |
+  F_TOPOLOGY |
+  F_CONFIG_WCE;
 
 // --- 块设备请求类型 ---
 const BLK_T_IN = 0;
@@ -48,29 +70,20 @@ const VRING_DESC_F_WRITE = 2;
 const VRING_DESC_F_INDIRECT = 4;
 const VRING_AVAIL_F_NO_INTERRUPT = 1;
 
-const FEATURES_HOST =
-  (1 << 1) | // SIZE_MAX
-  (1 << 2) | // SEG_MAX
-  (1 << 4) | // GEOMETRY
-  (1 << 6) | // BLK_SIZE
-  (1 << 9) | // FLUSH
-  (1 << 10) | // TOPOLOGY
-  (1 << 11); // CONFIG_WCE
-
 const QUEUE_SIZE = 256;
 
 interface VQueue {
   ready: boolean;
   num: number;
   desc: bigint;
-  driver: bigint;
-  device: bigint;
+  driver: bigint; // avail 环
+  device: bigint; // used 环
   lastAvail: number;
 }
 
 /**
- * VirtIO-MMIO 块设备（legacy 请求格式 + 现代 MMIO 寄存器布局）。
- * 可挂载 raw 磁盘镜像作为 Linux 的根文件系统。
+ * VirtIO-MMIO 块设备（virtio-v1.x，寄存器布局与 U-Boot virtio_mmio.h 一致）。
+ * 可挂载 raw 磁盘镜像作为 U-Boot/Linux 的根文件系统。
  */
 export class VirtioBlk implements Device {
   readonly name = 'virtio-blk';
@@ -80,9 +93,9 @@ export class VirtioBlk implements Device {
   private disk: DiskImage;
   private irq: IrqLine | undefined;
 
-  private status = 0n;
+  private status = 0;
   private hostFeaturesSel = 0;
-  private guestFeatures = 0;
+  private guestFeatures = 0n;
   private guestFeaturesSel = 0;
   private queueSel = 0;
   private interruptStatus = 0;
@@ -90,11 +103,15 @@ export class VirtioBlk implements Device {
   private notifyStats = 0;
   private reqCount = 0;
 
+  /** 调试：记录 MMIO 寄存器访问（供固件 probe 追踪） */
+  trace = false;
+  readonly traceLog: string[] = [];
+
   constructor(bus: Bus, disk: DiskImage, irq?: IrqLine) {
     this.bus = bus;
     this.disk = disk;
     this.irq = irq;
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 1; i++) {
       this.queues.push({ ready: false, num: QUEUE_SIZE, desc: 0n, driver: 0n, device: 0n, lastAvail: 0 });
     }
   }
@@ -103,53 +120,77 @@ export class VirtioBlk implements Device {
     return this.queues[this.queueSel] ?? this.queues[0];
   }
 
+  private traceOp(o: number, isWrite: boolean, value?: bigint): void {
+    if (!this.trace || this.traceLog.length >= 3000) return;
+    this.traceLog.push(
+      `${isWrite ? 'W' : 'R'} ${'0x' + o.toString(16).padStart(2, '0')}${isWrite ? ' = 0x' + (value ?? 0n).toString(16) : ''}`,
+    );
+  }
+
   // ------------------------------------------------------------------
   // MMIO 寄存器
   // ------------------------------------------------------------------
 
   read(offset: bigint, size: MemSize): bigint {
     const o = Number(offset);
+    this.traceOp(o, false);
     if (o >= R_CONFIG) return this.readConfig(o - R_CONFIG, size);
     switch (o) {
       case R_MAGIC: return 0x74726976n; // 'virt'
       case R_VERSION: return 2n;
       case R_DEVICE_ID: return 2n; // block device
       case R_VENDOR_ID: return 0x554d4551n; // 'QEMU'
-      case R_HOST_FEATURES: return BigInt(this.hostFeaturesSel === 0 ? FEATURES_HOST : 0);
-      case R_HOST_FEATURES_SEL: return BigInt(this.hostFeaturesSel);
-      case R_GUEST_FEATURES: return BigInt(this.guestFeaturesSel === 0 ? this.guestFeatures : 0);
+      case R_DEVICE_FEATURES:
+        return this.hostFeaturesSel === 0
+          ? FEATURES_HOST & 0xffffffffn
+          : (FEATURES_HOST >> 32n) & 0xffffffffn;
+      case R_DEVICE_FEATURES_SEL: return BigInt(this.hostFeaturesSel);
+      case R_DRIVER_FEATURES:
+        return this.guestFeaturesSel === 0
+          ? this.guestFeatures & 0xffffffffn
+          : (this.guestFeatures >> 32n) & 0xffffffffn;
+      case R_DRIVER_FEATURES_SEL: return BigInt(this.guestFeaturesSel);
+      case R_QUEUE_SEL: return BigInt(this.queueSel);
       case R_QUEUE_NUM_MAX: return BigInt(QUEUE_SIZE);
       case R_QUEUE_NUM: return BigInt(this.curQueue().num);
       case R_QUEUE_READY: return this.curQueue().ready ? 1n : 0n;
+      case R_QUEUE_NOTIFY: return 0n;
       case R_INTERRUPT_STATUS: return BigInt(this.interruptStatus);
-      case R_STATUS: return this.status;
+      case R_INTERRUPT_ACK: return 0n;
+      case R_STATUS: return BigInt(this.status);
       case R_QUEUE_DESC_LOW: return this.curQueue().desc & 0xffffffffn;
       case R_QUEUE_DESC_HIGH: return (this.curQueue().desc >> 32n) & 0xffffffffn;
-      case R_QUEUE_DRIVER_LOW: return this.curQueue().driver & 0xffffffffn;
-      case R_QUEUE_DRIVER_HIGH: return (this.curQueue().driver >> 32n) & 0xffffffffn;
-      case R_QUEUE_DEVICE_LOW: return this.curQueue().device & 0xffffffffn;
-      case R_QUEUE_DEVICE_HIGH: return (this.curQueue().device >> 32n) & 0xffffffffn;
+      case R_QUEUE_AVAIL_LOW: return this.curQueue().driver & 0xffffffffn;
+      case R_QUEUE_AVAIL_HIGH: return (this.curQueue().driver >> 32n) & 0xffffffffn;
+      case R_QUEUE_USED_LOW: return this.curQueue().device & 0xffffffffn;
+      case R_QUEUE_USED_HIGH: return (this.curQueue().device >> 32n) & 0xffffffffn;
+      case R_CONFIG_GENERATION: return 0n;
       default: return 0n;
     }
   }
 
   write(offset: bigint, value: bigint, _size: MemSize): void {
     const o = Number(offset);
+    this.traceOp(o, true, value);
     const v = Number(value & 0xffffffffn);
     switch (o) {
-      case R_HOST_FEATURES_SEL:
-        this.hostFeaturesSel = v;
+      case R_DEVICE_FEATURES_SEL:
+        this.hostFeaturesSel = v & 1;
         return;
-      case R_GUEST_FEATURES:
-        if (this.guestFeaturesSel === 0) this.guestFeatures = v;
+      case R_DRIVER_FEATURES:
+        if (this.guestFeaturesSel === 0) {
+          this.guestFeatures = (this.guestFeatures & ~0xffffffffn) | (value & 0xffffffffn);
+        } else {
+          this.guestFeatures = (this.guestFeatures & 0xffffffffn) | ((value & 0xffffffffn) << 32n);
+        }
         return;
-      case R_GUEST_FEATURES_SEL:
-        this.guestFeaturesSel = v;
+      case R_DRIVER_FEATURES_SEL:
+        this.guestFeaturesSel = v & 1;
         return;
       case R_GUEST_PAGE_SIZE:
-        return;
+        return; // legacy only，忽略
       case R_QUEUE_SEL:
-        this.queueSel = v;
+        this.queueSel = v < this.queues.length ? v : 0;
         return;
       case R_QUEUE_NUM:
         if (v > 0 && v <= QUEUE_SIZE) this.curQueue().num = v;
@@ -169,8 +210,8 @@ export class VirtioBlk implements Device {
         if (this.interruptStatus === 0) this.irq?.(false);
         return;
       case R_STATUS:
-        this.status = BigInt(v);
-        if (v === 0) this.reset();
+        this.status = v & 0xff;
+        if (this.status === 0) this.reset();
         return;
       case R_QUEUE_DESC_LOW:
         this.curQueue().desc = (this.curQueue().desc & ~0xffffffffn) | BigInt(v);
@@ -178,16 +219,16 @@ export class VirtioBlk implements Device {
       case R_QUEUE_DESC_HIGH:
         this.curQueue().desc = (this.curQueue().desc & 0xffffffffn) | (BigInt(v) << 32n);
         return;
-      case R_QUEUE_DRIVER_LOW:
+      case R_QUEUE_AVAIL_LOW:
         this.curQueue().driver = (this.curQueue().driver & ~0xffffffffn) | BigInt(v);
         return;
-      case R_QUEUE_DRIVER_HIGH:
+      case R_QUEUE_AVAIL_HIGH:
         this.curQueue().driver = (this.curQueue().driver & 0xffffffffn) | (BigInt(v) << 32n);
         return;
-      case R_QUEUE_DEVICE_LOW:
+      case R_QUEUE_USED_LOW:
         this.curQueue().device = (this.curQueue().device & ~0xffffffffn) | BigInt(v);
         return;
-      case R_QUEUE_DEVICE_HIGH:
+      case R_QUEUE_USED_HIGH:
         this.curQueue().device = (this.curQueue().device & 0xffffffffn) | (BigInt(v) << 32n);
         return;
       default:
@@ -196,26 +237,33 @@ export class VirtioBlk implements Device {
   }
 
   reset(): void {
-    for (const q of this.queues) q.ready = false;
+    for (const q of this.queues) {
+      q.ready = false;
+      q.lastAvail = 0;
+    }
     this.interruptStatus = 0;
-    this.guestFeatures = 0;
+    this.guestFeatures = 0n;
+    this.guestFeaturesSel = 0;
     this.queueSel = 0;
+    this.status = 0;
   }
 
-  private readConfig(o: number, size: MemSize): bigint {
+  private readConfig(o: number, _size: MemSize): bigint {
     const cap = this.disk.sectorCount;
     switch (o) {
-      case 0x00: return cap & MASK64; // capacity
-      case 0x08: return 0n; // size_max (u32)
+      case 0x00: return cap & 0xffffffffn; // capacity low
+      case 0x04: return (cap >> 32n) & 0xffffffffn; // capacity high
+      case 0x08: return 0n; // size_max
       case 0x0c: return BigInt(QUEUE_SIZE - 2); // seg_max
-      case 0x10: { // geometry
+      case 0x10: {
+        // geometry: cylinders(u16) heads(u8) sectors(u8)
         const cyl = Number(cap) > 0xffff ? 0xffff : Number(cap);
         return BigInt((cyl << 16) | (16 << 8) | 63);
       }
       case 0x14: return 512n; // blk_size
       case 0x18: return 0n; // topology
       case 0x20: return 1n; // writeback
-      default: return size === 1 ? 0n : 0n;
+      default: return 0n;
     }
   }
 
@@ -301,7 +349,7 @@ export class VirtioBlk implements Device {
     const chain = this.collectChain(q, headId);
     if (chain.length < 2) return;
 
-    // 描述符 0 是请求头（legacy 布局）：type(4) + reserved(4) + sector(8)
+    // 描述符 0 是请求头（布局）：type(4) + reserved(4) + sector(8)
     const type = this.mem32(chain[0].addr);
     const sector = this.mem64(chain[0].addr + 8n);
 
@@ -313,7 +361,7 @@ export class VirtioBlk implements Device {
         break;
       }
     }
-    const dataOut: typeof chain = []; // guest 可读（主机写）
+    const dataOut: typeof chain = []; // guest 只读（主机写）
     const dataIn: typeof chain = []; // guest 可写（主机读）
     for (let i = 1; i < chain.length; i++) {
       if (i === statusDesc) continue;

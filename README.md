@@ -57,6 +57,36 @@ ACLINT 定时器、8250 串口、16 个 PMP），并把控制权移交给 S 模�
 源码与编译方式见官方仓库：<https://github.com/riscv-software-src/opensbi>（国内可用
 <https://gitee.com/tinylab/qemu-opensbi.git> 镜像）。
 
+### 启动 U-Boot（已验证 ✅）
+
+可以直接运行真实的 U-Boot（作为 S 模式负载），并让它操作 VirtIO 块设备：
+
+```bash
+# 从 Debian 的 u-boot-qemu 包解出 qemu-riscv64_smode/uboot.elf（放 tmp/，GPL-2.0 不入库）
+# 挂一块 raw 磁盘，用 --script 往 U-Boot 控制台注入命令：
+tsx src/cli.ts --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin \
+  --kernel tmp/uboot/uboot.elf --disk tmp/disk.raw --script <cmd-file> -n 60000000
+```
+
+`--script` 会把文件里每行当作控制台命令逐条喂入（带 autoboot 停止键，
+用于交互式固件）。实测输出：
+
+```
+=> virtio scan
+=> virtio info
+Device 0: QEMU VirtIO Block Device
+            Capacity: 8.0 MB = 0.0 GB (16384 x 512)
+=> virtio write 0x80200000 0 1      # 写盘
+1 blocks written: OK
+=> virtio read 0x80300000 0 1       # 读盘
+1 blocks read: OK
+```
+
+VirtIO 块设备按 virtio-v1.x MMIO 规范实现（寄存器布局与 U-Boot `virtio_mmio.h`
+逐一核对），并声明 `VIRTIO_F_VERSION_1`，因此 modern 驱动可以直接识别。
+U-Boot 下载：Debian 包 `u-boot-qemu`（`ftp.debian.org/debian/pool/main/u/u-boot/`），
+源码：<https://github.com/u-boot/u-boot>（GPL-2.0，产物勿提交入 Apache-2.0 仓库）。
+
 ### 命令行
 
 ```bash

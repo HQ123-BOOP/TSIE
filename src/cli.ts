@@ -24,6 +24,7 @@ interface Args {
   dumpDtb?: string;
   stats: boolean;
   misaligned: 'trap' | 'slow';
+  script?: string;
   help: boolean;
 }
 
@@ -46,6 +47,7 @@ ts-riscv64 —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
       --trace-from <addr>   从指定地址开始打印
       --dump-dtb <file>     把生成的设备树写到文件
       --stats               运行结束后打印统计信息
+      --script <file>        把文件中的每一行作为控制台输入逐条喂入（用于交互式固件）
       --misaligned <mode>   非对齐访存策略：trap（默认）或 slow
   -h, --help                显示帮助
 `;
@@ -130,6 +132,9 @@ function parseArgs(argv: string[]): Args {
       case '--stats':
         args.stats = true;
         break;
+      case '--script':
+        args.script = next();
+        break;
       case '--misaligned': {
         const v = next();
         if (v !== 'trap' && v !== 'slow') throw new Error('--misaligned 只能是 trap 或 slow');
@@ -206,7 +211,38 @@ function main(): number {
       `DTB @ 0x${machine.dtbAddress.toString(16)}\n`,
   );
 
-  const stats = machine.run({ maxInstructions: args.maxInstructions });
+  const scriptLines = args.script
+    ? (existsSync(args.script)
+        ? ['', ...readFileSync(args.script, 'utf8')
+            .split('\n')
+            .map((s) => s.trimEnd())]
+        : (process.stderr.write(`警告: --script 文件不存在: ${args.script}\n`), []))
+    : [];
+  let sentLines = 0;
+  const SCRIPT_FIRST_AT = 12_000_000;
+  const SCRIPT_STRIDE = 6_000_000;
+  // 在 autoboot 倒计时窗口内多发几个停止键，确保固件停在交互提示符
+  const AUTOBOOT_STOPS = [200_000, 600_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000];
+  let stopIdx = 0;
+  const feedScript = (count: number): void => {
+    while (stopIdx < AUTOBOOT_STOPS.length && count >= AUTOBOOT_STOPS[stopIdx]) {
+      machine.uart.pushString('\r');
+      stopIdx++;
+    }
+    if (sentLines >= scriptLines.length) return;
+    if (count >= SCRIPT_FIRST_AT + sentLines * SCRIPT_STRIDE) {
+      machine.uart.pushString(scriptLines[sentLines] + '\r');
+      sentLines++;
+    }
+  };
+
+  const stats = machine.run({
+    maxInstructions: args.maxInstructions,
+    onStep: (_, count) => {
+      feedScript(count);
+      return undefined;
+    },
+  });
 
   if (args.stats || !machine.cpu.halted) {
     const mips = stats.ips / 1e6;
