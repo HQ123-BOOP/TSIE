@@ -1,4 +1,6 @@
 .workbuddy/
+# Linux 内核为 GPL-2.0，不得合入本项目（Apache-2.0）
+linux-image/
 firmware/
 node_modules/
 dist/
