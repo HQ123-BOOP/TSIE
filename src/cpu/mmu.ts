@@ -227,16 +227,15 @@ export class Mmu {
     }
   }
 
-  /** 取指令字（32 位） */
+  /**
+   * 取指令字（32 位）。
+   * RVC（IALIGN=16）下 32 位指令允许 2 字节对齐，且可跨页——
+   * 因此拆成两个半字分别翻译，奇数地址的对齐检查由 CPU 的取指入口负责。
+   */
   fetch32(vaddr: bigint): number | null {
     const lo = this.fetch16(vaddr);
     if (lo === null) return null;
     if ((lo & 3) !== 3) return lo;
-    if ((vaddr & 0x3n) !== 0n) {
-      this.faultCause = Exc.InstAddrMisaligned;
-      this.faultTval = vaddr & ~0x1n;
-      return null;
-    }
     const hi = this.fetch16(vaddr + 2n);
     if (hi === null) return null;
     return (lo | (hi << 16)) >>> 0;

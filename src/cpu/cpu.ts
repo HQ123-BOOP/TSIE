@@ -197,6 +197,12 @@ export class Cpu {
     this.nextPc = pc + 4n;
     this.trapTaken = false;
 
+    // 指令地址必须至少 2 字节对齐（RVC IALIGN=16）
+    if ((pc & 0x1n) !== 0n) {
+      this.takeException(Exc.InstAddrMisaligned, pc);
+      return;
+    }
+
     const lo = this.mmu.fetch16(pc);
     if (lo === null) {
       this.takeException(this.mmu.faultCause, this.mmu.faultTval);
@@ -210,10 +216,7 @@ export class Cpu {
       if (!this.trapTaken) this.pc = this.nextPc;
       return;
     }
-    if ((pc & 0x3n) !== 0n) {
-      this.takeException(Exc.InstAddrMisaligned, pc);
-      return;
-    }
+    // RVC（IALIGN=16）下 32 位指令允许 2 字节对齐；step() 入口已保证 pc 为偶数
     const hi = this.mmu.fetch16(pc + 2n);
     if (hi === null) {
       this.takeException(this.mmu.faultCause, this.mmu.faultTval);

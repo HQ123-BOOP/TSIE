@@ -35,7 +35,7 @@ import {
   li,
   ld,
 } from '../tools/encoder.ts';
-import { TEST_BASE, halt, makeCpu, peek } from './harness.ts';
+import { TEST_BASE, halt, makeCpu, pcOf, peek, runToPc } from './harness.ts';
 
 const U = (v: bigint | number) => BigInt.asUintN(64, BigInt(v));
 
@@ -199,4 +199,24 @@ test('C.ADDI4SPN 的 nzimm=0 属于非法指令', () => {
   h.cpu.step();
   // 非法指令会陷入 M 模式（mtvec=0）
   assert.equal(h.cpu.pc, 0n);
+});
+
+test('IALIGN=16：2-mod-4 地址上的 32 位指令合法', () => {
+  // C 指令后紧跟 32 位指令，地址为 2-mod-4，不应产生指令地址非对齐异常
+  const h = makeCpu([c_li(1, 7), addi(2, 1, 1), ...halt()]);
+  h.run(300);
+  assert.equal(h.cpu.halted, true);
+  assert.equal(h.cpu.csr.read(0x342) ?? 0n, 0n, '不应产生任何异常');
+  assert.equal(h.x(2), 8n);
+});
+
+test('JALR 清除目标地址 bit0（RVC IALIGN=16 语义）', () => {
+  // jalr ra, 0(x1)：目标地址 bit0=1 时会被清零，落点为 2 字节对齐地址
+  const target = (TEST_BASE + 0x500n) | 1n;
+  const setup = li(1, target);
+  const h = makeCpu([...setup, 0x000080e7]); // jalr ra, 0(x1)
+  runToPc(h, pcOf(setup.length));
+  h.cpu.step();
+  assert.equal(h.cpu.pc, TEST_BASE + 0x500n, 'JALR 应清除 bit0');
+  assert.equal(h.cpu.csr.read(0x342) ?? 0n, 0n, '不应产生异常');
 });

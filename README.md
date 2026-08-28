@@ -26,6 +26,29 @@ npm run demo       # 裸机 "Hello, RISC-V 64!"（经内建 SBI 输出）
 npm run bench      # 性能基准
 ```
 
+### 启动 OpenSBI（已验证 ✅）
+
+模拟器可以直接运行真实的 OpenSBI 固件（v1.9 实测通过）：
+
+```bash
+# 下载预编译固件（约 30 MB，包含所有平台）
+curl -L -o firmware/opensbi.tar.xz \
+  https://github.com/riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz
+# 解压出 firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin
+
+# 仅运行固件（打印 OpenSBI banner 与平台信息）
+tsx src/cli.ts --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin
+
+# 固件 + 内核（fw_jump 默认跳转到 0x80200000，DTB 期望位于 0x82200000，与本模拟器一致）
+tsx src/cli.ts --bios .../fw_jump.bin --kernel hello-sbi.bin
+```
+
+OpenSBI 会正确识别本模拟器（`Platform Name: ts-riscv64,virt`、`rv64imafdc`、
+ACLINT 定时器、8250 串口、16 个 PMP），并把控制权移交给 S 模式内核。
+
+源码与编译方式见官方仓库：<https://github.com/riscv-software-src/opensbi>（国内可用
+<https://gitee.com/tinylab/qemu-opensbi.git> 镜像）。
+
 ### 命令行
 
 ```bash

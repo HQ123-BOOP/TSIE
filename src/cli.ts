@@ -158,7 +158,7 @@ function main(): number {
     process.stderr.write(`${(e as Error).message}\n${HELP}`);
     return 2;
   }
-  if (args.help || !args.kernel) {
+  if (args.help || (!args.kernel && !args.bios)) {
     process.stdout.write(HELP);
     return args.help ? 0 : 2;
   }
@@ -170,9 +170,11 @@ function main(): number {
       bios: args.bios ? readFile(args.bios) : undefined,
       disk: args.disk ? new FileDisk(args.disk) : undefined,
       initrd: args.initrd ? readFile(args.initrd) : undefined,
-      kernel: args.loadAt
-        ? { data: readFile(args.kernel), loadAt: args.loadAt }
-        : readFile(args.kernel),
+      kernel: args.kernel
+        ? args.loadAt
+          ? { data: readFile(args.kernel), loadAt: args.loadAt }
+          : readFile(args.kernel)
+        : undefined,
       cmdline: args.append,
       misaligned: args.misaligned,
     });
