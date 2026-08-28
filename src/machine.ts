@@ -175,7 +175,9 @@ export class Machine {
     this.cpu.csr.writeRaw(CSR.MIDELEG, (1n << 1n) | (1n << 5n) | (1n << 9n));
     // 常规异常委派给 S 模式；S 模式 ECALL（SBI 调用）保留在 M 模式
     this.cpu.csr.writeRaw(CSR.MEDELEG, 0xfdffn);
-    // M 模式异常入口：指向一段死循环（正常不会到达）
+    // 与 OpenSBI 一致：M 模式打开定时器与软件中断，再由 SBI 转发给 S 模式
+    this.cpu.csr.writeRaw(CSR.MIE, (1n << BigInt(Irq.MTimer)) | (1n << BigInt(Irq.MSoftware)));
+    // M 模式异常入口：指向 RAM 起始（正常不会到达）
     this.cpu.csr.writeRaw(CSR.MTVEC, this.ramBase);
     this.cpu.csr.writeRaw(CSR.MSCRATCH, 0n);
   }
@@ -325,23 +327,23 @@ export class Machine {
   // 中断同步与执行
   // ------------------------------------------------------------------
 
-  /** 把 CLINT / PLIC 的挂起状态同步到 CPU 中断线 */
+  /** 把 CLINT / PLIC 的挂起状态同步到 CPU 中断线（带变化检测，可逐指令调用） */
   syncIrqs(): void {
     let lines = 0n;
     if (this.clint.timerPending) lines |= 1n << BigInt(Irq.MTimer);
     if (this.clint.softwarePending) lines |= 1n << BigInt(Irq.MSoftware);
-    if (this.plicExternalPending(0)) lines |= 1n << BigInt(Irq.MExternal);
-    if (this.plicExternalPending(1)) lines |= 1n << BigInt(Irq.SExternal);
+    if (this.plicLevelM) lines |= 1n << BigInt(Irq.MExternal);
+    if (this.plicLevelS) lines |= 1n << BigInt(Irq.SExternal);
+    if (lines === this.irqLinesValue) return;
+    this.irqLinesValue = lines;
     this.cpu.setIrqLines(lines);
   }
+
+  private irqLinesValue = 0n;
 
   /** PLIC 两个上下文（0=M，1=S）的中断输出电平 */
   private plicLevelM = false;
   private plicLevelS = false;
-
-  private plicExternalPending(ctx: number): boolean {
-    return ctx === 0 ? this.plicLevelM : this.plicLevelS;
-  }
 
   /** 推进设备状态（mtime 等） */
   private tick(instructions: number): void {
@@ -352,12 +354,14 @@ export class Machine {
   /** 运行若干条指令 */
   run(opts: RunOptions = {}): MachineStats {
     const limit = opts.maxInstructions ?? Number.POSITIVE_INFINITY;
-    const started = Date.now();
+    const started = performance.now();
     let count = 0;
     const cpu = this.cpu;
     const TICK_MASK = 0x3f;
 
     while (count < limit && !cpu.halted) {
+      // 逐指令同步中断线：定时器/软件中断可能在任意时刻到期
+      this.syncIrqs();
       cpu.step();
       count++;
       if ((count & TICK_MASK) === 0) {
@@ -365,18 +369,17 @@ export class Machine {
         if (opts.onStep && opts.onStep(cpu, count) === false) break;
       }
       if (cpu.wfi) {
-        // 空闲等待时加速时间推进，避免空转
+        // 空闲等待时加速时间推进，避免无意义空转
         this.clint.mtime += 16n;
-        this.syncIrqs();
       }
     }
     this.tick(count & TICK_MASK);
 
-    const seconds = (Date.now() - started) / 1000;
+    const seconds = (performance.now() - started) / 1000;
     return {
       instructions: count,
       seconds,
-      ips: seconds > 0 ? count / seconds : 0,
+      ips: seconds > 0 ? count / seconds : count,
     };
   }
 

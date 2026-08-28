@@ -145,6 +145,10 @@ export const csrrci = (rd: Reg, csr: number, uimm: number) => I(OP_SYSTEM, rd, 7
 export const csrr = (rd: Reg, csr: number) => csrrs(rd, csr, 0);
 /** 伪指令：写 CSR */
 export const csrw = (csr: number, rs1: Reg) => csrrw(0, csr, rs1);
+/** 伪指令：置位 CSR */
+export const csrs = (csr: number, rs1: Reg) => csrrs(0, csr, rs1);
+/** 伪指令：清位 CSR */
+export const csrc = (csr: number, rs1: Reg) => csrrc(0, csr, rs1);
 
 // ---------------- M 扩展 ----------------
 export const mul = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 0, rs1, rs2, 0x01);

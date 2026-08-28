@@ -39,6 +39,7 @@ export class Plic implements Device {
     this.threshold = new Array(numContexts).fill(0);
     this.claimed = new Array(numContexts).fill(0);
     this.irqLines = new Array(numContexts).fill(undefined);
+    this.lastLevel = new Array(numContexts).fill(false);
   }
 
   /** 绑定某上下文的中断输出线 */
