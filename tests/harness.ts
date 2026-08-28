@@ -29,7 +29,8 @@ export function makeCpu(program: number[], opts: { misaligned?: 'trap' | 'slow' 
   const cpu = new Cpu(bus, { misaligned: opts.misaligned ?? 'trap' });
   bus.addDevice(TEST_HALT, new TestFinisher(() => cpu.halt('test-finisher', 0)));
   cpu.reset(TEST_BASE);
-  ram.writeWords(0n, program);
+  // 按指令实际长度（2 或 4 字节）写入程序
+  ram.writeProgram(0n, program);
   const h: Harness = {
     cpu,
     bus,

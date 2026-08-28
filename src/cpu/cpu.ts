@@ -204,6 +204,7 @@ export class Cpu {
     if ((lo & 3) !== 3) {
       this.instret++;
       if (this.traceEnabled) this.emitTrace(pc, lo, 2);
+      this.nextPc = pc + 2n; // 压缩指令占 2 字节（跳转指令会覆盖它）
       this.execCompressed(lo);
       if (!this.trapTaken) this.pc = this.nextPc;
       return;

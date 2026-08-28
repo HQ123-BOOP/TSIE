@@ -70,4 +70,29 @@ export class RAM implements Device {
     let idx = Number(offset) >>> 2;
     for (let i = 0; i < words.length; i++) this.u32[idx++] = words[i] >>> 0;
   }
+
+  /**
+   * 按指令实际长度写入程序：低 2 位为 11 视为 32 位指令，否则为 16 位压缩指令。
+   * 与真实汇编器一致：32 位指令会先对齐到 4 字节（必要时插入 C.NOP）。
+   * @returns 写入的字节数
+   */
+  writeProgram(offset: bigint, words: ArrayLike<number>): number {
+    let at = Number(offset);
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i] >>> 0;
+      if ((w & 3) === 3) {
+        if ((at & 3) !== 0) {
+          // 插入 C.NOP 对齐
+          this.view.setUint16(at, 0x0001, true);
+          at += 2;
+        }
+        this.view.setUint32(at, w, true);
+        at += 4;
+      } else {
+        this.view.setUint16(at, w & 0xffff, true);
+        at += 2;
+      }
+    }
+    return at - Number(offset);
+  }
 }

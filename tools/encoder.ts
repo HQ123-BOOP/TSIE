@@ -185,9 +185,6 @@ export const fld = (rd: Reg, rs1: Reg, imm = 0) => I(OP_LOAD_FP, rd, 3, rs1, imm
 export const fsw = (rs1: Reg, rs2: Reg, imm = 0) => S(OP_STORE_FP, 2, rs1, rs2, imm);
 export const fsd = (rs1: Reg, rs2: Reg, imm = 0) => S(OP_STORE_FP, 3, rs1, rs2, imm);
 
-function fpFmt(rm: number, rd: Reg, rs1: Reg, rs2: Reg, f7: number): number {
-  return R(OP_FP, rd, rm & 0x7, rs1, rs2, f7);
-}
 export const fadds = (rd: Reg, rs1: Reg, rs2: Reg, rm = 0) => R(OP_FP, rd, rm, rs1, rs2, 0x00);
 export const fsubs = (rd: Reg, rs1: Reg, rs2: Reg, rm = 0) => R(OP_FP, rd, rm, rs1, rs2, 0x04);
 export const fmuls = (rd: Reg, rs1: Reg, rs2: Reg, rm = 0) => R(OP_FP, rd, rm, rs1, rs2, 0x08);
@@ -230,7 +227,11 @@ function fma(op: number, rd: Reg, rm: number, rs1: Reg, rs2: Reg, rs3: Reg, fmt:
 export const fmadds = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_MADD, rd, rm, rs1, rs2, rs3, 0);
 export const fmaddd = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_MADD, rd, rm, rs1, rs2, rs3, 1);
 export const fmsubs = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_MSUB, rd, rm, rs1, rs2, rs3, 0);
+export const fmsubd = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_MSUB, rd, rm, rs1, rs2, rs3, 1);
+export const fnmsubs = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_NMSUB, rd, rm, rs1, rs2, rs3, 0);
+export const fnmsubd = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_NMSUB, rd, rm, rs1, rs2, rs3, 1);
 export const fnmadds = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_NMADD, rd, rm, rs1, rs2, rs3, 0);
+export const fnmaddd = (rd: Reg, rs1: Reg, rs2: Reg, rs3: Reg, rm = 0) => fma(OP_NMADD, rd, rm, rs1, rs2, rs3, 1);
 
 // ---------------- C 扩展（RV64C 常用子集） ----------------
 function ci(op: number, f3: number, rdFull: number, imm6: number): number {
