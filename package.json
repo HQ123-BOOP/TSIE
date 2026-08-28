@@ -13,7 +13,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "tsx src/cli.ts",
     "test": "node --import tsx --test tests/*.test.ts",
-    "bench": "tsx tools/bench.ts"
+    "bench": "tsx tools/bench.ts",
+    "demo": "tsx examples/hello.ts"
   },
   "keywords": [
     "riscv",

@@ -141,9 +141,15 @@ interface CsrDef {
 /**
  * CSR 寄存器文件：实现 WARL 掩码、只读保护、别名（sstatus/mstatus）与副作用钩子。
  */
+const CSR_SPACE = 4096;
+
+/**
+ * CSR 寄存器文件：实现 WARL 掩码、只读保护、别名（sstatus/mstatus）与副作用钩子。
+ * 内部用定长数组存储（CSR 地址空间只有 12 位），热路径上比 Map 快数倍。
+ */
 export class CsrFile {
-  private regs = new Map<number, bigint>();
-  private defs = new Map<number, CsrDef>();
+  private regs: Array<bigint | undefined> = new Array(CSR_SPACE);
+  private defs: Array<CsrDef | undefined> = new Array(CSR_SPACE);
   private counters: CounterSource = {
     cycle: () => 0n,
     time: () => 0n,
@@ -161,26 +167,26 @@ export class CsrFile {
   }
 
   define(addr: number, initial: bigint, def: CsrDef): void {
-    this.defs.set(addr, def);
-    this.regs.set(addr, initial & def.mask);
+    this.defs[addr] = def;
+    this.regs[addr] = initial & def.mask;
   }
 
   /** 读取 CSR；返回 null 表示该 CSR 未实现（应触发非法指令） */
   read(addr: number): bigint | null {
-    const def = this.defs.get(addr);
-    if (!def) return null;
-    const cur = this.regs.get(addr) ?? 0n;
+    const def = this.defs[addr];
+    if (def === undefined) return null;
+    const cur = this.regs[addr] ?? 0n;
     return (def.read ? def.read(cur) : cur) & def.mask;
   }
 
   /** 直接写（绕过特权检查），返回值表示是否成功 */
   writeRaw(addr: number, value: bigint): boolean {
-    const def = this.defs.get(addr);
-    if (!def) return false;
-    const cur = this.regs.get(addr) ?? 0n;
+    const def = this.defs[addr];
+    if (def === undefined) return false;
+    const cur = this.regs[addr] ?? 0n;
     let next = value & def.mask;
     if (def.write) next = def.write(next, cur) & def.mask;
-    this.regs.set(addr, next & MASK64);
+    this.regs[addr] = next & MASK64;
     return true;
   }
 
@@ -188,13 +194,13 @@ export class CsrFile {
   canWrite(addr: number, priv: PrivLevel): boolean {
     const level = (addr >> 8) & 3;
     if (priv < level) return false;
-    const def = this.defs.get(addr);
-    if (!def) return false;
+    const def = this.defs[addr];
+    if (def === undefined) return false;
     return !def.readOnly;
   }
 
   has(addr: number): boolean {
-    return this.defs.has(addr);
+    return this.defs[addr] !== undefined;
   }
 
   /** 读取特权级要求 */
@@ -337,9 +343,10 @@ export class CsrFile {
   /** 调试用：快照所有 CSR */
   snapshot(): Map<number, bigint> {
     const m = new Map<number, bigint>();
-    for (const [k] of this.defs) {
-      const v = this.read(k);
-      if (v !== null) m.set(k, v);
+    for (let addr = 0; addr < CSR_SPACE; addr++) {
+      if (this.defs[addr] === undefined) continue;
+      const v = this.read(addr);
+      if (v !== null) m.set(addr, v);
     }
     return m;
   }
