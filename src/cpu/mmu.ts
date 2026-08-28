@@ -47,7 +47,18 @@ export class Mmu {
   faultCause = -1;
   faultTval = 0n;
 
-  private tlb = new Map<number, TlbEntry>();
+  /**
+   * TLB：键用 bigint 保存。
+   * 早期实现用 Number(vaddr>>12)*65536+asid，在 Sv48 下可达 2^52，
+   * 逼近 Number 安全整数上限（2^53）：不同虚拟地址会碰撞成同一个键，
+   * 且 `key >>> 16`（32 位运算）会截断高位，导致 sfence.vma 按地址失效失灵。
+   */
+  private tlb = new Map<bigint, TlbEntry>();
+
+  /** TLB 键：高 48 位为 VPN，低 16 位为 ASID */
+  private tlbKey(vaddr: bigint, asid: number): bigint {
+    return (vaddr >> PAGE_SHIFT) * 65536n + BigInt(asid);
+  }
   /** TLB 容量（超出后整体清空，简单有效） */
   maxEntries = 4096;
 
@@ -72,7 +83,7 @@ export class Mmu {
       return;
     }
     for (const [key, e] of this.tlb) {
-      if (vaddr !== undefined && BigInt(key >>> 16) !== vaddr >> PAGE_SHIFT) continue;
+      if (vaddr !== undefined && key >> 16n !== vaddr >> PAGE_SHIFT) continue;
       if (asid !== undefined && e.asid !== asid && !(e.global && vaddr === undefined)) continue;
       this.tlb.delete(key);
     }
@@ -142,7 +153,7 @@ export class Mmu {
     const vaBits = mode === 8 ? 39 : mode === 9 ? 48 : 0;
     if (vaBits === 0 || !this.isCanonical(vaddr, vaBits)) return this.fault(faultCause, vaddr);
 
-    const key = Number(vaddr >> PAGE_SHIFT) * 65536 + asid;
+    const key = this.tlbKey(vaddr, asid);
     const hit = this.tlb.get(key);
     if (hit) {
       // 写入但 D 位未置位 → 需要回内存更新，直接走慢路径
@@ -214,7 +225,7 @@ export class Mmu {
       const paddr = (ppn << PAGE_SHIFT) | (vaddr & ((1n << BigInt(shift)) - 1n));
 
       if (this.tlb.size >= this.maxEntries) this.tlb.clear();
-      this.tlb.set(Number(vaddr >> PAGE_SHIFT) * 65536 + asid, {
+      this.tlb.set(this.tlbKey(vaddr, asid), {
         base: ppn << PAGE_SHIFT,
         mask: (1n << BigInt(shift)) - 1n,
         prot: Number(updated & 0xffn),
