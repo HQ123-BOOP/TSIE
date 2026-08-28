@@ -14,7 +14,8 @@
     "start": "tsx src/cli.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "bench": "tsx tools/bench.ts",
-    "demo": "tsx examples/hello.ts"
+    "demo": "tsx examples/hello.ts",
+    "uboot": "tsx src/cli.ts --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin --kernel tmp/uboot/uboot.elf --disk tmp/disk.raw --script tmp/uboot-cmd.txt -n 60000000"
   },
   "keywords": [
     "riscv",
