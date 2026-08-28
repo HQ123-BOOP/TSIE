@@ -167,4 +167,4 @@ Sv39/Sv48 翻译与权限、全部外设协议、以及整机端到端（SBI、�
 
 ## License
 
-MIT
+Apache-2.0
