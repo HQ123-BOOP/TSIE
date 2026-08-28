@@ -1,0 +1,279 @@
+import type { Bus } from '../mem/bus.ts';
+import { BusError } from '../mem/bus.ts';
+import type { MemSize } from '../mem/types.ts';
+import { AccessType, type AccessTypeValue } from '../mem/types.ts';
+import { MASK64 } from '../core/bits.ts';
+import { Exc, SR_MXR, SR_MPRV, SR_SUM, type PrivLevel, Priv } from './csr.ts';
+
+export const PAGE_SHIFT = 12n;
+export const PAGE_SIZE = 1n << PAGE_SHIFT;
+
+// PTE 标志位
+const PTE_R = 0x02n;
+const PTE_W = 0x04n;
+const PTE_X = 0x08n;
+const PTE_U = 0x10n;
+const PTE_G = 0x20n;
+const PTE_A = 0x40n;
+const PTE_D = 0x80n;
+const PTE_PPN_MASK = (1n << 44n) - 1n;
+
+/** TLB 表项 */
+interface TlbEntry {
+  /** 物理页基址（已左移 12 位） */
+  base: bigint;
+  /** 页内偏移掩码（超级页时为 2MB/1GB/512GB-1） */
+  mask: bigint;
+  /** PTE 低 8 位（V/R/W/X/U/G/A/D） */
+  prot: number;
+  /** 全局映射（G 位） */
+  global: boolean;
+  asid: number;
+}
+
+/**
+ * MMU：支持 Bare / Sv39 / Sv48，带可配置 TLB。
+ * 故障信息通过 `faultCause` / `faultTval` 返回给 CPU。
+ */
+export class Mmu {
+  readonly bus: Bus;
+  /** 当前特权级（由 CPU 同步） */
+  priv: PrivLevel = Priv.M;
+  /** mstatus（由 CPU 同步） */
+  mstatus = 0n;
+  /** satp（由 CPU 同步） */
+  satp = 0n;
+
+  faultCause = -1;
+  faultTval = 0n;
+
+  private tlb = new Map<number, TlbEntry>();
+  /** TLB 容量（超出后整体清空，简单有效） */
+  maxEntries = 4096;
+
+  stats = { tlbHit: 0, tlbMiss: 0, walks: 0 };
+
+  constructor(bus: Bus) {
+    this.bus = bus;
+  }
+
+  flush(): void {
+    this.tlb.clear();
+  }
+
+  /** sfence.vma：按 asid / vaddr 失效 */
+  flushBy(vaddr?: bigint, asid?: number): void {
+    if (vaddr === undefined && asid === undefined) {
+      this.flush();
+      return;
+    }
+    for (const [key, e] of this.tlb) {
+      if (vaddr !== undefined && BigInt(key >>> 16) !== vaddr >> PAGE_SHIFT) continue;
+      if (asid !== undefined && e.asid !== asid && !(e.global && vaddr === undefined)) continue;
+      this.tlb.delete(key);
+    }
+  }
+
+  private fault(cause: number, tval: bigint): null {
+    this.faultCause = cause;
+    this.faultTval = tval & MASK64;
+    return null;
+  }
+
+  /** 地址翻译是否启用 */
+  private get enabled(): boolean {
+    return ((this.satp >> 60n) & 0xfn) !== 0n;
+  }
+
+  /** 判断虚拟地址是否规范（canonical） */
+  private isCanonical(vaddr: bigint, vaBits: number): boolean {
+    const upper = vaddr >> BigInt(vaBits - 1);
+    return upper === 0n || upper === (1n << BigInt(65 - vaBits)) - 1n;
+  }
+
+  /** 有效的翻译特权级（考虑 MPRV） */
+  private effectivePriv(access: AccessTypeValue): PrivLevel {
+    if (access === AccessType.Instruction) return this.priv;
+    if ((this.mstatus & SR_MPRV) !== 0n) return Number((this.mstatus >> 11n) & 3n) as PrivLevel;
+    return this.priv;
+  }
+
+  /** 检查 TLB 命中后的权限（mstatus 变化会在这里体现） */
+  private checkPerm(prot: number, effPriv: PrivLevel, access: AccessTypeValue): boolean {
+    if ((prot & Number(PTE_U)) === 0 && effPriv === Priv.U) return false;
+    if ((prot & Number(PTE_U)) !== 0 && effPriv === Priv.S && (this.mstatus & SR_SUM) === 0n) return false;
+    if (access === AccessType.Instruction) return (prot & Number(PTE_X)) !== 0;
+    if (access === AccessType.Load) {
+      const readable = (prot & Number(PTE_R)) !== 0;
+      const executable = (prot & Number(PTE_X)) !== 0 && (this.mstatus & SR_MXR) !== 0n;
+      return readable || executable;
+    }
+    return (prot & Number(PTE_W)) !== 0;
+  }
+
+  /** 虚拟地址 → 物理地址；失败返回 null 并设置 faultCause/faultTval */
+  translate(vaddr: bigint, access: AccessTypeValue): bigint | null {
+    const faultCause =
+      access === AccessType.Instruction
+        ? Exc.InstPageFault
+        : access === AccessType.Load
+          ? Exc.LoadPageFault
+          : Exc.StorePageFault;
+
+    const effPriv = this.effectivePriv(access);
+    if (effPriv === Priv.M || !this.enabled) return vaddr & MASK64;
+
+    const mode = Number((this.satp >> 60n) & 0xfn);
+    const asid = Number((this.satp >> 44n) & 0xffffn);
+    const vaBits = mode === 8 ? 39 : mode === 9 ? 48 : 0;
+    if (vaBits === 0 || !this.isCanonical(vaddr, vaBits)) return this.fault(faultCause, vaddr);
+
+    const key = Number(vaddr >> PAGE_SHIFT) * 65536 + asid;
+    const hit = this.tlb.get(key);
+    if (hit) {
+      // 写入但 D 位未置位 → 需要回内存更新，直接走慢路径
+      const needDirty = access === AccessType.Store && (hit.prot & Number(PTE_D)) === 0;
+      if (!needDirty && this.checkPerm(hit.prot, effPriv, access)) {
+        this.stats.tlbHit++;
+        return hit.base | (vaddr & hit.mask);
+      }
+      this.tlb.delete(key);
+    }
+    this.stats.tlbMiss++;
+    return this.walk(vaddr, access, mode, asid, faultCause, effPriv);
+  }
+
+  private walk(
+    vaddr: bigint,
+    access: AccessTypeValue,
+    mode: number,
+    asid: number,
+    faultCause: number,
+    effPriv: PrivLevel,
+  ): bigint | null {
+    const levels = mode === 8 ? 3 : 4;
+    let base = (this.satp & PTE_PPN_MASK) << PAGE_SHIFT;
+    this.stats.walks++;
+
+    for (let i = levels - 1; i >= 0; i--) {
+      const vpn = Number((vaddr >> BigInt(12 + 9 * i)) & 0x1ffn);
+      const pteAddr = base + BigInt(vpn * 8);
+      let pte: bigint;
+      try {
+        pte = this.bus.read(pteAddr, 8);
+      } catch (e) {
+        if (e instanceof BusError) return this.fault(faultCause, vaddr);
+        throw e;
+      }
+
+      const prot = Number(pte & 0xffn);
+      if ((prot & 1) === 0 || ((prot & Number(PTE_W)) !== 0 && (prot & Number(PTE_R)) === 0)) {
+        return this.fault(faultCause, vaddr);
+      }
+      const isLeaf = (pte & PTE_R) !== 0n || (pte & PTE_X) !== 0n;
+      if (!isLeaf) {
+        base = ((pte >> 10n) & PTE_PPN_MASK) << PAGE_SHIFT;
+        continue;
+      }
+
+      // 叶子页表项：权限检查
+      if (!this.checkPerm(prot, effPriv, access)) return this.fault(faultCause, vaddr);
+
+      const ppn = (pte >> 10n) & PTE_PPN_MASK;
+      if (i > 0 && (ppn & ((1n << BigInt(9 * i)) - 1n)) !== 0n) {
+        // 非对齐超级页
+        return this.fault(faultCause, vaddr);
+      }
+
+      // A/D 位更新（写回内存）
+      let updated = pte;
+      if ((pte & PTE_A) === 0n) updated |= PTE_A;
+      if (access === AccessType.Store && (pte & PTE_D) === 0n) updated |= PTE_D;
+      if (updated !== pte) this.bus.write(pteAddr, updated, 8);
+
+      const shift = 12 + 9 * i;
+      const paddr = (ppn << PAGE_SHIFT) | (vaddr & ((1n << BigInt(shift)) - 1n));
+
+      if (this.tlb.size >= this.maxEntries) this.tlb.clear();
+      this.tlb.set(Number(vaddr >> PAGE_SHIFT) * 65536 + asid, {
+        base: ppn << PAGE_SHIFT,
+        mask: (1n << BigInt(shift)) - 1n,
+        prot: Number(updated & 0xffn),
+        global: (updated & PTE_G) !== 0n,
+        asid,
+      });
+      return paddr;
+    }
+    return this.fault(faultCause, vaddr);
+  }
+
+  // ------------------------------------------------------------------
+  // 对外访存接口
+  // ------------------------------------------------------------------
+
+  /** 取指令半字（16 位）；返回 null 表示异常 */
+  fetch16(vaddr: bigint): number | null {
+    const pa = this.translate(vaddr, AccessType.Instruction);
+    if (pa === null) return null;
+    try {
+      return Number(this.bus.read(pa, 2) & 0xffffn);
+    } catch (e) {
+      if (e instanceof BusError) {
+        this.faultCause = Exc.InstAccessFault;
+        this.faultTval = vaddr;
+        return null;
+      }
+      throw e;
+    }
+  }
+
+  /** 取指令字（32 位） */
+  fetch32(vaddr: bigint): number | null {
+    const lo = this.fetch16(vaddr);
+    if (lo === null) return null;
+    if ((lo & 3) !== 3) return lo;
+    if ((vaddr & 0x3n) !== 0n) {
+      this.faultCause = Exc.InstAddrMisaligned;
+      this.faultTval = vaddr & ~0x1n;
+      return null;
+    }
+    const hi = this.fetch16(vaddr + 2n);
+    if (hi === null) return null;
+    return (lo | (hi << 16)) >>> 0;
+  }
+
+  load(vaddr: bigint, size: MemSize): bigint | null {
+    const pa = this.translate(vaddr, AccessType.Load);
+    if (pa === null) return null;
+    try {
+      return this.bus.read(pa, size);
+    } catch (e) {
+      if (e instanceof BusError) return this.fault(Exc.LoadAccessFault, vaddr);
+      throw e;
+    }
+  }
+
+  store(vaddr: bigint, value: bigint, size: MemSize): boolean {
+    const pa = this.translate(vaddr, AccessType.Store);
+    if (pa === null) return false;
+    try {
+      this.bus.write(pa, value, size);
+      return true;
+    } catch (e) {
+      if (e instanceof BusError) {
+        this.fault(Exc.StoreAccessFault, vaddr);
+        return false;
+      }
+      throw e;
+    }
+  }
+
+  /** 物理地址直接访问（调试器 / SBI / virtio 用） */
+  physRead(addr: bigint, size: MemSize): bigint {
+    return this.bus.read(addr, size);
+  }
+
+  physWrite(addr: bigint, value: bigint, size: MemSize): void {
+    this.bus.write(addr, value, size);
+  }
+}
