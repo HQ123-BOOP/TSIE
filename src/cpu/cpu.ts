@@ -856,8 +856,10 @@ export class Cpu {
         this.setX(rd, BigInt(res));
         return;
       }
-      case 0x60: { // FCVT.W.* / FCVT.L.*
-        this.fpToInt(rd, funct3, opA, rm);
+      case 0x60: { // FCVT.W.* / FCVT.WU.* / FCVT.L.* / FCVT.LU.*
+        // 目标宽度由 rs2 字段选择：0=W 1=WU 2=L 3=LU，funct3 是舍入模式
+        if (rs2i > 3) return this.illegal(inst);
+        this.fpToInt(rd, rs2i, opA, rm);
         return;
       }
       case 0x68: { // FCVT.S.* / FCVT.D.*（整数 → 浮点）
@@ -896,10 +898,10 @@ export class Cpu {
     }
   }
 
-  /** FCVT.*.W / WU / L / LU */
-  private fpToInt(rd: number, funct3: number, src: number, rm: number): void {
-    const is64 = funct3 >= 2;
-    const isUnsigned = funct3 === 1 || funct3 === 3;
+  /** FCVT.*.W / WU / L / LU：sel = 0/1/2/3 */
+  private fpToInt(rd: number, sel: number, src: number, rm: number): void {
+    const is64 = sel >= 2;
+    const isUnsigned = sel === 1 || sel === 3;
     let flags = 0;
     if (Number.isNaN(src)) {
       flags |= FFLAG.NV;
