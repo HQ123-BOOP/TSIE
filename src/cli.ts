@@ -267,4 +267,4 @@ function main(): number {
   return machine.exitCode ?? 0;
 }
 
-process.exit(main());
+process.exitCode = main();

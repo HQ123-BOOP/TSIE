@@ -53,6 +53,10 @@ export class Mmu {
 
   stats = { tlbHit: 0, tlbMiss: 0, walks: 0 };
 
+  /** 调试：页错误时打印遍历细节 */
+  debug = false;
+  private dbgLog: string[] = [];
+
   constructor(bus: Bus) {
     this.bus = bus;
   }
@@ -77,8 +81,18 @@ export class Mmu {
   private fault(cause: number, tval: bigint): null {
     this.faultCause = cause;
     this.faultTval = tval & MASK64;
+    if (this.debug && this.dbgLog.length < 200) {
+      const mode = Number((this.satp >> 60n) & 0xfn);
+      this.dbgLog.push(
+        `FAULT cause=${cause} vaddr=0x${tval.toString(16)} satp=0x${this.satp.toString(16)} mode=${mode} priv=${this.priv}` +
+          (this.lastWalkTrace.length ? '\n' + this.lastWalkTrace.join('\n') : ''),
+      );
+    }
+    this.lastWalkTrace = [];
     return null;
   }
+
+  private lastWalkTrace: string[] = [];
 
   /** 地址翻译是否启用 */
   private get enabled(): boolean {
@@ -164,6 +178,11 @@ export class Mmu {
       } catch (e) {
         if (e instanceof BusError) return this.fault(faultCause, vaddr);
         throw e;
+      }
+      if (this.debug && this.lastWalkTrace.length < 40) {
+        this.lastWalkTrace.push(
+          `  L${i}: vpn=${vpn} pte@0x${pteAddr.toString(16)} pte=0x${pte.toString(16)}`,
+        );
       }
 
       const prot = Number(pte & 0xffn);
