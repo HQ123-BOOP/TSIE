@@ -119,13 +119,16 @@ export const PTE_D = 0x80n;
  */
 export class Sv39Mapper {
   readonly root: bigint;
+  /** 根页表所在层级：Sv39 = 2，Sv48 = 3 */
+  readonly topLevel: 0 | 1 | 2 | 3;
   private ram: RAM;
   private pool: bigint;
 
-  constructor(h: { ram: RAM }, rootPhys: bigint, tablePool: bigint) {
+  constructor(h: { ram: RAM }, rootPhys: bigint, tablePool: bigint, topLevel: 0 | 1 | 2 | 3 = 2) {
     this.ram = h.ram;
     this.root = rootPhys;
     this.pool = tablePool;
+    this.topLevel = topLevel;
     this.ram.fill(rootPhys - TEST_BASE, 0x1000, 0);
   }
 
@@ -145,9 +148,9 @@ export class Sv39Mapper {
   }
 
   /** 读取叶子页表项（便于断言 A/D 位） */
-  leafPte(va: bigint, level: 0 | 1 | 2 = 0): bigint {
+  leafPte(va: bigint, level: 0 | 1 | 2 | 3 = 0): bigint {
     let table = this.root;
-    for (let i = 2; i > level; i--) {
+    for (let i = this.topLevel; i > level; i--) {
       const idx = Number((va >> BigInt(12 + 9 * i)) & 0x1ffn);
       const pte = this.readPte(table, idx);
       if ((pte & PTE_V) === 0n) return 0n;
@@ -158,9 +161,9 @@ export class Sv39Mapper {
   }
 
   /** 建立映射：level = 0(4KB) / 1(2MB) / 2(1GB) */
-  map(va: bigint, pa: bigint, flags: bigint, level: 0 | 1 | 2 = 0): void {
+  map(va: bigint, pa: bigint, flags: bigint, level: 0 | 1 | 2 | 3 = 0): void {
     let table = this.root;
-    for (let i = 2; i > level; i--) {
+    for (let i = this.topLevel; i > level; i--) {
       const idx = Number((va >> BigInt(12 + 9 * i)) & 0x1ffn);
       let pte = this.readPte(table, idx);
       if ((pte & PTE_V) === 0n) {

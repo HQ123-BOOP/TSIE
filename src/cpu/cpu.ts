@@ -141,7 +141,7 @@ export class Cpu {
     this.csr.writeRaw(CSR.MIMPID, 0x0000000000000001n);
     this.csr.writeRaw(CSR.SATP, 0n);
     this.mmu.flush();
-    this.syncMmuState();
+    this.syncMmu();
   }
 
   // ------------------------------------------------------------------
@@ -157,7 +157,8 @@ export class Cpu {
     this.f[rd] = v & MASK64;
   }
 
-  private syncMmuState(): void {
+  /** 把特权级 / mstatus / satp 同步到 MMU（公开以便调试与测试） */
+  syncMmu(): void {
     this.mmu.priv = this.priv;
     this.mmu.mstatus = this.csr.read(CSR.MSTATUS) ?? 0n;
     this.mmu.satp = this.csr.read(CSR.SATP) ?? 0n;
@@ -187,7 +188,7 @@ export class Cpu {
     this.mcycle++;
     if (this.halted) return;
 
-    this.syncMmuState();
+    this.syncMmu();
     this.refreshMip();
     if (this.checkInterrupts()) return;
     if (this.wfi) return; // 等待中断
