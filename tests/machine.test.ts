@@ -402,12 +402,12 @@ test('DTB 声明的 S 模式上下文确实能投递到 CPU 的 SEIP', () => {
 
   // 按驱动的方式初始化并使能串口中断（中断源 10）
   m.plic.write(BigInt(10) * 4n, 1n, 4); // priority[10] = 1
-  m.plic.write(0x200000n + BigInt(sCtx) * 0x1000n + 4n, 0n, 4); // threshold = 0
+  m.plic.write(0x200000n + BigInt(sCtx) * 0x1000n, 0n, 4); // 阈值 = 0（+0x000）
   m.plic.write(0x2000n + BigInt(sCtx) * 0x80n, 1n << 10n, 4); // enable 源 10
   m.plic.setIrq(10, true);
 
   const levels = m.plicContextLevels;
   assert.equal(levels[sCtx], true, 'S 模式上下文应输出高电平');
   assert.equal(levels[1 - sCtx], false, 'M 模式上下文不应被误使能');
-  assert.equal(Number(m.plic.read(0x200000n + BigInt(sCtx) * 0x1000n, 4)), 10, 'S 模式应能 claim 到中断源 10');
+  assert.equal(Number(m.plic.read(0x200000n + BigInt(sCtx) * 0x1000n + 4n, 4)), 10, 'S 模式应能 claim 到中断源 10（claim 在 +0x004）');
 });

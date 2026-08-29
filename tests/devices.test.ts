@@ -86,8 +86,8 @@ test('PLIC：优先级、使能、claim/complete', () => {
   plic.bindContext(0, (l) => events.push([0, l]));
 
   plic.write(0x0004n, 5n, 4); // 中断源 1 的优先级 = 5
-  plic.write(0x200004n, 0n, 4); // 上下文 0 阈值 = 0
-  plic.write(0x201004n, 2n, 4); // 上下文 1（S 模式）阈值 = 2
+  plic.write(0x200000n, 0n, 4); // 上下文 0 阈值 = 0
+  plic.write(0x201000n, 2n, 4); // 上下文 1（S 模式）阈值 = 2
 
   plic.setIrq(1, true);
   assert.equal(events.length, 0, '未使能前不应触发');
@@ -96,23 +96,23 @@ test('PLIC：优先级、使能、claim/complete', () => {
   plic.write(0x2000n, 0x2n, 4);
   assert.equal(events.at(-1)?.[0], 0, '上下文 0 应先被通知');
 
-  assert.equal(plic.read(0x200000n, 4), 1n, 'claim 应返回中断号 1');
-  assert.equal(plic.read(0x200000n, 4), 0n, 'claim 后不再挂起');
-  plic.write(0x200000n, 1n, 4); // complete
+  assert.equal(plic.read(0x200004n, 4), 1n, 'claim 应返回中断号 1');
+  assert.equal(plic.read(0x200004n, 4), 0n, 'claim 后不再挂起');
+  plic.write(0x200004n, 1n, 4); // complete
 
   // 上下文 1：阈值 2 < 优先级 5，应能 claim
   plic.write(0x2080n, 0x2n, 4); // 使能上下文 1 的源 1
   plic.setIrq(1, true);
-  assert.equal(plic.read(0x201000n, 4), 1n);
+  assert.equal(plic.read(0x201004n, 4), 1n);
 });
 
 test('PLIC：低于阈值的中断不投递', () => {
   const plic = new Plic(32, 2);
   plic.write(0x0004n, 1n, 4); // 源 1 优先级 = 1
-  plic.write(0x201004n, 7n, 4); // 上下文 1 阈值 = 7
+  plic.write(0x201000n, 7n, 4); // 上下文 1 阈值 = 7
   plic.write(0x2080n, 0x2n, 4); // 使能上下文 1 的源 1
   plic.setIrq(1, true);
-  assert.equal(plic.read(0x201000n, 4), 0n, '优先级 1 <= 阈值 7，不应投递');
+  assert.equal(plic.read(0x201004n, 4), 0n, '优先级 1 <= 阈值 7，不应投递');
 });
 
 // ----------------------------------------------------------------------
@@ -288,7 +288,7 @@ function drive8250Tx(plic: Plic, uart: Uart, data: number[], irq: number, maxRou
   let sLevel = false;
   plic.bindContext(1, (l) => { sLevel = l; });
   // 模仿 Linux PLIC 驱动初始化：源优先级 1、阈值 0、使能 S 模式上下文
-  plic.write(0x201004n, 0n, 4);
+  plic.write(0x201000n, 0n, 4);
   plic.write(BigInt(irq) * 4n, 1n, 4);
   plic.write(0x2080n, 1n << BigInt(irq), 4);
 
@@ -298,10 +298,10 @@ function drive8250Tx(plic: Plic, uart: Uart, data: number[], irq: number, maxRou
       uart.write(1n, BigInt(ier), 1); // IER
     }
     if (!sLevel) break; // 中断没来，驱动推不动了
-    const id = Number(plic.read(0x201000n, 4)); // claim
-    if (id !== irq) { plic.write(0x201000n, BigInt(id), 4); break; }
+    const id = Number(plic.read(0x201004n, 4)); // claim
+    if (id !== irq) { plic.write(0x201004n, BigInt(id), 4); break; }
     if ((Number(uart.read(2n, 1)) & 0x0f) !== 0x02) { // IIR 非 THRE
-      plic.write(0x201000n, BigInt(id), 4);
+      plic.write(0x201004n, BigInt(id), 4);
       break;
     }
     out.push(queued.shift()!);
@@ -310,7 +310,7 @@ function drive8250Tx(plic: Plic, uart: Uart, data: number[], irq: number, maxRou
       ier &= ~0x02;
       uart.write(1n, BigInt(ier), 1);
     }
-    plic.write(0x201000n, BigInt(id), 4); // complete
+    plic.write(0x201004n, BigInt(id), 4); // complete
     if (queued.length === 0) break;
   }
   return out;
@@ -319,36 +319,36 @@ function drive8250Tx(plic: Plic, uart: Uart, data: number[], irq: number, maxRou
 test('PLIC 电平敏感：complete 后源仍为高应重新挂起', () => {
   const plic = new Plic(32, 2);
   plic.write(0x0004n, 5n, 4); // 源 1 优先级 = 5
-  plic.write(0x201004n, 0n, 4); // 上下文 1 阈值 = 0
+  plic.write(0x201000n, 0n, 4); // 上下文 1 阈值 = 0
   plic.write(0x2080n, 0x2n, 4); // 使能上下文 1 的源 1
   plic.setIrq(1, true);
 
-  assert.equal(plic.read(0x201000n, 4), 1n, '首次 claim');
-  assert.equal(plic.read(0x201000n, 4), 0n, '已 claim 未 complete 时不重复投递');
-  plic.write(0x201000n, 1n, 4); // complete
+  assert.equal(plic.read(0x201004n, 4), 1n, '首次 claim');
+  assert.equal(plic.read(0x201004n, 4), 0n, '已 claim 未 complete 时不重复投递');
+  plic.write(0x201004n, 1n, 4); // complete
 
   // 物理电平没撤（如 16550 的 THRE），必须重新挂起
-  assert.equal(plic.read(0x201000n, 4), 1n, '电平仍为高，complete 后应再次可 claim');
-  plic.write(0x201000n, 1n, 4);
+  assert.equal(plic.read(0x201004n, 4), 1n, '电平仍为高，complete 后应再次可 claim');
+  plic.write(0x201004n, 1n, 4);
 
   plic.setIrq(1, false); // 源撤掉
-  assert.equal(plic.read(0x201000n, 4), 0n, '源撤掉后不应再投递');
+  assert.equal(plic.read(0x201004n, 4), 0n, '源撤掉后不应再投递');
 });
 
 test('PLIC：complete 了别的中断号不应误清除 in-service', () => {
   const plic = new Plic(32, 2);
   for (const s of [1, 2]) plic.write(BigInt(s) * 4n, BigInt(s), 4); // 优先级 1、2
-  plic.write(0x201004n, 0n, 4);
+  plic.write(0x201000n, 0n, 4);
   plic.write(0x2080n, 0x6n, 4); // 使能源 1、2
   plic.setIrq(1, true);
   plic.setIrq(2, true);
 
-  assert.equal(plic.read(0x201000n, 4), 2n, '优先级 2 更高，先 claim 源 2');
-  plic.write(0x201000n, 1n, 4); // 错误地 complete 源 1
-  assert.equal(plic.read(0x201000n, 4), 1n, '错误的 complete 不影响源 2 的 in-service');
-  plic.write(0x201000n, 2n, 4); // 正确 complete 源 2
-  plic.write(0x201000n, 1n, 4); // complete 刚才 claim 的源 1
-  assert.equal(plic.read(0x201000n, 4), 2n, '两个都 complete 后，高优先级的源 2 重新挂起');
+  assert.equal(plic.read(0x201004n, 4), 2n, '优先级 2 更高，先 claim 源 2');
+  plic.write(0x201004n, 1n, 4); // 错误地 complete 源 1
+  assert.equal(plic.read(0x201004n, 4), 1n, '错误的 complete 不影响源 2 的 in-service');
+  plic.write(0x201004n, 2n, 4); // 正确 complete 源 2
+  plic.write(0x201004n, 1n, 4); // complete 刚才 claim 的源 1
+  assert.equal(plic.read(0x201004n, 4), 2n, '两个都 complete 后，高优先级的源 2 重新挂起');
 });
 
 test('16550 + PLIC：中断式发送能把整块数据发完', () => {
@@ -362,4 +362,50 @@ test('16550 + PLIC：中断式发送能把整块数据发完', () => {
     'THRE 持续为高时，必须靠重复的 THRE 中断把数据推完',
   );
   assert.equal(out.length, payload.length, '不应丢字节');
+});
+
+test('PLIC 寄存器布局对照 RISC-V PLIC 规范（+0x000 阈值、+0x004 claim）', () => {
+  // 依据 RISC-V PLIC 规范的内存映射，以及 Linux 6.18 的
+  // drivers/irqchip/irq-sifive-plic.c：
+  //   #define CONTEXT_THRESHOLD 0x00
+  //   #define CONTEXT_CLAIM     0x04
+  // 曾把两者写反：plic_handle_irq 读 +0x004 取中断号却读到阈值 0，
+  // `while ((hwirq = readl(claim)))` 立即退出 —— 中断永不处理、
+  // 源永不 complete，电平敏感下就是无限重入（实测 12 亿条指令内 20 万次 SEI）。
+  const plic = new Plic(32, 2);
+
+  // 上下文 1（S 模式）的寄存器基址
+  const CTX1 = 0x200000n + 0x1000n;
+
+  // 阈值：+0x000，只接受优先级严格大于它的中断
+  plic.write(CTX1 + 0n, 3n, 4);
+  assert.equal(plic.read(CTX1 + 0n, 4), 3n, '阈值应可读写于 +0x000');
+
+  plic.write(0x0004n, 2n, 4); // 源 1 优先级 = 2（<= 阈值 3，不应投递）
+  plic.write(0x2080n, 0x2n, 4); // 使能上下文 1 的源 1
+  plic.setIrq(1, true);
+  assert.equal(plic.read(CTX1 + 4n, 4), 0n, 'claim 必须在 +0x004，且优先级不高于阈值时不投递');
+
+  plic.write(CTX1 + 0n, 0n, 4); // 阈值降为 0
+  assert.equal(plic.read(CTX1 + 4n, 4), 1n, '阈值 0 时 claim 应返回中断源 1');
+  assert.equal(plic.read(CTX1 + 0n, 4), 0n, '读阈值不应有副作用');
+  plic.write(CTX1 + 4n, 1n, 4); // complete 也在 +0x004
+});
+
+test('按 Linux 6.18 PLIC 驱动的真实取值走一遍：threshold=+0、claim=+4', () => {
+  // 复刻 plic_probe / plic_starting_cpu / plic_handle_irq 用到的一切偏移
+  const plic = new Plic(32, 2);
+  const ctx = 1;
+  const CTX = 0x200000n + BigInt(ctx) * 0x1000n;
+  const ENABLE = 0x2000n + BigInt(ctx) * 0x80n;
+
+  plic.write(CTX + 0n, 0n, 4); // plic_set_threshold(handler, PLIC_ENABLE_THRESHOLD=0)
+  plic.write(0x0004n * 10n, 1n, 4); // priority[10] = 1
+  plic.write(ENABLE, 1n << 10n, 4); // plic_irq_unmask
+  plic.setIrq(10, true);
+
+  const claim = Number(plic.read(CTX + 4n, 4));
+  assert.equal(claim, 10, '驱动读 +0x004 必须拿到中断源号');
+  plic.write(CTX + 4n, BigInt(claim), 4); // plic_irq_eoi → complete
+  assert.equal(Number(plic.read(CTX + 4n, 4)), 10, '未清设备条件时电平敏感会重新挂起');
 });

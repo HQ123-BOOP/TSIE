@@ -100,7 +100,14 @@ export class Plic implements Device {
       const ctx = Math.floor((o - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_STRIDE);
       const off = (o - PLIC_CONTEXT_BASE) % PLIC_CONTEXT_STRIDE;
       if (ctx >= this.numContexts) return 0n;
-      if (off === 0) {
+      // RISC-V PLIC 规范：每个上下文的 4KB 区内
+      //   +0x000 优先级阈值（R/W）
+      //   +0x004 claim/complete（R/W）
+      // 曾把两者写反：Linux 6.18 的 plic_handle_irq 读 +0x004 取中断号，
+      // 却读到阈值 0，`while ((hwirq = readl(claim)))` 立刻退出，
+      // 中断永远不被处理、源也永远不会被 complete —— 电平敏感下就是无限重入。
+      if (off === 0) return BigInt(this.threshold[ctx]); // 优先级阈值
+      if (off === 4) {
         // claim：返回最高优先级中断并标记为 in-service（物理电平保持不变）
         const id = this.bestFor(ctx);
         if (id !== 0) {
@@ -109,7 +116,6 @@ export class Plic implements Device {
         }
         return BigInt(id);
       }
-      if (off === 4) return BigInt(this.threshold[ctx]); // threshold
       return 0n;
     }
     if (o >= PLIC_ENABLE_BASE) {
@@ -141,13 +147,14 @@ export class Plic implements Device {
       const ctx = Math.floor((o - PLIC_CONTEXT_BASE) / PLIC_CONTEXT_STRIDE);
       const off = (o - PLIC_CONTEXT_BASE) % PLIC_CONTEXT_STRIDE;
       if (ctx >= this.numContexts) return;
+      // 见 read() 的注释：+0x000 阈值、+0x004 claim/complete
       if (off === 0) {
+        this.threshold[ctx] = v & 0xff;
+        this.update();
+      } else if (off === 4) {
         // complete：解除 in-service。若物理电平仍为高，中断会自动重新挂起
         // （电平敏感网关的语义，也是 16550 THRE 这类中断源能持续推进的前提）。
         this.inService[ctx] &= ~(1n << (BigInt(v) & 0x3fn));
-        this.update();
-      } else if (off === 4) {
-        this.threshold[ctx] = v & 0xff;
         this.update();
       }
       return;
