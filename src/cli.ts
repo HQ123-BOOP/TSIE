@@ -261,7 +261,7 @@ async function main(): Promise<number> {
     });
     process.stderr.write(
       rawMode
-        ? '交互模式：键盘输入 → 串口（Ctrl+C 交给 guest，退出可在 shell 里执行 reboot/poweroff）\n'
+        ? '交互模式：键盘输入 → 串口（Ctrl+C 交给 guest；退出可在 guest 里执行 reboot/poweroff）\n'
         : '交互模式（非 TTY，逐行输入；空行回车 = 发送换行）\n',
     );
     stats = await machine.runInteractive({
@@ -278,6 +278,9 @@ async function main(): Promise<number> {
         return undefined;
       },
     });
+    // stdin 处于 raw+resume 状态会挂住事件循环，结束运行后停掉
+    process.stdin.pause();
+    process.stdin.removeAllListeners('data');
   } else {
     stats = machine.run({
       maxInstructions: args.maxInstructions,
