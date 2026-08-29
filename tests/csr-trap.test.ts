@@ -62,7 +62,9 @@ test('写只读 CSR 触发非法指令异常', () => {
   runToPc(h, pcOf(setup.length));
   h.cpu.step();
   assert.equal(h.cpu.csr.read(CSR.MCAUSE), BigInt(Exc.IllegalInstruction));
-  assert.equal(h.cpu.csr.read(CSR.MTVAL), 0n);
+  // 规范允许 mtval 存放触发异常的指令编码；真机与 QEMU 都这么做，
+  // Linux Oops 打印的 badaddr 依赖它来定位缺失指令。
+  assert.equal(h.cpu.csr.read(CSR.MTVAL), BigInt(csrrw(0, CSR.MHARTID, 1) >>> 0));
 });
 
 test('读取不存在的 CSR 触发非法指令异常', () => {

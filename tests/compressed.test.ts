@@ -34,8 +34,13 @@ import {
   addi,
   li,
   ld,
+  c_fld,
+  c_fsd,
+  c_fldsp,
+  c_fsdsp,
 } from '../tools/encoder.ts';
-import { TEST_BASE, halt, makeCpu, pcOf, peek, runToPc } from './harness.ts';
+import { bitsToF64, f64Box } from '../src/cpu/fpu.ts';
+import { TEST_BASE, halt, makeCpu, pcOf, peek, poke, runToPc } from './harness.ts';
 
 const U = (v: bigint | number) => BigInt.asUintN(64, BigInt(v));
 
@@ -219,4 +224,66 @@ test('JALR 清除目标地址 bit0（RVC IALIGN=16 语义）', () => {
   h.cpu.step();
   assert.equal(h.cpu.pc, TEST_BASE + 0x500n, 'JALR 应清除 bit0');
   assert.equal(h.cpu.csr.read(0x342) ?? 0n, 0n, '不应产生异常');
+});
+
+// ------------------------------------------------------------------
+// RV64 压缩浮点访存（C.FLD / C.FSD / C.FLDSP / C.FSDSP）
+// 回归：内核 __fstate_restore 会把 fld f8..f15 压缩成 c.fld，
+// 早期实现缺失这四条指令，导致 /init 首次恢复浮点状态时非法指令 Oops。
+// ------------------------------------------------------------------
+
+test('C.FLD / C.FSD：内核 __fstate_restore 的压缩浮点访存', () => {
+  const DATA = TEST_BASE + 0x2000n;
+  const h = makeCpu([
+    ...li(10, DATA), // a0 = 基址（x10 属于 x8..x15，可用压缩形式）
+    c_fld(8, 10, 64), // c.fld f8, 64(a0)   ← 就是内核 Oops 的 0x2120
+    c_fld(9, 10, 72), // c.fld f9, 72(a0)   ← 0x2524
+    c_fld(15, 10, 248), // 最大偏移
+    c_fsd(10, 8, 0), // c.fsd f8, 0(a0)
+    c_fsd(10, 9, 8),
+    ...halt(),
+  ]);
+  poke(h.ram, DATA + 64n, f64Box(3.5));
+  poke(h.ram, DATA + 72n, f64Box(-1.25));
+  poke(h.ram, DATA + 248n, f64Box(2.75));
+  h.run(400);
+  assert.equal(h.cpu.halted, true);
+  assert.equal(h.cpu.csr.read(0x342) ?? 0n, 0n, '不应产生任何异常');
+  assert.equal(bitsToF64(h.cpu.f[8]!), 3.5);
+  assert.equal(bitsToF64(h.cpu.f[9]!), -1.25);
+  assert.equal(bitsToF64(h.cpu.f[15]!), 2.75);
+  assert.equal(peek(h.ram, DATA), f64Box(3.5), 'C.FSD 应写回 f8');
+  assert.equal(peek(h.ram, DATA + 8n), f64Box(-1.25), 'C.FSD 应写回 f9');
+});
+
+test('C.FLD 的指令编码与内核 Oops 中的 badaddr 一致', () => {
+  // Alpine 6.18.44 的 Oops：epc=__fstate_restore+0x32, badaddr=0x2120
+  assert.equal(c_fld(8, 10, 64), 0x2120, 'c.fld f8, 64(a0)');
+  assert.equal(c_fld(9, 10, 72), 0x2524, 'c.fld f9, 72(a0)');
+});
+
+test('C.FLDSP / C.FSDSP：栈相对压缩浮点访存（可用全部 32 个 f 寄存器）', () => {
+  const h = makeCpu([
+    ...li(2, TEST_BASE + 0x3000n), // sp
+    ...li(5, 0x4000n), // 临时值
+    c_fldsp(31, 8), // f31 = [sp+8]，f31 无法用 C.FLD（仅 f8..f15）
+    c_fldsp(1, 504), // 最大偏移
+    c_fsdsp(31, 16),
+    ...halt(),
+  ]);
+  poke(h.ram, TEST_BASE + 0x3000n + 8n, f64Box(6.5));
+  poke(h.ram, TEST_BASE + 0x3000n + 504n, f64Box(-0.5));
+  h.run(400);
+  assert.equal(h.cpu.halted, true);
+  assert.equal(h.cpu.csr.read(0x342) ?? 0n, 0n, '不应产生任何异常');
+  assert.equal(bitsToF64(h.cpu.f[31]!), 6.5);
+  assert.equal(bitsToF64(h.cpu.f[1]!), -0.5);
+  assert.equal(peek(h.ram, TEST_BASE + 0x3000n + 16n), f64Box(6.5), 'C.FSDSP 应写回 f31');
+});
+
+test('非法指令的 mtval 存放指令编码（内核 Oops badaddr 依赖）', () => {
+  // 0x0000_2120 前若关闭 mstatus.FS，C.FLD 应非法且 mtval 记录编码
+  const h = makeCpu([c_addi4spn(8, 0), ...halt()]);
+  h.cpu.step();
+  assert.equal(h.cpu.csr.read(0x343), BigInt(c_addi4spn(8, 0)), 'mtval 应为指令编码');
 });

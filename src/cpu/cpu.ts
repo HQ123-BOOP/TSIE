@@ -990,6 +990,15 @@ export class Cpu {
             this.setX(rdp, u64(this.x[2] + BigInt(nzimm)));
             return;
           }
+          case 1: {
+            // C.FLD（RV64）：uimm[5:3]=inst[12:10]，uimm[7:6]=inst[6:5]
+            if (!this.checkFp()) return this.illegal(inst);
+            const off = (((inst >> 10) & 0x7) << 3) | (((inst >> 5) & 0x3) << 6);
+            const v = this.loadMem(u64(this.x[rs1p] + BigInt(off)), 8);
+            if (v === null) return;
+            this.setF(rdp, v); // rdp = 8 + inst[4:2] → f8..f15
+            return;
+          }
           case 2: {
             // C.LW
             const off = (((inst >> 5) & 0x1) << 6) | (((inst >> 10) & 0x7) << 3) | (((inst >> 6) & 0x1) << 2);
@@ -997,6 +1006,13 @@ export class Cpu {
             const v = this.loadMem(addr, 4);
             if (v === null) return;
             this.setX(rdp, sext(v, 32));
+            return;
+          }
+          case 5: {
+            // C.FSD（RV64）
+            if (!this.checkFp()) return this.illegal(inst);
+            const off = (((inst >> 10) & 0x7) << 3) | (((inst >> 5) & 0x3) << 6);
+            this.storeMem(u64(this.x[rs1p] + BigInt(off)), this.f[rs2p]!, 8);
             return;
           }
           case 3: {
@@ -1127,6 +1143,22 @@ export class Cpu {
             this.setX(rdFull, u64(this.x[rdFull] << sh));
             return;
           }
+          case 1: {
+            // C.FLDSP（RV64）：uimm[4:3]=inst[6:5]，uimm[5]=inst[12]，uimm[8:6]=inst[4:2]
+            if (!this.checkFp()) return this.illegal(inst);
+            const off = (((inst >> 2) & 0x7) << 6) | (((inst >> 12) & 0x1) << 5) | (((inst >> 5) & 0x3) << 3);
+            const v = this.loadMem(u64(this.x[2] + BigInt(off)), 8);
+            if (v === null) return;
+            this.setF(rdFull, v);
+            return;
+          }
+          case 5: {
+            // C.FSDSP（RV64）：uimm[5:3]=inst[12:10]，uimm[8:6]=inst[9:7]
+            if (!this.checkFp()) return this.illegal(inst);
+            const off = (((inst >> 7) & 0x7) << 6) | (((inst >> 10) & 0x7) << 3);
+            this.storeMem(u64(this.x[2] + BigInt(off)), this.f[rs2Full]!, 8);
+            return;
+          }
           case 2: {
             // C.LWSP
             const off = (((inst >> 2) & 0x3) << 6) | (((inst >> 12) & 0x1) << 5) | (((inst >> 4) & 0x7) << 2);
@@ -1195,8 +1227,10 @@ export class Cpu {
   // 异常与中断
   // ------------------------------------------------------------------
 
-  private illegal(_inst: number): void {
-    this.takeException(Exc.IllegalInstruction, 0n);
+  private illegal(inst: number): void {
+    // 规范允许 mtval/stval 存放触发异常的指令编码；真机与 QEMU 都这么做，
+    // 内核 Oops 的 badaddr 字段依赖它，便于定位缺失指令。
+    this.takeException(Exc.IllegalInstruction, BigInt(inst >>> 0));
   }
 
   /** 同步异常入口 */

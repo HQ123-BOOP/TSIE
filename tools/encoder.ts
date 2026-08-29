@@ -283,6 +283,18 @@ export const c_lwsp = (rd: Reg, off: number) =>
 export const c_swsp = (rs2: Reg, off: number) =>
   (2 | (6 << 13) | (((off >> 2) & 0xf) << 9) | (((off >> 6) & 0x3) << 7) | ((rs2 & 0x1f) << 2)) >>> 0;
 
+/** C.FLD / C.FSD（RV64，浮点寄存器 f8..f15，offset 为 8 的倍数且 < 256） */
+export const c_fld = (rdp: Reg, rs1p: Reg, off: number) =>
+  ((((off >> 3) & 0x7) << 10) | ((rs1p & 7) << 7) | (((off >> 6) & 0x3) << 5) | (1 << 13) | ((rdp & 7) << 2)) >>> 0;
+export const c_fsd = (rs1p: Reg, rs2p: Reg, off: number) =>
+  ((((off >> 3) & 0x7) << 10) | ((rs1p & 7) << 7) | (((off >> 6) & 0x3) << 5) | (5 << 13) | ((rs2p & 7) << 2)) >>> 0;
+
+/** C.FLDSP / C.FSDSP（RV64，任意 f 寄存器，offset 为 8 的倍数且 < 512） */
+export const c_fldsp = (rd: Reg, off: number) =>
+  (2 | (1 << 13) | (((off >> 5) & 1) << 12) | ((rd & 0x1f) << 7) | (((off >> 3) & 0x3) << 5) | (((off >> 6) & 0x7) << 2)) >>> 0;
+export const c_fsdsp = (rs2: Reg, off: number) =>
+  (2 | (5 << 13) | (((off >> 3) & 0x7) << 10) | (((off >> 6) & 0x7) << 7) | ((rs2 & 0x1f) << 2)) >>> 0;
+
 /** C.J：offset 为 2 的倍数，范围 ±2048 */
 export const c_j = (off: number): number => {
   const v = off;
