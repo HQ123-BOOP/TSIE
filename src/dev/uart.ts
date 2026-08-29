@@ -118,7 +118,14 @@ export class Uart implements Device {
     switch (reg) {
       case REG_RBR_THR_DLL:
         if (this.dlab) return BigInt(this.dll);
-        return BigInt(this.rxFifo.length > 0 ? this.rxFifo.shift()! : 0);
+        if (this.rxFifo.length === 0) return 0n;
+        // 取走字节后必须重算中断线：FIFO 排空时"接收数据可用"这条物理信号要撤掉，
+        // 否则电平敏感的 PLIC 会在 complete 之后立刻重新挂起（虚假中断风暴）。
+        {
+          const b = this.rxFifo.shift()!;
+          this.updateIrq();
+          return BigInt(b);
+        }
       case REG_IER_DLM:
         return BigInt(this.dlab ? this.dlm : this.ier);
       case REG_IIR_FCR:

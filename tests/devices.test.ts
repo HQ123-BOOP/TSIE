@@ -409,3 +409,27 @@ test('按 Linux 6.18 PLIC 驱动的真实取值走一遍：threshold=+0、claim=
   plic.write(CTX + 4n, BigInt(claim), 4); // plic_irq_eoi → complete
   assert.equal(Number(plic.read(CTX + 4n, 4)), 10, '未清设备条件时电平敏感会重新挂起');
 });
+
+test('UART：读走 RBR 字节后中断线随 FIFO 排空而撤销', () => {
+  const levels: boolean[] = [];
+  let uart = new Uart({ irq: (l) => levels.push(l) });
+  uart.write(1n, 0x01n, 1); // IER = RDAI，打开接收中断
+  uart.pushRx(0x41);
+  assert.deepEqual(levels, [true], '收到字节后应拉高中断线');
+
+  uart.read(0n, 1); // 读 RBR
+  assert.equal(levels.length, 2, 'FIFO 排空后必须撤销中断线');
+  assert.equal(levels[1], false, '排空后应为低电平');
+  assert.equal(Number(uart.read(5n, 1)) & 0x01, 0, 'LSR.DR 也应清除');
+
+  // 多个字节：只有最后一个字节取走后才撤销
+  uart = new Uart({ irq: (l) => levels.push(l) });
+  uart.write(1n, 0x01n, 1);
+  uart.pushString('abc');
+  levels.length = 0;
+  uart.read(0n, 1);
+  uart.read(0n, 1);
+  assert.deepEqual(levels, [], 'FIFO 未排空时不应撤销');
+  uart.read(0n, 1);
+  assert.deepEqual(levels, [false], '取走最后一个字节后才撤销');
+});
