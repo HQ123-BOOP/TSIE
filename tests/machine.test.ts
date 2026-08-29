@@ -411,3 +411,29 @@ test('DTB 声明的 S 模式上下文确实能投递到 CPU 的 SEIP', () => {
   assert.equal(levels[1 - sCtx], false, 'M 模式上下文不应被误使能');
   assert.equal(Number(m.plic.read(0x200000n + BigInt(sCtx) * 0x1000n + 4n, 4)), 10, 'S 模式应能 claim 到中断源 10（claim 在 +0x004）');
 });
+
+test('runInteractive：分块运行并在块间让出事件循环', async () => {
+  const m = new Machine({ memSize: 64n * 1024n * 1024n } as MachineOptions);
+  let chunks = 0;
+  let timerFired = false;
+  // 块间让出事件循环后，这个定时器应该有机会执行
+  setTimeout(() => { timerFired = true; }, 0);
+  const stats = await m.runInteractive({
+    maxInstructions: 10_000,
+    chunk: 2_000,
+    afterChunk: () => { chunks++; },
+  });
+  assert.ok(chunks >= 4, `应分块执行多次（实际 ${chunks} 次）`);
+  assert.equal(timerFired, true, '块与块之间应让出事件循环，异步任务得以执行');
+  assert.equal(stats.instructions, 10_000, '总指令数应等于预算');
+});
+
+test('runInteractive：afterChunk 返回 false 可终止整个运行', async () => {
+  const m = new Machine({ memSize: 64n * 1024n * 1024n } as MachineOptions);
+  const stats = await m.runInteractive({
+    maxInstructions: 100_000,
+    chunk: 10_000,
+    afterChunk: (total) => (total >= 20_000 ? false : undefined),
+  });
+  assert.ok(stats.instructions <= 20_000, `onStep 终止应尽早停止（实际 ${stats.instructions}）`);
+});

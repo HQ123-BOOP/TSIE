@@ -6,7 +6,7 @@
  *   tsx src/cli.ts --kernel hello.bin --trace --stats
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { Machine } from './machine.ts';
+import { Machine, type MachineStats } from './machine.ts';
 import { FileDisk } from './dev/disk.ts';
 import { CSR } from './cpu/csr.ts';
 
@@ -25,6 +25,7 @@ interface Args {
   stats: boolean;
   misaligned: 'trap' | 'slow';
   script?: string;
+  interactive: boolean;
   help: boolean;
 }
 
@@ -48,6 +49,7 @@ ts-riscv64 —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
       --dump-dtb <file>     把生成的设备树写到文件
       --stats               运行结束后打印统计信息
       --script <file>        把文件中的每一行作为控制台输入逐条喂入（用于交互式固件）
+      --interactive          交互模式：键盘输入接到串口接收（登录 Linux shell 后可直接敲命令）
       --misaligned <mode>   非对齐访存策略：trap（默认）或 slow
   -h, --help                显示帮助
 `;
@@ -74,6 +76,7 @@ function parseArgs(argv: string[]): Args {
     traceFrom: 0n,
     stats: false,
     misaligned: 'trap',
+    interactive: false,
     help: false,
   };
   const rest: string[] = [];
@@ -135,6 +138,9 @@ function parseArgs(argv: string[]): Args {
       case '--script':
         args.script = next();
         break;
+      case '--interactive':
+        args.interactive = true;
+        break;
       case '--misaligned': {
         const v = next();
         if (v !== 'trap' && v !== 'slow') throw new Error('--misaligned 只能是 trap 或 slow');
@@ -155,7 +161,7 @@ function readFile(path: string): Uint8Array {
   return new Uint8Array(readFileSync(path));
 }
 
-function main(): number {
+async function main(): Promise<number> {
   let args: Args;
   try {
     args = parseArgs(process.argv.slice(2));
@@ -236,13 +242,51 @@ function main(): number {
     }
   };
 
-  const stats = machine.run({
-    maxInstructions: args.maxInstructions,
-    onStep: (_, count) => {
-      feedScript(count);
-      return undefined;
-    },
-  });
+  let stats: MachineStats;
+  if (args.interactive) {
+    // 交互模式：键盘输入 → 串口接收。分块运行并在块间让出事件循环，
+    // 否则同步的 run() 会阻塞事件循环，stdin 事件永远得不到处理。
+    const q: number[] = [];
+    let rawMode = false;
+    try {
+      process.stdin.setRawMode(true);
+      rawMode = true;
+    } catch {
+      rawMode = false; // 非 TTY（如管道）退化为逐行
+    }
+    process.stdin.resume();
+    process.stdin.on('data', (d: Buffer | string) => {
+      const b = typeof d === 'string' ? Buffer.from(d, 'binary') : d;
+      for (const byte of b) if (q.length < 4096) q.push(byte);
+    });
+    process.stderr.write(
+      rawMode
+        ? '交互模式：键盘输入 → 串口（Ctrl+C 交给 guest，退出可在 shell 里执行 reboot/poweroff）\n'
+        : '交互模式（非 TTY，逐行输入；空行回车 = 发送换行）\n',
+    );
+    stats = await machine.runInteractive({
+      maxInstructions: args.maxInstructions,
+      chunk: 1_000_000,
+      afterChunk: (count) => {
+        feedScript(count);
+        // UART 接收 FIFO 只有 64 字节，一次最多灌 60 字节
+        let n = 0;
+        while (q.length > 0 && n < 60) {
+          machine.uart.pushRx(q.shift()!);
+          n++;
+        }
+        return undefined;
+      },
+    });
+  } else {
+    stats = machine.run({
+      maxInstructions: args.maxInstructions,
+      onStep: (_, count) => {
+        feedScript(count);
+        return undefined;
+      },
+    });
+  }
 
   if (args.stats || !machine.cpu.halted) {
     const mips = stats.ips / 1e6;
@@ -267,4 +311,4 @@ function main(): number {
   return machine.exitCode ?? 0;
 }
 
-process.exitCode = main();
+process.exitCode = await main();

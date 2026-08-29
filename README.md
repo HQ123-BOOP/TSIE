@@ -139,6 +139,10 @@ tsx src/cli.ts \
 # 可选：外接 OpenSBI（缺省用内建 SBI）
 tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux
 
+# 交互模式：键盘输入接到串口接收（登录 Linux shell 后可直接敲命令）
+tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --initrd initramfs.cpio \
+  --append "console=ttyS0 rdinit=/init" --interactive
+
 # 导出设备树、指令跟踪
 tsx src/cli.ts --kernel hello.bin --dump-dtb virt.dtb --trace --trace-from 0x80200000
 ```

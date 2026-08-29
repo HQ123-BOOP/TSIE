@@ -60,6 +60,16 @@ export interface RunOptions {
   onStep?: (cpu: Cpu, count: number) => boolean | void;
 }
 
+export interface RunInteractiveOptions {
+  maxInstructions?: number;
+  /** 每个分块执行的指令数，块与块之间让出事件循环（默认 100 万） */
+  chunk?: number;
+  /** 每步回调（转发给每个分块的 run），返回 false 停止当前分块 */
+  onStep?: (cpu: Cpu, count: number) => boolean | void;
+  /** 每个分块结束后回调；返回 false 停止。用于处理排队中的键盘输入等 */
+  afterChunk?: (total: number) => boolean | void;
+}
+
 export interface MachineStats {
   instructions: number;
   seconds: number;
@@ -473,6 +483,29 @@ export class Machine {
       seconds,
       ips: seconds > 0 ? count / seconds : count,
     };
+  }
+
+  /**
+   * 交互式运行：分块执行，块与块之间让出事件循环，
+   * 使 stdin 等异步输入能被处理（同步 run() 会一直阻塞事件循环）。
+   * 每个分块结束调用 afterChunk（返回 false 停止），
+   * 之后 `await setImmediate()` 让排队的输入事件落地。
+   */
+  async runInteractive(opts: RunInteractiveOptions = {}): Promise<MachineStats> {
+    const chunk = opts.chunk ?? 1_000_000;
+    const limit = opts.maxInstructions ?? Number.POSITIVE_INFINITY;
+    const started = performance.now();
+    let total = 0;
+    while (total < limit && !this.cpu.halted) {
+      const left = Math.min(chunk, limit - total);
+      const s = this.run({ maxInstructions: left, onStep: opts.onStep });
+      if (s.instructions === 0) break; // 已停机或卡死
+      total += s.instructions;
+      if (opts.afterChunk && opts.afterChunk(total) === false) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const seconds = (performance.now() - started) / 1000;
+    return { instructions: total, seconds, ips: seconds > 0 ? total / seconds : total };
   }
 
   /** 调试信息：CPU 状态 + 关键 CSR */
