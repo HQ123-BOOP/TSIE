@@ -78,6 +78,8 @@ export class Cpu {
   onIllegal?: (pc: bigint, inst: number, priv: PrivLevel) => void;
   /** 调试钩子：每次同步异常（含 ECALL）进入时回调，在 SBI 拦截之前 */
   onTrap?: (cause: number, tval: bigint, pc: bigint, priv: PrivLevel) => void;
+  /** 调试钩子：每次中断被响应时回调（中断号、目标特权级） */
+  onInterrupt?: (irq: number, target: PrivLevel) => void;
   /** 下一条指令地址（跳转指令修改它） */
   nextPc = 0n;
   priv: PrivLevel = Priv.M;
@@ -1328,6 +1330,7 @@ export class Cpu {
   }
 
   private trapInterrupt(irq: number, target: PrivLevel): void {
+    this.onInterrupt?.(irq, target);
     this.stats.traps++;
     this.trapTaken = true;
     this.wfi = false;
