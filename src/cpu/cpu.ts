@@ -74,6 +74,8 @@ export class Cpu {
   readonly f: bigint[] = new Array(32).fill(0n);
 
   pc = 0n;
+  /** 调试钩子：每次非法指令异常时回调（pc、指令编码、当前特权级） */
+  onIllegal?: (pc: bigint, inst: number, priv: PrivLevel) => void;
   /** 下一条指令地址（跳转指令修改它） */
   nextPc = 0n;
   priv: PrivLevel = Priv.M;
@@ -1228,6 +1230,9 @@ export class Cpu {
   // ------------------------------------------------------------------
 
   private illegal(inst: number): void {
+    // 调试钩子：定位模拟器缺失的指令。异常发生瞬间即上报，
+    // 不必等内核走完 Oops 流程再从 badaddr 反推。
+    this.onIllegal?.(this.pc, inst >>> 0, this.priv);
     // 规范允许 mtval/stval 存放触发异常的指令编码；真机与 QEMU 都这么做，
     // 内核 Oops 的 badaddr 字段依赖它，便于定位缺失指令。
     this.takeException(Exc.IllegalInstruction, BigInt(inst >>> 0));
