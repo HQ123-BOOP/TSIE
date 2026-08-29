@@ -298,7 +298,13 @@ export class Machine {
     plicNode.propEmpty('interrupt-controller');
     plicNode.propStr('compatible', 'riscv,plic0');
     plicNode.propU32('riscv,ndev', [32]);
-    plicNode.propU32('interrupts-extended', [1, Irq.SExternal, 1, Irq.MExternal]);
+    // 顺序必须与 PLIC 的上下文编号一致：上下文 0 = hart0 M 模式，
+    // 上下文 1 = hart0 S 模式（QEMU virt 的 "MS" 配置）。
+    // 曾把 SExternal 写在前面，导致 Linux 把 S 模式上下文认成 index 0，
+    // 于是外设中断的使能位被写进 M 模式上下文：mip.MEIP 置起但 mip.SEIP 恒为 0，
+    // 而 S 模式内核在 U 态下 mstatus.MIE=0，中断永远进不来 ——
+    // 表现就是用户态 write() 全部成功、串口一个字节都不吐（printk 走轮询故不受影响）。
+    plicNode.propU32('interrupts-extended', [1, Irq.MExternal, 1, Irq.SExternal]);
     plicNode.propReg('reg', [[VIRT_PLIC, 0x4000000n]]);
     plicNode.propU32('phandle', [2]);
 
@@ -361,6 +367,15 @@ export class Machine {
   /** PLIC 两个上下文（0=M，1=S）的中断输出电平 */
   private plicLevelM = false;
   private plicLevelS = false;
+
+  /**
+   * PLIC 各上下文当前的中断输出电平（诊断用，下标即上下文号：0=M、1=S）。
+   * 排查「外设中断进不了 CPU」时，先对比它和 DTB 里 interrupts-extended
+   * 声明的顺序是否一致。
+   */
+  get plicContextLevels(): readonly boolean[] {
+    return [this.plicLevelM, this.plicLevelS];
+  }
 
   /**
    * mtime 抖动：每条指令推进时叠加确定性伪随机增量。

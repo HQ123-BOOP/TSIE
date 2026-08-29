@@ -329,3 +329,85 @@ test('lw 指令可用于检查内存写入结果', () => {
   assert.equal(m.cpu.x[3], 0x1234n);
   assert.equal(m.exitCode, 0);
 });
+
+// ----------------------------------------------------------------------
+// DTB 的 PLIC 上下文顺序（回归：外设中断被写进 M 模式上下文，用户态输出全丢）
+// ----------------------------------------------------------------------
+
+/**
+ * 从生成好的 DTB 里取出某个节点的属性的 u32 cell 数组。
+ * nodeName 为节点名前缀（如 'plic@'），因为 CLINT 也有 interrupts-extended。
+ */
+function dtbPropU32(m: Machine, nodeName: string, propName: string): number[] {
+  const dtb = m.bus.readBytes(m.dtbAddress, 8192);
+  const dv = new DataView(dtb.buffer, dtb.byteOffset, dtb.byteLength);
+  // fdt_header：0x08 = off_dt_struct，0x0c = off_dt_strings
+  const offStruct = dv.getUint32(0x08);
+  const offStrings = dv.getUint32(0x0c);
+  const readName = (at: number) => {
+    let n = 0;
+    while (dtb[at + n] !== 0) n++;
+    return Buffer.from(dtb.subarray(at, at + n)).toString('latin1');
+  };
+
+  let p = offStruct;
+  let inNode = false;
+  for (;;) {
+    const token = dv.getUint32(p);
+    p += 4;
+    if (token === 9) break; // FDT_END
+    if (token === 1) { // FDT_BEGIN_NODE
+      inNode = readName(p).startsWith(nodeName);
+      while (dtb[p] !== 0) p++;
+      p = (p + 4) & ~3;
+      continue;
+    }
+    if (token === 2) { inNode = false; continue; } // FDT_END_NODE
+    if (token === 4) continue; // FDT_NOP
+    if (token !== 3) break; // FDT_PROP
+    const len = dv.getUint32(p);
+    const nameOff = dv.getUint32(p + 4);
+    p += 8;
+    if (inNode && readName(offStrings + nameOff) === propName) {
+      const cells: number[] = [];
+      for (let i = 0; i + 4 <= len; i += 4) cells.push(dv.getUint32(p + i));
+      return cells;
+    }
+    p = (p + len + 3) & ~3;
+  }
+  throw new Error(`DTB 的 ${nodeName} 节点里找不到属性 ${propName}`);
+}
+
+test('DTB：PLIC 的 interrupts-extended 顺序必须与上下文编号一致（M 在前、S 在后）', () => {
+  const m = new Machine({ memSize: 64n * 1024n * 1024n } as MachineOptions);
+  const cells = dtbPropU32(m, 'plic@', 'interrupts-extended');
+  assert.deepEqual(
+    cells,
+    [1, 11 /* MExternal */, 1, 9 /* SExternal */],
+    '上下文 0 必须对应 M 模式、上下文 1 对应 S 模式；顺序颠倒会让 Linux ' +
+    '把 S 模式的中断使能写进 M 模式上下文，外设中断永远进不了内核',
+  );
+});
+
+test('DTB 声明的 S 模式上下文确实能投递到 CPU 的 SEIP', () => {
+  const m = new Machine({ memSize: 64n * 1024n * 1024n } as MachineOptions);
+  const cells = dtbPropU32(m, 'plic@', 'interrupts-extended');
+
+  // 复现 Linux PLIC 驱动：按顺序逐个上下文配对，挑出 SExternal 的那个
+  let sCtx: number = -1;
+  for (let i = 1; i < cells.length; i += 2) {
+    if (cells[i] === 9 /* SExternal */) { sCtx = (i - 1) / 2; break; }
+  }
+  assert.equal(sCtx, 1, 'S 模式应为上下文 1');
+
+  // 按驱动的方式初始化并使能串口中断（中断源 10）
+  m.plic.write(BigInt(10) * 4n, 1n, 4); // priority[10] = 1
+  m.plic.write(0x200000n + BigInt(sCtx) * 0x1000n + 4n, 0n, 4); // threshold = 0
+  m.plic.write(0x2000n + BigInt(sCtx) * 0x80n, 1n << 10n, 4); // enable 源 10
+  m.plic.setIrq(10, true);
+
+  const levels = m.plicContextLevels;
+  assert.equal(levels[sCtx], true, 'S 模式上下文应输出高电平');
+  assert.equal(levels[1 - sCtx], false, 'M 模式上下文不应被误使能');
+  assert.equal(Number(m.plic.read(0x200000n + BigInt(sCtx) * 0x1000n, 4)), 10, 'S 模式应能 claim 到中断源 10');
+});
