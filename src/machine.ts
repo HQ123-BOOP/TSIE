@@ -345,9 +345,28 @@ export class Machine {
   private plicLevelM = false;
   private plicLevelS = false;
 
+  /**
+   * mtime 抖动源：固定种子的 xorshift32。
+   * 真实硬件上 mtime 是自由运行计数器，与指令流不同步（存在抖动）；
+   * 若 mtime 与指令数严格线性，jitterentropy 等依赖时间抖动的子系统
+   * （如内核 CRNG 的 jent_mod_init）会因采样恒定 delta 而死循环。
+   * 固定种子保证仿真可复现。
+   */
+  private mtimeJitterState = 0x9e3779b9;
+
+  private mtimeJitter(): bigint {
+    let x = this.mtimeJitterState;
+    x ^= x << 13; x >>>= 0;
+    x ^= x >> 17;
+    x ^= x << 5; x >>>= 0;
+    this.mtimeJitterState = x;
+    // 映射到 [-8, +7]，相对 64 条指令一档的 tick 约 ±12%
+    return BigInt((x & 0xf) - 8);
+  }
+
   /** 推进设备状态（mtime 等） */
   private tick(instructions: number): void {
-    this.clint.mtime += BigInt(instructions * this.cyclesPerTick);
+    this.clint.mtime += BigInt(instructions * this.cyclesPerTick) + this.mtimeJitter();
     this.syncIrqs();
   }
 
