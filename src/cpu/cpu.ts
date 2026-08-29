@@ -217,7 +217,17 @@ export class Cpu {
     this.syncMmu();
     this.refreshMip();
     if (this.checkInterrupts()) return;
-    if (this.wfi) return; // 等待中断
+    if (this.wfi) {
+      // RISC-V 特权规范 §3.3.3：WFI 的唤醒**不受 mstatus.MIE/SIE 与 mideleg 影响**。
+      // 只要有中断挂起（无论全局使能位是否打开），hart 就必须退出 WFI、
+      // 从 WFI 之后一条继续执行 —— 此时并不陷入；随后软件开中断才会真正响应它。
+      // Linux 正是据此实现的：kernel/sched/idle.c 先 local_irq_disable() 再
+      // arch_cpu_idle() 执行 wfi，返回后才 local_irq_enable()。
+      // 若在这里直接 return 而不检查挂起，关着中断的 WFI 会永久死锁 ——
+      // 表现为 mtime 一路快进、外设中断来了也无人应答。
+      if ((this.csr.raw(CSR.MIE) & this.csr.raw(CSR.MIP)) !== 0n) this.wfi = false;
+      return;
+    }
 
     const pc = this.pc;
     this.nextPc = pc + 4n;

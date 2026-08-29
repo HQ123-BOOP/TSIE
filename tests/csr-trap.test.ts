@@ -234,3 +234,40 @@ test('页故障：写入只读页触发 store page fault', () => {
   assert.equal(h.cpu.csr.read(CSR.MCAUSE), BigInt(Exc.StorePageFault));
   assert.equal(h.cpu.csr.read(CSR.MTVAL), U(0x1000000n));
 });
+
+test('WFI：中断挂起时必须退出等待（不受 SIE/MIE 影响）', () => {
+  // RISC-V 特权规范 §3.3.3：WFI 的唤醒不受 mstatus.MIE/SIE 与 mideleg 影响。
+  // Linux 的空闲路径正是「关中断 → wfi → 开中断」
+  // （kernel/sched/idle.c: local_irq_disable() 后 default_idle_call()，
+  //  返回才 local_irq_enable()）。
+  // 若关着中断时 WFI 不被唤醒，系统会永久死锁：mtime 一路快进、
+  // 外设中断来了也无人应答。
+  const h = makeCpu([wfi(), addi(1, 0, 1), ...halt()]);
+
+  // 制造一个「已挂起但全局关闭」的中断：mie.STIE=1、mip.STIP=1、mstatus.SIE=0
+  h.cpu.priv = Priv.S;
+  h.cpu.csr.writeRaw(CSR.MIE, 1n << 5n); // STIE
+  h.cpu.csr.writeRaw(CSR.MIP, 1n << 5n); // STIP
+  h.cpu.csr.writeRaw(CSR.MIDELEG, 1n << 5n); // 委派给 S 模式，确保不会被 M 模式抢先响应
+  h.cpu.csr.writeRaw(CSR.MSTATUS, 0n); // SIE = 0
+
+  h.cpu.step(); // 执行 wfi
+  assert.equal(h.cpu.wfi, true);
+
+  h.cpu.step(); // 中断挂起 → 应退出 WFI（本步不推进）
+  h.cpu.step(); // 恢复执行 WFI 之后的一条指令
+  assert.equal(h.cpu.wfi, false, '有中断挂起时必须退出 WFI');
+  assert.equal(h.cpu.x[1], 1n, '应继续执行 WFI 之后的指令');
+  // 全局中断仍关闭，所以不会陷入
+  assert.equal(h.cpu.csr.read(CSR.MCAUSE) ?? 0n, 0n, '中断未使能时不该陷入');
+});
+
+test('WFI：无任何中断挂起时保持等待', () => {
+  const h = makeCpu([wfi(), addi(1, 0, 1), ...halt()]);
+  h.cpu.csr.writeRaw(CSR.MIE, 0n);
+  h.cpu.csr.writeRaw(CSR.MIP, 0n);
+  h.cpu.step();
+  for (let i = 0; i < 5; i++) h.cpu.step();
+  assert.equal(h.cpu.wfi, true, '没有中断挂起时应继续等待');
+  assert.equal(h.cpu.x[1], 0n);
+});
