@@ -76,6 +76,8 @@ export class Cpu {
   pc = 0n;
   /** 调试钩子：每次非法指令异常时回调（pc、指令编码、当前特权级） */
   onIllegal?: (pc: bigint, inst: number, priv: PrivLevel) => void;
+  /** 调试钩子：每次同步异常（含 ECALL）进入时回调，在 SBI 拦截之前 */
+  onTrap?: (cause: number, tval: bigint, pc: bigint, priv: PrivLevel) => void;
   /** 下一条指令地址（跳转指令修改它） */
   nextPc = 0n;
   priv: PrivLevel = Priv.M;
@@ -1240,6 +1242,7 @@ export class Cpu {
 
   /** 同步异常入口 */
   takeException(cause: number, tval: bigint): void {
+    this.onTrap?.(cause, tval, this.pc, this.priv);
     // 内建 SBI：拦截 S 模式的 ECALL
     if (cause === Exc.EnvCallFromS && this.sbi && this.priv <= Priv.S) {
       if (this.sbi.handleEcall(this)) return;
