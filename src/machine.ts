@@ -130,7 +130,8 @@ export class Machine {
     }
 
     this.cpu = new Cpu(this.bus, { misaligned: opts.misaligned ?? 'trap' });
-    this.cpu.timeSource = () => this.clint.mtime;
+    // 含未结算子刻度：使 mtime 抖动对 guest 的 rdtime 保持逐指令粒度
+    this.cpu.timeSource = () => this.currentTime();
     this.plic.bindContext(0, (level) => {
       this.plicLevelM = level;
       this.syncIrqs();
@@ -327,47 +328,84 @@ export class Machine {
   // 中断同步与执行
   // ------------------------------------------------------------------
 
-  /** 把 CLINT / PLIC 的挂起状态同步到 CPU 中断线（带变化检测，可逐指令调用） */
+  /**
+   * 把 CLINT / PLIC 的挂起状态同步到 CPU 中断线（带变化检测，可逐指令调用）。
+   * 热路径优化：先用 Number 位掩码做变化检测，只有真正变化时才构造 BigInt
+   * （原实现每条指令都执行 `1n << BigInt(...)`，BigInt 分配是主要瓶颈之一）。
+   */
   syncIrqs(): void {
+    let n = 0;
+    if (this.clint.timerPending) n |= 1;
+    if (this.clint.softwarePending) n |= 2;
+    if (this.plicLevelM) n |= 4;
+    if (this.plicLevelS) n |= 8;
+    if (n === this.irqLinesNum) return;
+    this.irqLinesNum = n;
     let lines = 0n;
-    if (this.clint.timerPending) lines |= 1n << BigInt(Irq.MTimer);
-    if (this.clint.softwarePending) lines |= 1n << BigInt(Irq.MSoftware);
-    if (this.plicLevelM) lines |= 1n << BigInt(Irq.MExternal);
-    if (this.plicLevelS) lines |= 1n << BigInt(Irq.SExternal);
-    if (lines === this.irqLinesValue) return;
-    this.irqLinesValue = lines;
+    if (n & 1) lines |= this.irqMaskMTimer;
+    if (n & 2) lines |= this.irqMaskMSoft;
+    if (n & 4) lines |= this.irqMaskMExt;
+    if (n & 8) lines |= this.irqMaskSExt;
     this.cpu.setIrqLines(lines);
   }
 
-  private irqLinesValue = 0n;
+  /** 中断线掩码常量（构造一次，避免热路径重复分配 BigInt） */
+  private readonly irqMaskMTimer = 1n << BigInt(Irq.MTimer);
+  private readonly irqMaskMSoft = 1n << BigInt(Irq.MSoftware);
+  private readonly irqMaskMExt = 1n << BigInt(Irq.MExternal);
+  private readonly irqMaskSExt = 1n << BigInt(Irq.SExternal);
+
+  /** Number 形式的中断线缓存（-1 = 尚未初始化，保证首次必定下发） */
+  private irqLinesNum = -1;
 
   /** PLIC 两个上下文（0=M，1=S）的中断输出电平 */
   private plicLevelM = false;
   private plicLevelS = false;
 
   /**
-   * mtime 抖动源：固定种子的 xorshift32。
-   * 真实硬件上 mtime 是自由运行计数器，与指令流不同步（存在抖动）；
+   * mtime 抖动：每条指令推进时叠加确定性伪随机增量。
+   * 真实硬件上 mtime 是自由运行计数器，与指令流异步（存在抖动）；
    * 若 mtime 与指令数严格线性，jitterentropy 等依赖时间抖动的子系统
-   * （如内核 CRNG 的 jent_mod_init）会因采样恒定 delta 而死循环。
-   * 固定种子保证仿真可复现。
+   * （如内核 CRNG 的 jent_mod_init）会因采样到恒定 delta 而死循环。
+   * 抖动以绝对指令计数为种子（xorshift32），循环每迭代一次采样窗口就沿
+   * 伪随机序列滑动一格 → 各次采样 delta 不同，能产出真实熵；固定种子
+   * 保证仿真可复现。
    */
   private mtimeJitterState = 0x9e3779b9;
 
-  private mtimeJitter(): bigint {
+  /**
+   * 自上次结算以来累计的 mtime 增量（Number，含逐指令抖动）。
+   * 热路径只做 Number 加法，避免每条指令分配 BigInt；
+   * guest 读 time CSR 时会把它加进去（见 timeSource 接线），
+   * 因此**抖动对 rdtime 而言仍是逐指令粒度**，与直接改 BigInt 完全等价。
+   */
+  private timeSub = 0;
+
+  /** 每条指令累计 mtime 增量，叠加 {0,1,2} 抖动（均值 1，整体速率≈cyclesPerTick） */
+  private advanceTimeSub(): void {
     let x = this.mtimeJitterState;
     x ^= x << 13; x >>>= 0;
     x ^= x >> 17;
     x ^= x << 5; x >>>= 0;
     this.mtimeJitterState = x;
-    // 映射到 [-8, +7]，相对 64 条指令一档的 tick 约 ±12%
-    return BigInt((x & 0xf) - 8);
+    const r = (x >>> 11) & 3;        // 0..3
+    const extra = r === 3 ? 2 : r;  // 0,1,1,2 → 均值 1.0
+    let inc = this.cyclesPerTick + (extra - 1);
+    if (inc < 0) inc = 0;
+    this.timeSub += inc;
   }
 
-  /** 推进设备状态（mtime 等） */
-  private tick(instructions: number): void {
-    this.clint.mtime += BigInt(instructions * this.cyclesPerTick) + this.mtimeJitter();
-    this.syncIrqs();
+  /** 把累计的子刻度结算进 clint.mtime（每 64 条指令一次，摊薄 BigInt 开销） */
+  private settleTime(): void {
+    if (this.timeSub !== 0) {
+      this.clint.mtime += BigInt(this.timeSub);
+      this.timeSub = 0;
+    }
+  }
+
+  /** guest 可见的当前时间（含尚未结算的子刻度） */
+  currentTime(): bigint {
+    return this.timeSub === 0 ? this.clint.mtime : this.clint.mtime + BigInt(this.timeSub);
   }
 
   /** 运行若干条指令 */
@@ -382,17 +420,19 @@ export class Machine {
       // 逐指令同步中断线：定时器/软件中断可能在任意时刻到期
       this.syncIrqs();
       cpu.step();
+      this.advanceTimeSub();
       count++;
       if ((count & TICK_MASK) === 0) {
-        this.tick(TICK_MASK + 1);
+        this.settleTime();
         if (opts.onStep && opts.onStep(cpu, count) === false) break;
       }
       if (cpu.wfi) {
         // 空闲等待时加速时间推进，避免无意义空转
-        this.clint.mtime += 16n;
+        this.timeSub += 16;
       }
     }
-    this.tick(count & TICK_MASK);
+    this.settleTime();
+    this.syncIrqs();
 
     const seconds = (performance.now() - started) / 1000;
     return {
