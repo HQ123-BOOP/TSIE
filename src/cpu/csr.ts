@@ -157,6 +157,12 @@ export class CsrFile {
   };
   /** satp 写入回调（用于刷 TLB） */
   onSatpWrite?: (value: bigint) => void;
+  /**
+   * mstatus / satp 自上次 MMU 同步以来是否被写过。
+   * CPU 每条指令都要把 mstatus/satp 同步给 MMU，但这两个 CSR 极少变化；
+   * 用脏标记把常态开销从「2 次带钩子的 read + 掩码」降为一次布尔判断。
+   */
+  mmuDirty = true;
 
   constructor() {
     this.defineDefaults();
@@ -169,6 +175,7 @@ export class CsrFile {
   define(addr: number, initial: bigint, def: CsrDef): void {
     this.defs[addr] = def;
     this.regs[addr] = initial & def.mask;
+    if (addr === CSR.MSTATUS || addr === CSR.SATP) this.mmuDirty = true;
   }
 
   /** 读取 CSR；返回 null 表示该 CSR 未实现（应触发非法指令） */
@@ -179,6 +186,17 @@ export class CsrFile {
     return (def.read ? def.read(cur) : cur) & def.mask;
   }
 
+  /**
+   * 热路径直读：返回内部存储的原始值，跳过 read 钩子与掩码。
+   *
+   * 仅可用于「没有 read 钩子」或「钩子结果对调用方无影响」的 CSR。
+   * 目前用于 MMU 同步（mstatus 的 read 钩子只合成 SD 位，MMU 不使用该位）
+   * 与 mip 刷新（mip 无 read 钩子）。
+   */
+  raw(addr: number): bigint {
+    return this.regs[addr] ?? 0n;
+  }
+
   /** 直接写（绕过特权检查），返回值表示是否成功 */
   writeRaw(addr: number, value: bigint): boolean {
     const def = this.defs[addr];
@@ -187,6 +205,7 @@ export class CsrFile {
     let next = value & def.mask;
     if (def.write) next = def.write(next, cur) & def.mask;
     this.regs[addr] = next & MASK64;
+    if (addr === CSR.MSTATUS || addr === CSR.SATP) this.mmuDirty = true;
     return true;
   }
 

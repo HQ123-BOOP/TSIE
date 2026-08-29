@@ -157,11 +157,19 @@ export class Cpu {
     this.f[rd] = v & MASK64;
   }
 
-  /** 把特权级 / mstatus / satp 同步到 MMU（公开以便调试与测试） */
+  /**
+   * 把特权级 / mstatus / satp 同步到 MMU（公开以便调试与测试）。
+   *
+   * 热路径优化：mstatus/satp 极少变化，用 csr.mmuDirty 脏标记 + priv 比较短路，
+   * 避免每条指令都走两次带钩子的 CSR read（含 BigInt 掩码运算）。
+   * 这里用 csr.raw() 直读原始值：mstatus 的 read 钩子只合成 SD 位，MMU 不使用该位。
+   */
   syncMmu(): void {
+    if (!this.csr.mmuDirty && this.mmu.priv === this.priv) return;
+    this.csr.mmuDirty = false;
     this.mmu.priv = this.priv;
-    this.mmu.mstatus = this.csr.read(CSR.MSTATUS) ?? 0n;
-    this.mmu.satp = this.csr.read(CSR.SATP) ?? 0n;
+    this.mmu.mstatus = this.csr.raw(CSR.MSTATUS);
+    this.mmu.satp = this.csr.raw(CSR.SATP);
   }
 
   /** 供设备调用：设置中断挂起线 */
@@ -169,13 +177,25 @@ export class Cpu {
     this.irqLines = mask;
   }
 
+  /**
+   * 由设备直接驱动的 mip 位：MTIP(7) / MSIP(3) / MEIP(11) / SEIP(9)。
+   * STIP(5) 与 SSIP(1) 由 M 模式软件（SBI）管理，不在此覆盖。
+   * 预计算为常量字段，避免每条指令重新构造 BigInt 掩码。
+   */
+  private static readonly DEVICE_MIP_MASK = (1n << 7n) | (1n << 3n) | (1n << 11n) | (1n << 9n);
+  private static readonly DEVICE_MIP_NMASK = ~((1n << 7n) | (1n << 3n) | (1n << 11n) | (1n << 9n));
+
   private refreshMip(): void {
     const lines = this.irqLines;
-    const mip = this.csr.read(CSR.MIP) ?? 0n;
-    // 由设备直接驱动的位：MTIP(7) / MSIP(3) / MEIP(11) / SEIP(9)
-    // STIP(5) 与 SSIP(1) 由 M 模式软件（SBI）管理，不在此覆盖
-    const deviceMask = (1n << 7n) | (1n << 3n) | (1n << 11n) | (1n << 9n);
-    const next = (mip & ~deviceMask) | (lines & deviceMask);
+    const mip = this.csr.raw(CSR.MIP); // mip 无 read 钩子，可直读
+    const dm = Cpu.DEVICE_MIP_MASK;
+    // 常态（无任何设备中断挂起）快路径：只需一次 BigInt AND
+    if (lines === 0n) {
+      if ((mip & dm) === 0n) return;
+      this.csr.writeRaw(CSR.MIP, mip & Cpu.DEVICE_MIP_NMASK);
+      return;
+    }
+    const next = (mip & Cpu.DEVICE_MIP_NMASK) | (lines & dm);
     if (next !== mip) this.csr.writeRaw(CSR.MIP, next);
   }
 
@@ -1210,18 +1230,31 @@ export class Cpu {
 
   /** 中断优先级：外部 > 软件 > 定时器，高特权级优先 */
   private static readonly IRQ_PRIORITY = [11, 3, 7, 9, 1, 5, 8, 0, 4];
+  /** IRQ_PRIORITY 对应的位掩码，预计算避免热路径构造 BigInt */
+  private static readonly IRQ_PRIORITY_BITS = Cpu.IRQ_PRIORITY.map((n) => 1n << BigInt(n));
 
-  /** 检查并投递中断，返回 true 表示本周期已陷入 */
+  /**
+   * 检查并投递中断，返回 true 表示本周期已陷入。
+   *
+   * 热路径优化：绝大多数指令没有「已使能且已挂起」的中断，因此先用
+   * mie/mip 两次原始直读做早退，只有真正可能投递时才读 mstatus/mideleg。
+   * mie / mip / mideleg 均无 read 钩子；mstatus 的 read 钩子只合成 SD 位，
+   * 而本函数只关心 MIE(3) / SIE(1)，故四者都可安全 raw 直读。
+   */
   private checkInterrupts(): boolean {
-    const mstatus = this.csr.read(CSR.MSTATUS) ?? 0n;
-    const mie = this.csr.read(CSR.MIE) ?? 0n;
-    const mip = this.csr.read(CSR.MIP) ?? 0n;
-    const mideleg = this.csr.read(CSR.MIDELEG) ?? 0n;
+    const mie = this.csr.raw(CSR.MIE);
+    if (mie === 0n) return false;
+    const mip = this.csr.raw(CSR.MIP);
     const pending = mie & mip;
     if (pending === 0n) return false;
 
-    for (const irq of Cpu.IRQ_PRIORITY) {
-      const bit = 1n << BigInt(irq);
+    const mstatus = this.csr.raw(CSR.MSTATUS);
+    const mideleg = this.csr.raw(CSR.MIDELEG);
+    const prio = Cpu.IRQ_PRIORITY;
+    const bits = Cpu.IRQ_PRIORITY_BITS;
+    for (let i = 0; i < prio.length; i++) {
+      const irq = prio[i]!;
+      const bit = bits[i]!;
       if ((pending & bit) === 0n) continue;
       const delegated = (mideleg & bit) !== 0n;
       const toM = this.priv === Priv.M || !delegated;

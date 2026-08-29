@@ -381,16 +381,34 @@ export class Machine {
    */
   private timeSub = 0;
 
-  /** 每条指令累计 mtime 增量，叠加 {0,1,2} 抖动（均值 1，整体速率≈cyclesPerTick） */
+  /**
+   * mtime 逐指令增量查表（16 项，总和 16 → 均值严格 1.0）。
+   *
+   * 早期版本用 {0,1,1,2}（仅 ±1 波动），幅度太窄：jitterentropy 判定「stuck」
+   * 的依据是采样 delta 的一阶/二阶/三阶差分只要有一个为 0 就作废，而窄分布下
+   * 相邻 delta 极易相等 → 绝大多数采样被丢弃 → jent 反复重采，在 keccak 置换上
+   * 白烧上亿条指令。
+   *
+   * 这里改为「多数微增 + 偶发大跳」的宽分布（0/1/2/8，1/16 概率跳 8），
+   * delta 的取值空间显著变宽，二阶、三阶差分几乎不可能归零，
+   * 同时长期均值仍为 1.0，虚拟时间流速不失真。
+   */
+  private static readonly MTIME_JITTER_TABLE = new Int32Array([
+    0, 0, 0, 0, 0, 0, 0, 0, 0, // 9 × 0
+    1, 1, 1, 1,                // 4 × 1
+    2, 2,                      // 2 × 2
+    8,                         // 1 × 8（偶发大跳，拉宽 delta 分布）
+  ]);
+
+  /** 每条指令累计 mtime 增量，叠加宽幅抖动（均值 1，整体速率≈cyclesPerTick） */
   private advanceTimeSub(): void {
     let x = this.mtimeJitterState;
     x ^= x << 13; x >>>= 0;
     x ^= x >> 17;
     x ^= x << 5; x >>>= 0;
     this.mtimeJitterState = x;
-    const r = (x >>> 11) & 3;        // 0..3
-    const extra = r === 3 ? 2 : r;  // 0,1,1,2 → 均值 1.0
-    let inc = this.cyclesPerTick + (extra - 1);
+    const extra = Machine.MTIME_JITTER_TABLE[(x >>> 11) & 15]!;
+    let inc = this.cyclesPerTick - 1 + extra;
     if (inc < 0) inc = 0;
     this.timeSub += inc;
   }
