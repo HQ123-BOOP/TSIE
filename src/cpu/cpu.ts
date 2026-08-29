@@ -618,6 +618,22 @@ export class Cpu {
       this.execCsr(inst, rd, funct3, rs1);
       return;
     }
+    // SFENCE.VMA 的编码是 funct7=0x09 拼上 rs2 字段（funct12 = 0x120 | rs2），
+    // 其中 rs2 指定 ASID 寄存器。因此**不能**用完整的 12 位 funct12 去 switch：
+    // 那样只有 rs2=0 的 `sfence.vma` 能匹配 0x120，而内核在 execve 搬移栈页表时
+    // 发出的 `sfence.vma addr, asid`（如 rs2=a6 → funct12=0x130）会被误判为非法指令。
+    // 必须先按 funct7 识别，把 rs2 当参数取。
+    if ((inst >>> 25) === 0x09) { // SFENCE.VMA
+      if (this.priv < Priv.S) return this.illegal(inst);
+      const mstatus = this.csr.raw(CSR.MSTATUS);
+      if (this.priv === Priv.S && (mstatus & (1n << 20n)) !== 0n) return this.illegal(inst); // TVM
+      const rs2 = (inst >>> 20) & 0x1f;
+      const vaddr = rs1 === 0 ? undefined : this.x[rs1];
+      const asid = rs2 === 0 ? undefined : Number(this.x[rs2]! & 0xffffn);
+      this.mmu.flushBy(vaddr, asid);
+      return;
+    }
+
     const imm = (inst >>> 20) & 0xfff;
     switch (imm) {
       case 0x000: { // ECALL
@@ -662,15 +678,8 @@ export class Cpu {
         this.wfi = true;
         return;
       }
-      case 0x120: { // SFENCE.VMA
-        if (this.priv < Priv.S) return this.illegal(inst);
-        const mstatus = this.csr.read(CSR.MSTATUS) ?? 0n;
-        if (this.priv === Priv.S && (mstatus & (1n << 20n)) !== 0n) return this.illegal(inst); // TVM
-        const vaddr = rs1 === 0 ? undefined : this.x[rs1];
-        const asid = rs2Field(inst) === 0 ? undefined : Number(this.x[rs2Field(inst)] & 0xffffn);
-        this.mmu.flushBy(vaddr, asid);
-        return;
-      }
+      // 注意：SFENCE.VMA（funct7=0x09）已在上面按 funct7 处理，
+      // 不能放在这里按 funct12 匹配，否则带 ASID 的形式会漏判。
       default:
         return this.illegal(inst);
     }
@@ -1334,10 +1343,6 @@ export class Cpu {
 // ----------------------------------------------------------------------
 // 辅助：字段与立即数
 // ----------------------------------------------------------------------
-
-function rs2Field(inst: number): number {
-  return (inst >> 20) & 0x1f;
-}
 
 function rs3Field(inst: number): number {
   return (inst >>> 27) & 0x1f;

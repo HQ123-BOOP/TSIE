@@ -150,6 +150,44 @@ test('TLB 命中与 sfence.vma 失效', () => {
   assert.equal(mmu.translate(0x1000000n, AccessType.Load), 0x2000000n, 'sfence 后生效');
 });
 
+// 回归测试：SFENCE.VMA 的 funct12 低 5 位是 rs2（ASID 寄存器），
+// 早期实现用完整 12 位 funct12 匹配 case 0x120，导致只有 rs2=0 的
+// `sfence.vma` 能识别，而内核 execve 搬移栈页表时发出的
+// `sfence.vma addr, asid`（rs2≠0 → funct12=0x120|rs2）被误判为非法指令，
+// 真实表现是启动到 Run /init 后立刻 Oops：
+//   epc=__flush_tlb_range  badaddr=0x13030073  cause=2
+test('sfence.vma 的全部 rs1/rs2 组合都必须被识别（不得判为非法指令）', () => {
+  for (const [rs1, rs2] of [[0, 0], [6, 0], [0, 16], [6, 16], [31, 31]] as const) {
+    const h = makeCpu([sfenceVma(rs1, rs2), ...halt()]);
+    h.cpu.priv = Priv.S; // SFENCE.VMA 需要 S 模式及以上
+    h.cpu.syncMmu();
+    h.run(1);
+    assert.equal(
+      h.cpu.csr.read(CSR.MCAUSE),
+      0n,
+      `sfence.vma x${rs1}, x${rs2} 被误判为非法指令（mcause 应为 0）`,
+    );
+    assert.equal(h.cpu.priv, Priv.S, `sfence.vma x${rs1}, x${rs2} 不应触发陷入而切到 M 模式`);
+  }
+});
+
+test('sfence.vma 带 ASID 时只刷该 ASID 的 TLB 条目', () => {
+  const h = makeCpu([...halt()]);
+  const pt = setupSv39(h);
+  pt.map(0x1000000n, 0x1000000n, PTE_R | PTE_W | PTE_A | PTE_D, 0);
+  enablePaging(h, pt);
+  const mmu = h.cpu.mmu;
+  mmu.flush();
+  assert.equal(mmu.translate(0x1000000n, AccessType.Load), 0x1000000n);
+  // 改页表，然后用「不匹配的 ASID」刷 —— 旧映射应保留
+  pt.map(0x1000000n, 0x2000000n, PTE_R | PTE_W | PTE_A | PTE_D, 0);
+  mmu.flushBy(0x1000000n, 0xbeef);
+  assert.equal(mmu.translate(0x1000000n, AccessType.Load), 0x1000000n, '不匹配的 ASID 不应刷掉条目');
+  // 用当前 ASID（0）刷 —— 新映射生效
+  mmu.flushBy(0x1000000n, 0);
+  assert.equal(mmu.translate(0x1000000n, AccessType.Load), 0x2000000n, '匹配的 ASID 应刷掉条目');
+});
+
 test('satp 写入会清空 TLB', () => {
   const h = makeCpu([...halt()]);
   const pt = setupSv39(h);
