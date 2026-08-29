@@ -266,3 +266,100 @@ test('VirtIO：不支持的请求返回 UNSUPP', () => {
   dev.write(0x50n, 0n, 4);
   assert.equal(ram.read(O(STATUS), 1), 2n, '状态应为 BLK_S_UNSUPP');
 });
+
+// ----------------------------------------------------------------------
+// PLIC 电平敏感语义 + 16550 中断式发送
+// 回归：内核跑到 Run /init 后，用户态 write() 全部成功但串口零输出。
+// ----------------------------------------------------------------------
+
+/**
+ * 模拟 Linux serial8250 驱动的中断式发送流程：
+ *   __uart_start → 打开 IER.THRI
+ *   ISR          → claim → 读 IIR → 写一个字节到 THR
+ *   缓冲空       → serial8250_stop_tx 关掉 THRI
+ *   ISR 结束     → complete
+ * 16550 的 THRE 在发送期间**始终为高**、不会自行下降，因此 complete 之后
+ * 必须能重新挂起，否则剩下的数据会永久卡在驱动的 xmit 缓冲里。
+ */
+function drive8250Tx(plic: Plic, uart: Uart, data: number[], irq: number, maxRounds = 500) {
+  const out: number[] = [];
+  const queued = [...data];
+  let ier = 0;
+  let sLevel = false;
+  plic.bindContext(1, (l) => { sLevel = l; });
+  // 模仿 Linux PLIC 驱动初始化：源优先级 1、阈值 0、使能 S 模式上下文
+  plic.write(0x201004n, 0n, 4);
+  plic.write(BigInt(irq) * 4n, 1n, 4);
+  plic.write(0x2080n, 1n << BigInt(irq), 4);
+
+  for (let r = 0; r < maxRounds; r++) {
+    if (queued.length > 0 && !(ier & 0x02)) {
+      ier |= 0x02;
+      uart.write(1n, BigInt(ier), 1); // IER
+    }
+    if (!sLevel) break; // 中断没来，驱动推不动了
+    const id = Number(plic.read(0x201000n, 4)); // claim
+    if (id !== irq) { plic.write(0x201000n, BigInt(id), 4); break; }
+    if ((Number(uart.read(2n, 1)) & 0x0f) !== 0x02) { // IIR 非 THRE
+      plic.write(0x201000n, BigInt(id), 4);
+      break;
+    }
+    out.push(queued.shift()!);
+    uart.write(0n, BigInt(out.at(-1)!), 1); // THR
+    if (queued.length === 0) {
+      ier &= ~0x02;
+      uart.write(1n, BigInt(ier), 1);
+    }
+    plic.write(0x201000n, BigInt(id), 4); // complete
+    if (queued.length === 0) break;
+  }
+  return out;
+}
+
+test('PLIC 电平敏感：complete 后源仍为高应重新挂起', () => {
+  const plic = new Plic(32, 2);
+  plic.write(0x0004n, 5n, 4); // 源 1 优先级 = 5
+  plic.write(0x201004n, 0n, 4); // 上下文 1 阈值 = 0
+  plic.write(0x2080n, 0x2n, 4); // 使能上下文 1 的源 1
+  plic.setIrq(1, true);
+
+  assert.equal(plic.read(0x201000n, 4), 1n, '首次 claim');
+  assert.equal(plic.read(0x201000n, 4), 0n, '已 claim 未 complete 时不重复投递');
+  plic.write(0x201000n, 1n, 4); // complete
+
+  // 物理电平没撤（如 16550 的 THRE），必须重新挂起
+  assert.equal(plic.read(0x201000n, 4), 1n, '电平仍为高，complete 后应再次可 claim');
+  plic.write(0x201000n, 1n, 4);
+
+  plic.setIrq(1, false); // 源撤掉
+  assert.equal(plic.read(0x201000n, 4), 0n, '源撤掉后不应再投递');
+});
+
+test('PLIC：complete 了别的中断号不应误清除 in-service', () => {
+  const plic = new Plic(32, 2);
+  for (const s of [1, 2]) plic.write(BigInt(s) * 4n, BigInt(s), 4); // 优先级 1、2
+  plic.write(0x201004n, 0n, 4);
+  plic.write(0x2080n, 0x6n, 4); // 使能源 1、2
+  plic.setIrq(1, true);
+  plic.setIrq(2, true);
+
+  assert.equal(plic.read(0x201000n, 4), 2n, '优先级 2 更高，先 claim 源 2');
+  plic.write(0x201000n, 1n, 4); // 错误地 complete 源 1
+  assert.equal(plic.read(0x201000n, 4), 1n, '错误的 complete 不影响源 2 的 in-service');
+  plic.write(0x201000n, 2n, 4); // 正确 complete 源 2
+  plic.write(0x201000n, 1n, 4); // complete 刚才 claim 的源 1
+  assert.equal(plic.read(0x201000n, 4), 2n, '两个都 complete 后，高优先级的源 2 重新挂起');
+});
+
+test('16550 + PLIC：中断式发送能把整块数据发完', () => {
+  const plic = new Plic(32, 2);
+  const uart = new Uart({ irq: (level) => plic.setIrq(10, level) });
+  const payload = Array.from('ts-riscv64: Linux userspace is ALIVE\n').map((c) => c.charCodeAt(0));
+  const out = drive8250Tx(plic, uart, payload, 10);
+  assert.equal(
+    Buffer.from(out).toString('latin1'),
+    'ts-riscv64: Linux userspace is ALIVE\n',
+    'THRE 持续为高时，必须靠重复的 THRE 中断把数据推完',
+  );
+  assert.equal(out.length, payload.length, '不应丢字节');
+});
