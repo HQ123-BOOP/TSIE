@@ -84,6 +84,8 @@ export class Machine {
   readonly ram: RAM;
   readonly cpu: Cpu;
   readonly uart: Uart;
+  /** 慢指令统计（调试）：单条 step >1ms 的 pc → 次数 */
+  slowSteps = new Map<number, number>();
   readonly clint = new Clint();
   readonly plic: Plic;
   readonly virtio?: VirtioBlk;
@@ -244,8 +246,10 @@ export class Machine {
   }
 
   private placeDtb(cmdline: string): void {
-    // 有固件时 DTB 放在 OpenSBI 期望的位置，否则紧跟镜像之后
-    const dtbAddr = this.firmwareEntry !== 0n ? VIRT_DTB : alignUp(this.imageEnd, 0x200000n) + 0x200000n;
+    // DTB 紧跟镜像（内核+initrd）之后、2MB 对齐放置，并由 a1 直接传给 OpenSBI/内核。
+    // 不能再用固定 VIRT_DTB：大 initrd（Debian 42MB）会把它覆盖成垃圾，
+    // 内核读到的 FDT 无效导致启动即卡死。DTB 本身只有几十 KB，放镜像尾端最安全。
+    const dtbAddr = alignUp(this.imageEnd, 0x200000n) + 0x200000n;
     const blob = this.generateDtb(cmdline);
     this.bus.writeBytes(dtbAddr, blob);
     this.dtbAddress = dtbAddr;
@@ -462,7 +466,18 @@ export class Machine {
     while (count < limit && !cpu.halted) {
       // 逐指令同步中断线：定时器/软件中断可能在任意时刻到期
       this.syncIrqs();
+      const tStep = performance.now();
       cpu.step();
+      const stepMs = performance.now() - tStep;
+      // 慢指令统计（调试）：单条 >1ms 记录 pc，定位"慢但没死循环"的路径
+      if (stepMs > 1) {
+        this.slowSteps.set(Number(cpu.pc), (this.slowSteps.get(Number(cpu.pc)) ?? 0) + 1);
+      }
+      // 看门狗：单条指令处理超过 200ms 说明卡死（正常指令微秒级），
+      // 立即抛出并带出 PC，避免模拟器静默挂起（曾因此白等数小时）。
+      if (stepMs > 200) {
+        throw new Error(`step() 疑似死循环: pc=0x${cpu.pc.toString(16)} priv=${cpu.priv} count=${count}`);
+      }
       this.advanceTimeSub();
       count++;
       if ((count & TICK_MASK) === 0) {
@@ -496,9 +511,15 @@ export class Machine {
     const limit = opts.maxInstructions ?? Number.POSITIVE_INFINITY;
     const started = performance.now();
     let total = 0;
+    // 关键：run() 的 count 每个分块从 0 开始，直接把 onStep 透传会导致回调拿到
+    // 的是「块内计数」—— 依赖 count 做定时（注入间隔/心跳）的逻辑会在跨块后失效
+    // （曾导致 U-Boot 长命令的第二块永不推送、load 永不开始、心跳只打一次）。
+    // 包装成全局计数：total + 块内偏移。
+    const onStep = opts.onStep;
+    const wrappedOnStep = onStep ? (cpu: Cpu, count: number) => onStep(cpu, total + count) : undefined;
     while (total < limit && !this.cpu.halted) {
       const left = Math.min(chunk, limit - total);
-      const s = this.run({ maxInstructions: left, onStep: opts.onStep });
+      const s = this.run({ maxInstructions: left, onStep: wrappedOnStep });
       if (s.instructions === 0) break; // 已停机或卡死
       total += s.instructions;
       if (opts.afterChunk && opts.afterChunk(total) === false) break;
