@@ -473,9 +473,12 @@ export class Machine {
       if (stepMs > 1) {
         this.slowSteps.set(Number(cpu.pc), (this.slowSteps.get(Number(cpu.pc)) ?? 0) + 1);
       }
-      // 看门狗：单条指令处理超过 200ms 说明卡死（正常指令微秒级），
+      // 看门狗：单条指令处理超过 2s 说明卡死（正常指令微秒级），
       // 立即抛出并带出 PC，避免模拟器静默挂起（曾因此白等数小时）。
-      if (stepMs > 200) {
+      // 注意不能太小：U-Boot ext4load 会把整个文件（31~42MB）作为一笔 virtio
+      // 请求，notify 那条指令会在单步内同步完成整块磁盘读+写内存，冷缓存下
+      // ~300-500ms（曾以 200ms 阈值误杀 31MB 内核加载）。
+      if (stepMs > 2000) {
         throw new Error(`step() 疑似死循环: pc=0x${cpu.pc.toString(16)} priv=${cpu.priv} count=${count}`);
       }
       this.advanceTimeSub();
