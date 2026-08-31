@@ -282,10 +282,7 @@ export class Machine {
     cpu0.propU32('reg', [0]);
     cpu0.propStr('status', 'okay');
     cpu0.propStr('compatible', 'riscv');
-    // _zkr：内核 6.12 解析 riscv,isa 多字母后缀，探测到 Zkr 后
-    // archrandom 直接走 seed CSR (0x015) 取熵，跳过 jitter entropy
-    // 自检（在无真实时钟抖动的模拟器里会无限自旋）。
-    cpu0.propStr('riscv,isa', 'rv64imafdcsu_zkr');
+    cpu0.propStr('riscv,isa', 'rv64imafdcsu');
     cpu0.propStr('mmu-type', 'riscv,sv48');
     const intc = cpu0.addChild('interrupt-controller');
     intc.propU32('#address-cells', [0]);

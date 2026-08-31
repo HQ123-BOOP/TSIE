@@ -85,8 +85,6 @@ export const CSR = {
   MIMPID: 0xf13,
   MHARTID: 0xf14,
   MCONFIGPTR: 0xf15,
-  // Zkr 熵源（U/S/M 均可访问；内核 archrandom 用 csr_swap 读）
-  SEED: 0x015,
 } as const;
 
 // --- mstatus 位定义（RV64） ---
@@ -159,8 +157,6 @@ export class CsrFile {
   };
   /** satp 写入回调（用于刷 TLB） */
   onSatpWrite?: (value: bigint) => void;
-  /** Zkr seed CSR 的内部熵状态 */
-  private seedState = 0x9e3779b97f4a7c15n;
   /**
    * mstatus / satp 自上次 MMU 同步以来是否被写过。
    * CPU 每条指令都要把 mstatus/satp 同步给 MMU，但这两个 CSR 极少变化；
@@ -258,26 +254,6 @@ export class CsrFile {
       },
     });
     this.define(CSR.FCSR, 0n, { mask: 0xffn });
-
-    // ---------------- Zkr seed CSR (0x015) ----------------
-    // Linux archrandom 的 csr_seed_long 用 csr_swap(CSR_SEED, 0)（csrrw）读熵：
-    // 高 2 位 OPST=ES16(0b10) 表示低 16 位有效。execCsr 的流程是先 read() 取
-    // 旧值再 writeRaw()，csrrw 读回的正是 read() 的结果，所以熵生成放 read 里。
-    // 状态混入 cycle 计数，保证两次访问必然不同；标非 readOnly（csrrw 要求可写）。
-    this.seedState = 0x9e3779b97f4a7c15n ^ (self.counters.cycle() & MASK64);
-    const seedStep = (): bigint => {
-      let x = this.seedState;
-      x ^= x << 13n; x &= MASK64;
-      x ^= x >> 7n;
-      x ^= x << 17n; x &= MASK64;
-      this.seedState = x;
-      return 0x80000000n | (x & 0xffffn); // OPST=ES16 + 16 位熵
-    };
-    this.define(CSR.SEED, 0n, {
-      mask: MASK64,
-      read: () => seedStep(),
-      write: () => seedStep(),
-    });
 
     // ---------------- 计数器 ----------------
     const roCounter = (which: 'cycle' | 'time' | 'instret') => ({
