@@ -271,6 +271,15 @@ export class Machine {
       chosen.propU64('linux,initrd-start', [this.initrdStart]);
       chosen.propU64('linux,initrd-end', [this.initrdEnd]);
     }
+    // rng-seed：内核极早期（early_init_dt_scan_chosen → add_bootloader_randomness）
+    // 就把它加进熵池，读完自动 NOP 掉该属性。没有它，模拟器时序确定、
+    // jitter entropy 采不出熵，内核 RNG 初始化会无限自旋（Debian 13 实测
+    // Run /init 后 blake2s/chacha 自检烧光 4B 指令预算）。
+    {
+      const seed = new Uint8Array(4096);
+      crypto.getRandomValues(seed);
+      chosen.prop('rng-seed', seed);
+    }
 
     const cpus = root.addChild('cpus');
     cpus.propU32('#address-cells', [1]);

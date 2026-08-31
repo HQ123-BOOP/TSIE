@@ -159,12 +159,16 @@ test('启动约定：a0 = hartid，a1 = DTB 地址', () => {
 
 test('DTB：结构与内容', () => {
   const { m } = build(bytes([...li(1, VIRT_TEST), ...li(2, 0x5555n), sw(1, 2, 0)]));
-  const dtb = m.bus.readBytes(m.dtbAddress, 4096);
+  // /chosen 里有 4096 字节 rng-seed，DTB 总长超过 4K：按头部 totalsize 读全量
+  const head = m.bus.readBytes(m.dtbAddress, 8);
+  const hv = new DataView(head.buffer, head.byteOffset, head.byteLength);
+  assert.equal(hv.getUint32(0, false), 0xd00dfeed, 'FDT magic');
+  const total = hv.getUint32(4, false);
+  const dtb = m.bus.readBytes(m.dtbAddress, total);
   const dv = new DataView(dtb.buffer, dtb.byteOffset, dtb.byteLength);
-  assert.equal(dv.getUint32(0, false), 0xd00dfeed, 'FDT magic');
-  const total = dv.getUint32(4, false);
-  assert.ok(total > 100 && total < 8192, `totalsize=${total} 合理`);
+  assert.ok(total > 100 && total < 16384, `totalsize=${total} 合理`);
   const text = Buffer.from(dtb).toString('latin1');
+  assert.ok(text.includes('rng-seed'), '应包含 rng-seed（熵注入）');
   for (const s of ['riscv-virtio', 'ns16550a', 'riscv,clint0', 'riscv,plic0', 'sifive,test0', 'riscv,sv48']) {
     assert.ok(text.includes(s), `DTB 应包含 ${s}`);
   }
@@ -177,7 +181,9 @@ test('DTB：挂载磁盘时出现 virtio 节点与内核命令行', () => {
     disk,
     cmdline: 'console=ttyS0 root=/dev/vda',
   });
-  const dtb = m.bus.readBytes(m.dtbAddress, 4096);
+  const head = m.bus.readBytes(m.dtbAddress, 8);
+  const total = new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(4, false);
+  const dtb = m.bus.readBytes(m.dtbAddress, total);
   const text = Buffer.from(dtb).toString('latin1');
   assert.ok(text.includes('virtio,mmio'), '应包含 virtio 节点');
   assert.ok(text.includes('console=ttyS0 root=/dev/vda'), '应包含 bootargs');
