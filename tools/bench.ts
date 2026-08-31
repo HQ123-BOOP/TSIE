@@ -1,4 +1,8 @@
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * 性能基准：跑一段整数/访存密集的裸机循环，报告模拟速度（MIPS）。
  *
  * 运行：npm run bench

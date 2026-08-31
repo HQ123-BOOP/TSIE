@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * ts-riscv64 —— RISC-V 64 位模拟器命令行入口
  *
  *   tsx src/cli.ts --kernel vmlinux --disk rootfs.img --append "console=ttyS0 root=/dev/vda"

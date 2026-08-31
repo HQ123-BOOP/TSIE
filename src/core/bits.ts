@@ -1,4 +1,8 @@
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * 64-bit 位运算工具。
  *
  * 设计取舍：XLEN=64 的数据通路统一使用 `bigint`。

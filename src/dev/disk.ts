@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import { closeSync, fstatSync, openSync, readSync, writeSync } from 'node:fs';
 
 /** 块设备镜像抽象 */

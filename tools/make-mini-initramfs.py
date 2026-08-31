@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 #!/usr/bin/env python3
 """
 生成「最小化 + 不压缩」的 initramfs，专为慢速指令级模拟器优化。

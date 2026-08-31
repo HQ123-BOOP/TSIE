@@ -1,4 +1,8 @@
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * RISC-V 指令编码器（手写机器码，用于单元测试与裸机示例程序）。
  * 所有函数返回 32 位（压缩指令为 16 位）无符号机器码。
  */

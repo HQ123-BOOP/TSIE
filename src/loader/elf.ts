@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import { MASK64, hex } from '../core/bits.ts';
 import type { Bus } from '../mem/bus.ts';
 

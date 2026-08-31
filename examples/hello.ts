@@ -1,4 +1,8 @@
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * 示例：用 Machine API 跑一个"Hello, RISC-V 64!"裸机程序。
  *
  * 程序先在 M 模式完成初始化，然后通过 mret 切到 S 模式，

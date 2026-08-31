@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 /** 生成一个纯 S 模式的 SBI 调用内核（配合 OpenSBI fw_jump 使用） */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { ecall, li } from './encoder.ts';

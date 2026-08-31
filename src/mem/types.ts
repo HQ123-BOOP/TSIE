@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 /** 访存宽度（字节） */
 export type MemSize = 1 | 2 | 4 | 8;
 

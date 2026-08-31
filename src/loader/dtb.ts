@@ -1,4 +1,8 @@
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * 扁平设备树（DTB）生成器 —— 不依赖外部库，够用即可。
  */
 

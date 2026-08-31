@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -165,7 +169,6 @@ test('DTB：结构与内容', () => {
   assert.equal(hv.getUint32(0, false), 0xd00dfeed, 'FDT magic');
   const total = hv.getUint32(4, false);
   const dtb = m.bus.readBytes(m.dtbAddress, total);
-  const dv = new DataView(dtb.buffer, dtb.byteOffset, dtb.byteLength);
   assert.ok(total > 100 && total < 16384, `totalsize=${total} 合理`);
   const text = Buffer.from(dtb).toString('latin1');
   assert.ok(text.includes('rng-seed'), '应包含 rng-seed（熵注入）');

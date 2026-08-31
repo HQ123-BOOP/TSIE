@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import type { Device, MemSize } from '../mem/types.ts';
 
 /** 中断线回调：level=true 表示拉高 */

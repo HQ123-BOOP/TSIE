@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import type { Bus } from '../mem/bus.ts';
 import { BusError } from '../mem/bus.ts';
 import type { MemSize } from '../mem/types.ts';

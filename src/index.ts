@@ -1,4 +1,8 @@
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * ts-riscv64 —— 用 TypeScript 实现的 RISC-V 64 位模拟器。
  *
  * 主要组成：

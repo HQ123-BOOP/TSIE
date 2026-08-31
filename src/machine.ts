@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import { alignUp } from './core/bits.ts';
 import { Bus } from './mem/bus.ts';
 import { RAM } from './mem/ram.ts';

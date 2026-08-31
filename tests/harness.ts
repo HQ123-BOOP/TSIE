@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import { Bus } from '../src/mem/bus.ts';
 import { RAM } from '../src/mem/ram.ts';
 import { Cpu } from '../src/cpu/cpu.ts';

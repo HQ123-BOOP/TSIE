@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 /** 生成 CLI 冒烟测试用的裸机镜像（M 模式 stub + S 模式 SBI 打印） */
 import { writeFileSync } from 'node:fs';
 import { csrc, csrs, csrw, ecall, li, mret } from '../tools/encoder.ts';

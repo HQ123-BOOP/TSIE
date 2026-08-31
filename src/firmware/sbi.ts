@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 import { MASK64 } from '../core/bits.ts';
 import type { Cpu, SbiLayer } from '../cpu/cpu.ts';
 import { CSR } from '../cpu/csr.ts';

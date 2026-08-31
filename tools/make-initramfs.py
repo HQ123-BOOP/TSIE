@@ -1,3 +1,7 @@
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
 #!/usr/bin/env python3
 """
 把 Alpine minirootfs 打包成内核可用的 cpio-newc initramfs（Windows 上自制）。
