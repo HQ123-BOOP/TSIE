@@ -168,3 +168,13 @@ Sv39/Sv48 翻译与权限、全部外设协议、以及整机端到端（SBI、�
 ## License
 
 Apache-2.0
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=HQ123-BOOP%2FTSIE&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=HQ123-BOOP/TSIE&type=date&theme=dark&legend=top-left&sealed_token=v94MairdUk4jnM8mfWsW1p3dX7b0CfKu9uspWf6vHw8TMfTbYpgbRzBrmrlDPezVolxNiYs8WoKczfi1MV1vIpL8R684HIms1T16d6rhC19W0CCoJANQuRMQ77gF21_rcY4ZPshh15ti77dx1QYGriDz3Ylzedx53DZvs0zq2ij7g2pWUbHAOlhZ2WsD" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=HQ123-BOOP/TSIE&type=date&legend=top-left&sealed_token=v94MairdUk4jnM8mfWsW1p3dX7b0CfKu9uspWf6vHw8TMfTbYpgbRzBrmrlDPezVolxNiYs8WoKczfi1MV1vIpL8R684HIms1T16d6rhC19W0CCoJANQuRMQ77gF21_rcY4ZPshh15ti77dx1QYGriDz3Ylzedx53DZvs0zq2ij7g2pWUbHAOlhZ2WsD" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=HQ123-BOOP/TSIE&type=date&legend=top-left&sealed_token=v94MairdUk4jnM8mfWsW1p3dX7b0CfKu9uspWf6vHw8TMfTbYpgbRzBrmrlDPezVolxNiYs8WoKczfi1MV1vIpL8R684HIms1T16d6rhC19W0CCoJANQuRMQ77gF21_rcY4ZPshh15ti77dx1QYGriDz3Ylzedx53DZvs0zq2ij7g2pWUbHAOlhZ2WsD" />
+ </picture>
+</a>
