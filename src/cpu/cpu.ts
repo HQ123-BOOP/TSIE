@@ -195,18 +195,30 @@ export class Cpu {
   private static readonly DEVICE_MIP_MASK = (1n << 7n) | (1n << 3n) | (1n << 11n) | (1n << 9n);
   private static readonly DEVICE_MIP_NMASK = ~((1n << 7n) | (1n << 3n) | (1n << 11n) | (1n << 9n));
 
-  private refreshMip(): void {
+  /**
+   * 每条指令的中断同步：refreshMip + pending 预判合并。
+   *
+   * 旧实现 refreshMip + checkInterrupts 各自读 MIP/MIE（常态共 4 次
+   * BigInt 读 + AND）。合并后一次读出：先算 pending = MIE & MIP，
+   * 非零才需要 checkInterrupts 的委派/优先级深层逻辑（冷路径）。
+   * 返回 pending 供调用方决定是否陷入。
+   */
+  private irqPending: bigint = 0n;
+
+  private syncIrqState(): void {
     const lines = this.irqLines;
-    const mip = this.csr.raw(CSR.MIP); // mip 无 read 钩子，可直读
+    let mip = this.csr.raw(CSR.MIP); // mip 无 read 钩子，可直读
     const dm = Cpu.DEVICE_MIP_MASK;
-    // 常态（无任何设备中断挂起）快路径：只需一次 BigInt AND
-    if (lines === 0n) {
-      if ((mip & dm) === 0n) return;
-      this.csr.writeRaw(CSR.MIP, mip & Cpu.DEVICE_MIP_NMASK);
-      return;
+    // 设备中断线 → mip 位同步（常态 lines=0 且无残留，一次 AND 出门）
+    if (lines !== 0n || (mip & dm) !== 0n) {
+      const next = (mip & Cpu.DEVICE_MIP_NMASK) | (lines & dm);
+      if (next !== mip) {
+        this.csr.writeRaw(CSR.MIP, next);
+        mip = next;
+      }
     }
-    const next = (mip & Cpu.DEVICE_MIP_NMASK) | (lines & dm);
-    if (next !== mip) this.csr.writeRaw(CSR.MIP, next);
+    const mie = this.csr.raw(CSR.MIE);
+    this.irqPending = mie === 0n ? 0n : (mie & mip);
   }
 
   // ------------------------------------------------------------------
@@ -219,8 +231,8 @@ export class Cpu {
     if (this.halted) return;
 
     this.syncMmu();
-    this.refreshMip();
-    if (this.checkInterrupts()) return;
+    this.syncIrqState();
+    if (this.irqPending !== 0n && this.checkInterrupts()) return;
     if (this.wfi) {
       // RISC-V 特权规范 §3.3.3：WFI 的唤醒**不受 mstatus.MIE/SIE 与 mideleg 影响**。
       // 只要有中断挂起（无论全局使能位是否打开），hart 就必须退出 WFI、
@@ -229,7 +241,9 @@ export class Cpu {
       // arch_cpu_idle() 执行 wfi，返回后才 local_irq_enable()。
       // 若在这里直接 return 而不检查挂起，关着中断的 WFI 会永久死锁 ——
       // 表现为 mtime 一路快进、外设中断来了也无人应答。
-      if ((this.csr.raw(CSR.MIE) & this.csr.raw(CSR.MIP)) !== 0n) this.wfi = false;
+      // 注意：irqPending 含 MIE 门控（WFI 唤醒语义更宽），此处按规范
+      // 只看 MIE&MIP 之外的挂起——直接用未门控的挂起判断：
+      if (this.irqPending !== 0n || (this.csr.raw(CSR.MIP) & this.irqLines) !== 0n) this.wfi = false;
       return;
     }
 

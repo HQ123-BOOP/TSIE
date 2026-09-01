@@ -146,6 +146,13 @@ export class Machine {
     }
 
     this.cpu = new Cpu(this.bus, { misaligned: opts.misaligned ?? 'trap' });
+    // MMU 直读快路径：指令/数据访问命中 RAM 时绕过 bus 分发与 BigInt 装箱
+    this.cpu.mmu.fastRam = {
+      base: Number(this.ramBase),
+      end: Number(this.ramBase + this.ramSize),
+      data: this.ram.data,
+      view: this.ram.view,
+    };
     // 含未结算子刻度：使 mtime 抖动对 guest 的 rdtime 保持逐指令粒度
     this.cpu.timeSource = () => this.currentTime();
     this.plic.bindContext(0, (level) => {

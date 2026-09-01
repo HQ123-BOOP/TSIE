@@ -45,8 +45,29 @@ export class Mmu {
   priv: PrivLevel = Priv.M;
   /** mstatus（由 CPU 同步） */
   mstatus = 0n;
-  /** satp（由 CPU 同步） */
-  satp = 0n;
+
+  /**
+   * satp 缓存的派生值：enabled/mode/asid/vaBits。
+   * satp 极少变化（上下文切换才写），而 translate() 每条指令都要读——
+   * 派生值在 setter 里算好，热路径只做布尔/Number 判断，
+   * 省掉每次 `satp >> 60n & 0xfn` 的三次 BigInt 移位+AND+转换。
+   */
+  private _satp = 0n;
+  private _enabled = false;
+  private _mode = 0;
+  private _asid = 0;
+  private _vaBits = 0;
+
+  get satp(): bigint {
+    return this._satp;
+  }
+  set satp(v: bigint) {
+    this._satp = v;
+    this._mode = Number((v >> 60n) & 0xfn);
+    this._asid = Number((v >> 44n) & 0xffffn);
+    this._vaBits = this._mode === 8 ? 39 : this._mode === 9 ? 48 : 0;
+    this._enabled = this._mode !== 0;
+  }
 
   faultCause = -1;
   faultTval = 0n;
@@ -57,11 +78,16 @@ export class Mmu {
    * 逼近 Number 安全整数上限（2^53）：不同虚拟地址会碰撞成同一个键，
    * 且 `key >>> 16`（32 位运算）会截断高位，导致 sfence.vma 按地址失效失灵。
    */
-  private tlb = new Map<bigint, TlbEntry>();
+  /**
+   * TLB：键压成 Number（`asid * 2^36 + vpn`，Sv48 的 VPN ≤ 36 位，
+   * 最大 2^52 < 2^53 精确表示上限）——Map<number> 的 get 无堆分配，
+   * 比 Map<bigint> 快数倍。外部读写接口（flushBy 等）同步反解。
+   */
+  private tlb = new Map<number, TlbEntry>();
 
-  /** TLB 键：高 48 位为 VPN，低 16 位为 ASID */
-  private tlbKey(vaddr: bigint, asid: number): bigint {
-    return (vaddr >> PAGE_SHIFT) * 65536n + BigInt(asid);
+  /** TLB 键：asid * 2^36 + VPN（Number，无堆分配） */
+  private tlbKey(vaddr: bigint, asid: number): number {
+    return asid * 68719476736 + Number(vaddr >> PAGE_SHIFT);
   }
   /** TLB 容量（超出后整体清空，简单有效） */
   maxEntries = 4096;
@@ -87,7 +113,8 @@ export class Mmu {
       return;
     }
     for (const [key, e] of this.tlb) {
-      if (vaddr !== undefined && key >> 16n !== vaddr >> PAGE_SHIFT) continue;
+      // 键 = asid * 2^36 + vpn：反解 VPN 比较（无 asid 限定时按地址失效）
+      if (vaddr !== undefined && key % 68719476736 !== Number(vaddr >> PAGE_SHIFT)) continue;
       if (asid !== undefined && e.asid !== asid && !(e.global && vaddr === undefined)) continue;
       this.tlb.delete(key);
     }
@@ -109,10 +136,7 @@ export class Mmu {
 
   private lastWalkTrace: string[] = [];
 
-  /** 地址翻译是否启用 */
-  private get enabled(): boolean {
-    return ((this.satp >> 60n) & 0xfn) !== 0n;
-  }
+  /** 地址翻译是否启用：由 satp setter 缓存（translate 用 _enabled） */
 
   /** 判断虚拟地址是否规范（canonical） */
   private isCanonical(vaddr: bigint, vaBits: number): boolean {
@@ -150,11 +174,11 @@ export class Mmu {
           : Exc.StorePageFault;
 
     const effPriv = this.effectivePriv(access);
-    if (effPriv === Priv.M || !this.enabled) return vaddr & MASK64;
+    if (effPriv === Priv.M || !this._enabled) return vaddr & MASK64;
 
-    const mode = Number((this.satp >> 60n) & 0xfn);
-    const asid = Number((this.satp >> 44n) & 0xffffn);
-    const vaBits = mode === 8 ? 39 : mode === 9 ? 48 : 0;
+    const mode = this._mode;
+    const asid = this._asid;
+    const vaBits = this._vaBits;
     if (vaBits === 0 || !this.isCanonical(vaddr, vaBits)) return this.fault(faultCause, vaddr);
 
     const key = this.tlbKey(vaddr, asid);
@@ -245,10 +269,24 @@ export class Mmu {
   // 对外访存接口
   // ------------------------------------------------------------------
 
+  /**
+   * 主 RAM 直读快路径：由 Machine 在挂 RAM 后注入。
+   * fetch/load/store 拿到物理地址后先判断是否落在 RAM——是则直接
+   * DataView 访问，绕过 bus.find 的区间查找与 BigInt 装箱（bus.read
+   * 返回 bigint 再 Number() 转换，每条指令取指 1~2 次都是这个开销）。
+   * 落在别的设备仍走 bus（串口/磁盘等本来就慢，不差这点）。
+   */
+  fastRam?: { base: number; end: number; data: Uint8Array; view: DataView };
+
   /** 取指令半字（16 位）；返回 null 表示异常 */
   fetch16(vaddr: bigint): number | null {
     const pa = this.translate(vaddr, AccessType.Instruction);
     if (pa === null) return null;
+    const ram = this.fastRam;
+    if (ram !== undefined) {
+      const a = Number(pa);
+      if (a >= ram.base && a < ram.end) return ram.view.getUint16(a - ram.base, true);
+    }
     try {
       return Number(this.bus.read(pa, 2) & 0xffffn);
     } catch (e) {
@@ -278,6 +316,17 @@ export class Mmu {
   load(vaddr: bigint, size: MemSize): bigint | null {
     const pa = this.translate(vaddr, AccessType.Load);
     if (pa === null) return null;
+    const ram = this.fastRam;
+    if (ram !== undefined) {
+      const a = Number(pa) - ram.base;
+      if (a >= 0 && a < ram.end - ram.base) {
+        const v = ram.view;
+        return size === 1 ? BigInt(ram.data[a])
+          : size === 2 ? BigInt(v.getUint16(a, true))
+          : size === 4 ? BigInt(v.getUint32(a, true))
+          : v.getBigUint64(a, true);
+      }
+    }
     try {
       return this.bus.read(pa, size);
     } catch (e) {
@@ -289,6 +338,18 @@ export class Mmu {
   store(vaddr: bigint, value: bigint, size: MemSize): boolean {
     const pa = this.translate(vaddr, AccessType.Store);
     if (pa === null) return false;
+    const ram = this.fastRam;
+    if (ram !== undefined) {
+      const a = Number(pa) - ram.base;
+      if (a >= 0 && a < ram.end - ram.base) {
+        const v = ram.view;
+        if (size === 1) ram.data[a] = Number(value & 0xffn);
+        else if (size === 2) v.setUint16(a, Number(value & 0xffffn), true);
+        else if (size === 4) v.setUint32(a, Number(value & 0xffffffffn), true);
+        else v.setBigUint64(a, value & MASK64, true);
+        return true;
+      }
+    }
     try {
       this.bus.write(pa, value, size);
       return true;
