@@ -1,6 +1,14 @@
-# ts-riscv64
+<div align="center">
 
-**用 TypeScript 从零实现的 RISC-V 64 位（RV64GC）全系统模拟器。**
+# TSIE
+
+<img src="https://img.shields.io/github/v/release/HQ123-BOOP/TSIE" alt="Release">
+<img src="https://img.shields.io/github/license/HQ123-BOOP/TSIE" alt="License">
+<img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript">
+
+**一个 TypeScript 从零实现的 RISC-V 64 位模拟器。**
+
+</div>
 
 零运行时依赖（仅 Node.js 标准库），从指令译码、特权架构、虚拟内存到外设全部手写实现，
 可用于学习 RISC-V 体系结构、运行裸机程序，或作为构建 RISC-V 工具链/操作系统的试验平台。
