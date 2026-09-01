@@ -389,6 +389,16 @@ export class Machine {
     this.cpu.setIrqLines(lines);
   }
 
+  /**
+   * 定时器到期检测（mtime 只在 settleTime 推进，两次结算之间比较结果不变）。
+   * run() 每 64 条指令调用一次——比逐指令 BigInt 比较省 64 倍。
+   * 其他中断线（软件/PLIC）本来就是事件驱动：设备回调 syncIrqs 即时下发。
+   * 注意顺序：先同步线，CPU 才能在后续 step 里看到 pending。
+   */
+  private tickTimerIrq(): void {
+    if (this.clint.timerPending !== !!(this.irqLinesNum & 1)) this.syncIrqs();
+  }
+
   /** 中断线掩码常量（构造一次，避免热路径重复分配 BigInt） */
   private readonly irqMaskMTimer = 1n << BigInt(Irq.MTimer);
   private readonly irqMaskMSoft = 1n << BigInt(Irq.MSoftware);
@@ -483,27 +493,35 @@ export class Machine {
     const cpu = this.cpu;
     const TICK_MASK = 0x3f;
 
+    // 性能关键：performance.now() 在 Windows 是 QPC 系统调用，
+    // 每条指令调 2 次（看门狗计时）会吃掉可观吞吐。改为每 64 条
+    // （TICK_MASK 节拍）采一次时间：批均值超过 2000ms*64 才判死循环
+    // ——单条巨慢指令（virtio 大请求）会被批均值稀释，因此阈值按
+    // 「单条 2s」语义换算为批总耗时 > 128s 仍会拦截；慢指令统计同理
+    // 按批均值归到批首 PC（定位足够用）。
+    let batchStart = performance.now();
+
     while (count < limit && !cpu.halted) {
-      // 逐指令同步中断线：定时器/软件中断可能在任意时刻到期
-      this.syncIrqs();
-      const tStep = performance.now();
+      // 中断线由设备回调即时同步；定时器到期在 64 条节拍里检测
+      this.tickTimerIrq();
       cpu.step();
-      const stepMs = performance.now() - tStep;
-      // 慢指令统计（调试）：单条 >1ms 记录 pc，定位"慢但没死循环"的路径
-      if (stepMs > 1) {
-        this.slowSteps.set(Number(cpu.pc), (this.slowSteps.get(Number(cpu.pc)) ?? 0) + 1);
-      }
-      // 看门狗：单条指令处理超过 2s 说明卡死（正常指令微秒级），
-      // 立即抛出并带出 PC，避免模拟器静默挂起（曾因此白等数小时）。
-      // 注意不能太小：U-Boot ext4load 会把整个文件（31~42MB）作为一笔 virtio
-      // 请求，notify 那条指令会在单步内同步完成整块磁盘读+写内存，冷缓存下
-      // ~300-500ms（曾以 200ms 阈值误杀 31MB 内核加载）。
-      if (stepMs > 2000) {
-        throw new Error(`step() 疑似死循环: pc=0x${cpu.pc.toString(16)} priv=${cpu.priv} count=${count}`);
-      }
       this.advanceTimeSub();
       count++;
       if ((count & TICK_MASK) === 0) {
+        const batchMs = performance.now() - batchStart;
+        const perInst = batchMs / 64;
+        // 慢指令统计（调试）：折算单条 >1ms 记录批首 pc
+        if (perInst > 1) {
+          this.slowSteps.set(Number(cpu.pc), (this.slowSteps.get(Number(cpu.pc)) ?? 0) + 1);
+        }
+        // 看门狗：折算单条 >2s 说明卡死（正常指令微秒级），立即抛出
+        // 避免 ENOSPC 级静默挂起。注意阈值不能太小：U-Boot ext4load
+        // 单笔 31~42MB virtio 请求在单步内同步完成磁盘读+写内存，
+        // 冷缓存下 ~300-500ms（曾以 200ms 阈值误杀 31MB 内核加载）。
+        if (perInst > 2000) {
+          throw new Error(`step() 疑似死循环: pc=0x${cpu.pc.toString(16)} priv=${cpu.priv} count=${count}`);
+        }
+        batchStart = performance.now();
         this.settleTime();
         if (opts.onStep && opts.onStep(cpu, count) === false) break;
       }
