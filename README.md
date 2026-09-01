@@ -173,10 +173,6 @@ Sv39/Sv48 翻译与权限、全部外设协议、以及整机端到端（SBI、�
 - 浮点舍入在极端边界情况下可能有 1 ulp 差异（JS 双精度中间值所致）
 - 未实现 H 扩展（hypervisor）、向量扩展与调试模块（dcsr 等）
 
-## License
-
-Apache-2.0
-
 ## Star History
 
 <a href="https://www.star-history.com/?repos=HQ123-BOOP%2FTSIE&type=date&legend=top-left">
@@ -186,3 +182,11 @@ Apache-2.0
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=HQ123-BOOP/TSIE&type=date&legend=top-left&sealed_token=v94MairdUk4jnM8mfWsW1p3dX7b0CfKu9uspWf6vHw8TMfTbYpgbRzBrmrlDPezVolxNiYs8WoKczfi1MV1vIpL8R684HIms1T16d6rhC19W0CCoJANQuRMQ77gF21_rcY4ZPshh15ti77dx1QYGriDz3Ylzedx53DZvs0zq2ij7g2pWUbHAOlhZ2WsD" />
  </picture>
 </a>
+
+## License
+
+Apache-2.0
+
+# Disclaimer
+
+本程序的主体(除firmware目录以外的部分)以** Apache-2.0 **授权，请参阅LICENSE以了解许可证下的具体权利和限制。firmware内包含有OpenSBI、U-Boot、系统镜像 等，TSIE 模拟器所附带的firmware均为自由软件；具体分发条款请参见内含的/firmware/*/copyright。**在适用法律允许的范围内，TSIE 本体以及附带的软件均为 按原样(AS IS) 提供，不附带任何明示和暗示的担保。**
