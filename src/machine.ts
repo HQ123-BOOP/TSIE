@@ -502,7 +502,8 @@ export class Machine {
     let batchStart = performance.now();
 
     while (count < limit && !cpu.halted) {
-      // 中断线由设备回调即时同步；定时器到期在 64 条节拍里检测
+      // 定时器到期检测（内部有变化才走完整同步，常态一次 BigInt 比较）；
+      // 软件/PLIC 中断线由设备回调即时下发，无需逐指令轮询
       this.tickTimerIrq();
       cpu.step();
       this.advanceTimeSub();

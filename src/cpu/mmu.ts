@@ -79,15 +79,17 @@ export class Mmu {
    * 且 `key >>> 16`（32 位运算）会截断高位，导致 sfence.vma 按地址失效失灵。
    */
   /**
-   * TLB：键压成 Number（`asid * 2^36 + vpn`，Sv48 的 VPN ≤ 36 位，
-   * 最大 2^52 < 2^53 精确表示上限）——Map<number> 的 get 无堆分配，
-   * 比 Map<bigint> 快数倍。外部读写接口（flushBy 等）同步反解。
+   * TLB：键用 bigint —— VPN 是 vaddr>>12 的全量值，内核地址
+   * （0xffffffff8xxxxxxx >> 12）有 52 位，压不进 Number 安全范围，
+   * 也无法和 asid 位拼接（曾试过 `vpn|asid<<44`：内核 vpn 高位
+   * 恒 1 导致不同 asid 键碰撞 → 上下文切换后命中陈旧表项 →
+   * 内核异常风暴， Debian 13 实测卡死在 handle_exception）。
    */
-  private tlb = new Map<number, TlbEntry>();
+  private tlb = new Map<bigint, TlbEntry>();
 
-  /** TLB 键：asid * 2^36 + VPN（Number，无堆分配） */
-  private tlbKey(vaddr: bigint, asid: number): number {
-    return asid * 68719476736 + Number(vaddr >> PAGE_SHIFT);
+  /** TLB 键：vpn*65536 + asid（bigint；flushBy 用 key>>16 反解 vpn） */
+  private tlbKey(vaddr: bigint, asid: number): bigint {
+    return (vaddr >> PAGE_SHIFT) * 65536n + BigInt(asid);
   }
   /** TLB 容量（超出后整体清空，简单有效） */
   maxEntries = 4096;
@@ -113,8 +115,7 @@ export class Mmu {
       return;
     }
     for (const [key, e] of this.tlb) {
-      // 键 = asid * 2^36 + vpn：反解 VPN 比较（无 asid 限定时按地址失效）
-      if (vaddr !== undefined && key % 68719476736 !== Number(vaddr >> PAGE_SHIFT)) continue;
+      if (vaddr !== undefined && key >> 16n !== vaddr >> PAGE_SHIFT) continue;
       if (asid !== undefined && e.asid !== asid && !(e.global && vaddr === undefined)) continue;
       this.tlb.delete(key);
     }

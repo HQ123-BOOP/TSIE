@@ -73,6 +73,30 @@ test('Sv39：非规范地址直接报页故障', () => {
   assert.equal(h.cpu.mmu.faultCause, Exc.LoadPageFault);
 });
 
+test('Sv39：内核半地址（0xffff_ffc0_...）TLB 键不跨 ASID 碰撞', () => {
+  // 回归：曾把 TLB 键压成 Number/位拼接，内核地址 vpn(vaddr>>12) 有 52 位、
+  // 高位恒 1，导致 asid 不同键相同 → 上下文切换后命中陈旧表项 →
+  // Debian 13 内核异常风暴卡死在 handle_exception。
+  const h = makeCpu([...halt()]);
+  const pt = setupSv39(h);
+  const KVA = 0xffffffff80100000n; // 内核半地址（Linux 常驻段）
+  pt.map(KVA, 0x2000000n, PTE_R | PTE_W | PTE_X | PTE_A | PTE_D, 0);
+  enablePaging(h, pt, 8n);
+  // ASID 0：建立映射并命中
+  assert.equal(h.cpu.mmu.translate(KVA, AccessType.Load), 0x2000000n);
+  assert.equal(h.cpu.mmu.translate(KVA, AccessType.Load), 0x2000000n, 'TLB 命中');
+  // 换 ASID 1（同页表）：绝不能命中 ASID 0 的陈旧表项
+  h.cpu.csr.writeRaw(CSR.SATP, pt.satp(8n, 1n));
+  h.cpu.syncMmu();
+  assert.equal(h.cpu.mmu.translate(KVA, AccessType.Load), 0x2000000n, 'ASID 1 miss 后重走页表');
+  // 按地址 sfence 对内核半地址必须生效（曾因键反解错误永不失效）
+  h.cpu.mmu.translate(KVA, AccessType.Load);
+  h.cpu.mmu.flushBy(KVA, undefined);
+  h.cpu.mmu.stats.tlbHit = 0;
+  h.cpu.mmu.translate(KVA, AccessType.Load);
+  assert.equal(h.cpu.mmu.stats.tlbHit, 0, '按地址 sfence 后应重新走页表');
+});
+
 test('A/D 位由硬件自动更新', () => {
   const h = makeCpu([...halt()]);
   const pt = setupSv39(h);
