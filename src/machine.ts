@@ -100,6 +100,8 @@ export class Machine {
   readonly ramSize: bigint;
   readonly timebaseFrequency: number;
   readonly cyclesPerTick: number;
+  /** WFI 快进：每条空闲指令推进的 tick 数（1.6µs × timebase/10MHz） */
+  private readonly wfiFastForward: number;
 
   /** DTB 在物理内存中的地址 */
   dtbAddress = 0n;
@@ -119,6 +121,9 @@ export class Machine {
     this.ramSize = opts.memSize ?? 512n * 1024n * 1024n;
     this.timebaseFrequency = opts.timebaseFrequency ?? 10_000_000;
     this.cyclesPerTick = opts.cyclesPerTick ?? 1;
+    // WFI 快进速率：每条空闲指令推进 1.6µs 虚拟时间（10MHz 时 = 16 tick，
+    // 与历史行为一致；timebase 变更时按比例缩放，收敛速度与频率无关）
+    this.wfiFastForward = Math.max(1, Math.round(this.timebaseFrequency / 625_000));
 
     this.ram = new RAM(this.ramSize);
     this.bus.addDevice(this.ramBase, this.ram);
@@ -527,8 +532,10 @@ export class Machine {
         if (opts.onStep && opts.onStep(cpu, count) === false) break;
       }
       if (cpu.wfi) {
-        // 空闲等待时加速时间推进，避免无意义空转
-        this.timeSub += 16;
+        // 空闲等待时加速时间推进：每条空闲指令推进 1.6µs 虚拟时间
+        // （默认 10MHz → 16 tick；timebase 提到 100MHz 后按比例放大，
+        // 保证「10ms 虚拟睡眠 ≈ 6 千条空闲指令收敛」与频率无关）
+        this.timeSub += this.wfiFastForward;
       }
     }
     this.settleTime();
