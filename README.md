@@ -21,15 +21,15 @@
 | **特权架构** | M / S / U 三种特权级，全套 m/s CSR、mret/sret、异常委派（medeleg/mideleg）、中断（CLINT+PLIC）、WFI |
 | **虚拟内存** | Sv39 / Sv48 多级页表遍历、TLB（支持超级页）、sfence.vma、A/D 位硬件更新、SUM/MXR/MPRV 语义 |
 | **外设** | NS16550 UART（中断+FIFO+回环）、CLINT（mtime/msip）、PLIC（claim/complete）、VirtIO-MMIO 块设备、SiFive Test |
-| **固件** | **内建 SBI v0.2**（console/timer/rfence/HSM/SRST/BASE），无需外部 OpenSBI 即可启动 Linux |
-| **加载** | ELF64 装载（自动处理 vaddr/paddr 偏移）、裸二进制、扁平设备树（DTB）生成器 |
+| **固件** | **内建 SBI v0.2**（console/timer/rfence/HSM/SRST/BASE），无需外部 OpenSBI 即可启动 Linux；实测 OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) 完整引导到 login:** |
+| **加载** | ELF64 装载（自动处理 vaddr/paddr 偏移）、裸二进制、扁平设备树（DTB）生成器（含 `rng-seed` 熵注入） |
 | **工具** | 指令编码器（`tools/encoder.ts`）、指令级单元测试、CLI |
 
 ## 快速开始
 
 ```bash
 npm install        # 仅安装 typescript / tsx / @types/node 开发依赖
-npm test           # 运行 98 项单元测试
+npm test           # 运行 119 项单元测试
 npm run demo       # 裸机 "Hello, RISC-V 64!"（经内建 SBI 输出）
 npm run bench      # 性能基准
 ```
@@ -88,7 +88,7 @@ U-Boot 下载：Debian 包 `u-boot-qemu`（`ftp.debian.org/debian/pool/main/u/u-
 源码：<https://github.com/u-boot/u-boot>（GPL-2.0，产物勿提交入 Apache-2.0 仓库）。
 
 
-### 启动 Linux（Alpine，实测引导中 ✅）
+### 启动 Linux（Alpine，已验证 initramfs 解包 ✅）
 
 配套工具：`tools/make-initramfs.py`（Windows 上自制 cpio-newc initramfs）、
 `tools/verify-cpio.py`（校验归档结构）。
@@ -118,10 +118,35 @@ VFS / TCP-IP / PCI / USB 子系统 → **initramfs 解包成功**。
 - `head.S` 的 `relocate_enable_mmu` 用指令页错误当"传送门"（stvec 指向虚拟地址，
   切页表后靠 trap 进入虚拟地址空间）——**启动初期的一次指令页错误是内核设计，不是 bug**
 - TLB 键必须用 bigint：Sv48 下 `Number(vaddr>>12)*65536+asid` 逼近 2^53，
-  会导致不同虚拟地址碰撞 + `sfence.vma` 按地址失效失灵
+  会导致不同虚拟地址碰撞 + `sfence.vma` 按地址失效失灵。更强的结论：VPN 是
+  `vaddr>>12` 的**全量值**（内核半地址达 52 位），既压不进 Number，也不能与
+  asid 做位拼接（内核 vpn 高位恒 1 会跨 ASID 碰撞 → 异常风暴）
 - cpio-newc 的 name 填充按 `110 + len(name+\0)` 对齐（内核 `N_ALIGN(len)=(((len+1)&~3)+2)`，
   `+2` 补偿 header 110%4=2），且 name 必须以 NUL 结尾，否则分别报
   "broken padding" 与 "name without nulterm"
+
+### 启动 Debian 13（完整发行版，已验证到 login: ✅）
+
+真实发行版全链路：OpenSBI → U-Boot `bootefi` → EFI stub 内核（6.12.101+deb13）
+→ initramfs → switch_root → systemd → `serial-getty@ttyS0` → **`localhost login:`**。
+
+需要的三个关键配置（其余坑见上文排障要点）：
+
+1. **磁盘**：Debian 13 generic riscv64 镜像（GPT：p1=rootfs ext4、p15=ESP），
+   U-Boot 经 VirtIO 从 p1 直接 `load` 内核与 initrd（不需要 GRUB/ESP 内容）。
+   内核是 MZ+PE EFI stub 格式，`booti` 不认，必须走 `bootefi`。
+2. **熵**：模拟器时序确定，jitter entropy 采不出熵，内核 RNG 初始化会无限
+   自旋（udev 起不来）。本模拟器在 DTB `/chosen/rng-seed` 注入 4096 字节
+   `crypto.getRandomValues()` 真随机——内核极早期即 `random: crng init done`。
+3. **虚拟时钟**：`timebaseFrequency` 设 100 MHz（模拟器仅 ~1 MIPS，真机 ~100 倍，
+   默认 10 MHz 下 10M 指令 = 1 虚拟秒，内核 soft lockup 与 systemd 各服务超时
+   会按虚拟时间冤杀慢任务）。WFI 快进已随 timebase 折算，睡眠收敛不受影响。
+
+实测数据（512 MiB 内存、未压缩 initrd 66 MB）：18.24B 条指令 / 约 3.9 小时 /
+平均 1.31 MIPS，虚拟时间约 90 秒走到 login:（与真机数量级一致）。
+另外两个提速要点：用未压缩 cpio initrd 跳过 zstd 解压瓶颈（压缩段在
+<1 MIPS 下要烧 1B+ 指令）；引导脚本见 `tmp/debian-uboot.ts`（含 fdt set
+cell 写法等细节，模板可复用）。
 
 ### 命令行
 
@@ -159,7 +184,7 @@ tsx src/cli.ts --kernel hello.bin --dump-dtb virt.dtb --trace --trace-from 0x802
 | `0x1000_1000` | VirtIO-MMIO 块设备 |
 | `0x8000_0000` | RAM（默认 512 MiB，`-m` 可调） |
 | `0x8020_0000` | 默认内核加载地址 |
-| `0x8060_0000` | 默认 DTB 存放地址 |
+| 镜像尾端 | DTB 实际动态放置（2MB 对齐，紧跟内核/initrd 之后——固定地址会被大 initrd 覆盖） |
 
 PLIC 中断源：1 = VirtIO 块设备，10 = UART0（与 QEMU virt 相同）。
 
@@ -212,13 +237,13 @@ src/
 ├── machine.ts            virt 机器组装与主循环
 └── cli.ts                命令行入口
 tools/encoder.ts          RISC-V 指令编码器（测试与示例用）
-tests/                    98 项单元测试（node:test）
+tests/                    119 项单元测试（node:test）
 ```
 
 ## 测试
 
 ```bash
-npm test            # 全部 98 项
+npm test            # 全部 119 项
 npx tsx --test tests/mmu.test.ts      # 单个模块
 ```
 
@@ -229,10 +254,14 @@ Sv39/Sv48 翻译与权限、全部外设协议、以及整机端到端（SBI、�
 ## 性能与设计取舍
 
 - **数据通路使用 `bigint`**：语义与硬件完全一致（无 2^53 精度陷阱），可读性好；
-  代价是速度 —— 解释执行约 **1 MIPS** 量级。
-- 若需要更高性能，可按以下路线优化（接口已预留）：
+  代价是速度，解释执行天然慢于 JIT 模拟器。
+- 热路径已做多层优化（Linux 引导实测）：satp 派生值缓存、TLB 键 bigint 精简、
+  RAM 直读（绕总线分发与装箱）、中断状态合并、`performance.now()` 批采样、
+  定时器到期检测挪到 64 条节拍。当前吞吐：裸机基准约 **3 MIPS**，
+  Linux 内核态约 **1.3 MIPS**（优化前 1.0/0.97）。
+- 若需要更高性能，可按以下路线继续（接口已预留）：
   1. 64 位值改用 hi/lo 两个 32 位 `number` 分量表示（约 5-10 倍提速）；
-  2. TLB / 取指路径已做 `number` 化，可进一步引入代码缓存（basic-block cache）；
+  2. 取指路径引入代码缓存（basic-block cache）；
   3. 终极方案是 WASM JIT。
 - 非对齐访存默认按规范抛异常（`--misaligned slow` 可切换为逐字节模拟）。
 
