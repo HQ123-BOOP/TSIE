@@ -12,6 +12,8 @@ import { Plic } from './dev/plic.ts';
 import { Uart } from './dev/uart.ts';
 import { TestFinisher } from './dev/test.ts';
 import { VirtioBlk } from './dev/virtio-blk.ts';
+import { VirtioNet } from './dev/virtio-net.ts';
+import type { NetBackend } from './dev/net.ts';
 import type { DiskImage } from './dev/disk.ts';
 import { loadBinary, loadElf, type LoadedImage } from './loader/elf.ts';
 import { FdtNode, buildDtb } from './loader/dtb.ts';
@@ -23,12 +25,14 @@ export const VIRT_CLINT = 0x2000000n;
 export const VIRT_PLIC = 0xc000000n;
 export const VIRT_UART0 = 0x10000000n;
 export const VIRT_VIRTIO = 0x10001000n;
+export const VIRT_VIRTIO_NET = 0x10002000n;
 export const VIRT_FIRMWARE = 0x80000000n;
 export const VIRT_KERNEL = 0x80200000n;
 export const VIRT_DTB = 0x82200000n;
 
 /** PLIC 中断源编号 */
 const IRQ_VIRTIO = 1;
+const IRQ_VIRTIO_NET = 2;
 const IRQ_UART = 10;
 
 export interface MachineOptions {
@@ -36,6 +40,8 @@ export interface MachineOptions {
   memSize?: bigint;
   /** 块设备镜像 */
   disk?: DiskImage;
+  /** 网络后端（提供则挂载 virtio-net 网卡） */
+  net?: NetBackend;
   /** 固件（OpenSBI fw_jump.bin 等） */
   bios?: Uint8Array;
   /** 内核 ELF / 裸机程序 */
@@ -93,6 +99,7 @@ export class Machine {
   readonly clint = new Clint();
   readonly plic: Plic;
   readonly virtio?: VirtioBlk;
+  readonly netdev?: VirtioNet;
   readonly test: TestFinisher;
   readonly sbi?: SbiFirmware;
 
@@ -148,6 +155,11 @@ export class Machine {
     if (opts.disk) {
       this.virtio = new VirtioBlk(this.bus, opts.disk, (level) => this.plic.setIrq(IRQ_VIRTIO, level));
       this.bus.addDevice(VIRT_VIRTIO, this.virtio);
+    }
+
+    if (opts.net) {
+      this.netdev = new VirtioNet(this.bus, opts.net, (level) => this.plic.setIrq(IRQ_VIRTIO_NET, level));
+      this.bus.addDevice(VIRT_VIRTIO_NET, this.netdev);
     }
 
     this.cpu = new Cpu(this.bus, { misaligned: opts.misaligned ?? 'trap' });
@@ -360,6 +372,14 @@ export class Machine {
       vioNode.propReg('reg', [[VIRT_VIRTIO, 0x1000n]]);
       vioNode.propU32('interrupts', [IRQ_VIRTIO]);
       vioNode.propU32('interrupt-parent', [2]);
+    }
+
+    if (this.netdev) {
+      const netNode = soc.addChild(`virtio_mmio@${VIRT_VIRTIO_NET.toString(16)}`);
+      netNode.propStr('compatible', 'virtio,mmio');
+      netNode.propReg('reg', [[VIRT_VIRTIO_NET, 0x1000n]]);
+      netNode.propU32('interrupts', [IRQ_VIRTIO_NET]);
+      netNode.propU32('interrupt-parent', [2]);
     }
 
     const testNode = soc.addChild(`test@${VIRT_TEST.toString(16)}`);

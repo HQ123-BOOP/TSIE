@@ -37,6 +37,9 @@ export { Clint } from './dev/clint.ts';
 export { Plic } from './dev/plic.ts';
 export { TestFinisher } from './dev/test.ts';
 export { VirtioBlk } from './dev/virtio-blk.ts';
+export { VirtioMmio, type VQueue, type ChainDesc } from './dev/virtio-mmio.ts';
+export { VirtioNet } from './dev/virtio-net.ts';
+export { LoopbackBackend, type NetBackend, type EthFrame } from './dev/net.ts';
 export { MemoryDisk, FileDisk, SECTOR_SIZE, type DiskImage } from './dev/disk.ts';
 
 export { SbiFirmware, type SbiContext } from './firmware/sbi.ts';

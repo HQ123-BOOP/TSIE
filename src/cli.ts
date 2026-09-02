@@ -12,12 +12,14 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Machine, type MachineStats } from './machine.ts';
 import { FileDisk } from './dev/disk.ts';
+import { LoopbackBackend } from './dev/net.ts';
 import { CSR } from './cpu/csr.ts';
 
 interface Args {
   kernel?: string;
   bios?: string;
   disk?: string;
+  netdev?: 'loopback';
   initrd?: string;
   append: string;
   memory: bigint;
@@ -43,6 +45,7 @@ ts-riscv64 —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
   -k, --kernel <file>       内核 / 裸机程序（ELF64 或裸二进制）
   -b, --bios <file>         固件（如 OpenSBI fw_jump.bin），缺省时启用内建 SBI
   -d, --disk <file>         磁盘镜像（挂载为 VirtIO 块设备）
+      --netdev <backend>    网卡后端：loopback（TX 帧回注 RX，自发自收验证）
   -i, --initrd <file>       initrd 镜像
   -a, --append <string>     内核命令行
   -m, --memory <size>       内存大小，支持 K/M/G 后缀（默认 512M）
@@ -108,6 +111,12 @@ function parseArgs(argv: string[]): Args {
       case '--disk':
         args.disk = next();
         break;
+      case '--netdev': {
+        const v = next();
+        if (v !== 'loopback') throw new Error(`未知网卡后端: ${v}（当前支持 loopback）`);
+        args.netdev = v;
+        break;
+      }
       case '-i':
       case '--initrd':
         args.initrd = next();
@@ -184,6 +193,7 @@ async function main(): Promise<number> {
       memSize: args.memory,
       bios: args.bios ? readFile(args.bios) : undefined,
       disk: args.disk ? new FileDisk(args.disk) : undefined,
+      net: args.netdev ? new LoopbackBackend() : undefined,
       initrd: args.initrd ? readFile(args.initrd) : undefined,
       kernel: args.kernel
         ? args.loadAt
