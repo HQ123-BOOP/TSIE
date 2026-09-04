@@ -14,13 +14,14 @@ import { Machine, type MachineStats } from './machine.ts';
 import { FileDisk } from './dev/disk.ts';
 import { LoopbackBackend } from './dev/net.ts';
 import { ProxyBackend } from './dev/net-proxy.ts';
+import { SlirpBackend } from './dev/net-slirp.ts';
 import { CSR } from './cpu/csr.ts';
 
 interface Args {
   kernel?: string;
   bios?: string;
   disk?: string;
-  netdev?: 'loopback' | 'proxy';
+  netdev?: 'loopback' | 'proxy' | 'slirp';
   proxyHost?: string;
   proxyPort?: number;
   initrd?: string;
@@ -119,7 +120,8 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--netdev': {
         const v = next();
-        if (v !== 'loopback' && v !== 'proxy') throw new Error(`未知网卡后端: ${v}（当前支持 loopback/proxy）`);
+        if (v !== 'loopback' && v !== 'proxy' && v !== 'slirp')
+          throw new Error(`未知网卡后端: ${v}（当前支持 loopback/proxy/slirp）`);
         args.netdev = v;
         break;
       }
@@ -210,7 +212,9 @@ async function main(): Promise<number> {
           ? new LoopbackBackend()
           : args.netdev === 'proxy'
             ? new ProxyBackend({ host: args.proxyHost ?? '127.0.0.1', port: args.proxyPort ?? 7777 })
-            : undefined,
+            : args.netdev === 'slirp'
+              ? new SlirpBackend()
+              : undefined,
       initrd: args.initrd ? readFile(args.initrd) : undefined,
       kernel: args.kernel
         ? args.loadAt
