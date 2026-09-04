@@ -64,11 +64,26 @@ export class VirtioNet extends VirtioMmio {
     return 0n;
   }
 
+  /**
+   * RX 队列的 avail 条目归 injectRx/tryDeliver 专属消费（lastAvail 是它的游标）。
+   * 驱动 NOTIFY「挂新缓冲」时只泵一下积压帧，绝不能走基类 processQueue——
+   * 否则 RX 的空缓冲条目会被当请求消费掉（lastAvail 被推到 availIdx），
+   * 之后 tryDeliver 的「驱动还没挂缓冲」判断永远为真 → RX 永远收不到帧
+   * （症状：ifconfig eth0 的 RX packets 恒为 0，帧全卡在 rxPending）。
+   */
+  protected override processQueue(q: VQueue): void {
+    if (this.queues.indexOf(q) === 0) {
+      this.tryDrainPending();
+      return;
+    }
+    super.processQueue(q);
+  }
+
   protected handleRequest(q: VQueue, headId: number): void {
     const isRx = this.queues.indexOf(q) === 0;
     if (isRx) {
-      // 驱动挂空缓冲（add_recvbuf_small），设备侧不主动处理——留给 injectRx
-      // 消费；这里只把 lastAvail 前进交给基类（无需动作）。
+      // RX 的空缓冲由 tryDeliver（injectRx 路径）按自己的游标消费；
+      // 此分支在 processQueue 被 override 后不可达，保留兜底。
       this.tryDrainPending();
       return;
     }

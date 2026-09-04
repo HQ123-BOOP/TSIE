@@ -137,6 +137,33 @@ test('virtio-net：RX 无缓冲时排队，缓冲就位后泵出', () => {
   assert.equal(dev.stats().rx, 1, '缓冲就位后应投递排队帧');
 });
 
+test('virtio-net：驱动先挂缓冲+NOTIFY、后注入的帧必须能投递（回归：RX 游标归 tryDeliver）', () => {
+  const { ram, dev } = makeNet();
+  const DESC = 0x80010000n;
+  const AVAIL = 0x80011000n;
+  const USED = 0x80012000n;
+  const BUF = 0x80020000n;
+  setupQueue(ram, dev, 0, { desc: DESC, avail: AVAIL, used: USED });
+
+  // guest 真实时序：先挂缓冲并 NOTIFY（此刻没有任何待注入帧）。
+  // 回归背景：基类 processQueue 曾把 RX 的空缓冲条目当请求消费掉
+  // （lastAvail 被推到 availIdx），之后 injectRx 的「驱动还没挂缓冲」
+  // 判断永远为真 → guest 里 RX packets 恒为 0。
+  ram.write(O(DESC), BUF, 8);
+  ram.write(O(DESC) + 8n, 1534n, 4);
+  ram.write(O(DESC) + 12n, 2n, 2);
+  ram.write(O(AVAIL), 0n, 2); // flags
+  ram.write(O(AVAIL) + 2n, 1n, 2); // avail.idx = 1
+  ram.write(O(AVAIL) + 4n, 0n, 2); // ring[0] = head 0
+  dev.write(0x50n, 0n, 4); // QueueNotify RX
+  assert.equal(dev.stats().rx, 0, '无帧可投，不消耗缓冲');
+  assert.equal(dev.stats().rxDropped, 0, 'NOTIFY 本身不应造成丢弃');
+
+  // 之后注入一帧：必须能投递（RX 游标归 tryDeliver，不被 processQueue 消费）
+  dev.injectRx(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]));
+  assert.equal(dev.stats().rx, 1, 'NOTIFY 后注入的帧应能投递');
+});
+
 test('virtio-net：TX——跳过 12B 头取帧，used.len=0，帧到后端', () => {
   const backend = new SinkBackend();
   const { ram, dev, irqs } = makeNet(backend);
