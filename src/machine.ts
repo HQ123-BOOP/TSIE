@@ -13,6 +13,7 @@ import { Uart } from './dev/uart.ts';
 import { TestFinisher } from './dev/test.ts';
 import { VirtioBlk } from './dev/virtio-blk.ts';
 import { VirtioNet } from './dev/virtio-net.ts';
+import { GoldfishRtc } from './dev/rtc.ts';
 import type { NetBackend } from './dev/net.ts';
 import type { DiskImage } from './dev/disk.ts';
 import { loadBinary, loadElf, type LoadedImage } from './loader/elf.ts';
@@ -26,6 +27,7 @@ export const VIRT_PLIC = 0xc000000n;
 export const VIRT_UART0 = 0x10000000n;
 export const VIRT_VIRTIO = 0x10001000n;
 export const VIRT_VIRTIO_NET = 0x10002000n;
+export const VIRT_RTC = 0x101000n;
 export const VIRT_FIRMWARE = 0x80000000n;
 export const VIRT_KERNEL = 0x80200000n;
 export const VIRT_DTB = 0x82200000n;
@@ -34,6 +36,7 @@ export const VIRT_DTB = 0x82200000n;
 const IRQ_VIRTIO = 1;
 const IRQ_VIRTIO_NET = 2;
 const IRQ_UART = 10;
+const IRQ_RTC = 11;
 
 export interface MachineOptions {
   /** 内存大小（字节），默认 512 MiB */
@@ -101,6 +104,7 @@ export class Machine {
   readonly virtio?: VirtioBlk;
   readonly netdev?: VirtioNet;
   readonly test: TestFinisher;
+  readonly rtc: GoldfishRtc;
   readonly sbi?: SbiFirmware;
 
   readonly ramBase = VIRT_RAM_BASE;
@@ -151,6 +155,11 @@ export class Machine {
 
     this.test = new TestFinisher((code, reason) => this.shutdown(code, reason));
     this.bus.addDevice(VIRT_TEST, this.test);
+
+    // Goldfish RTC：给 guest 真实墙钟（RTC_HCTOSYS 启动时校准系统时钟）。
+    // 闹钟中断未实现，无需接 PLIC——DTB 仍声明 IRQ 11 以匹配 QEMU virt。
+    this.rtc = new GoldfishRtc();
+    this.bus.addDevice(VIRT_RTC, this.rtc);
 
     if (opts.disk) {
       this.virtio = new VirtioBlk(this.bus, opts.disk, (level) => this.plic.setIrq(IRQ_VIRTIO, level));
@@ -385,6 +394,13 @@ export class Machine {
     const testNode = soc.addChild(`test@${VIRT_TEST.toString(16)}`);
     testNode.propStr('compatible', 'sifive,test0');
     testNode.propReg('reg', [[VIRT_TEST, 0x1000n]]);
+
+    // Goldfish RTC（QEMU virt 同款：0x101000 / PLIC 源 11）
+    const rtcNode = soc.addChild(`rtc@${VIRT_RTC.toString(16)}`);
+    rtcNode.propStr('compatible', 'google,goldfish-rtc');
+    rtcNode.propReg('reg', [[VIRT_RTC, 0x1000n]]);
+    rtcNode.propU32('interrupts', [IRQ_RTC]);
+    rtcNode.propU32('interrupt-parent', [2]);
 
     return buildDtb(root);
   }

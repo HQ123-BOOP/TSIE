@@ -36,6 +36,7 @@ export { Uart, type IrqLine, type UartOptions } from './dev/uart.ts';
 export { Clint } from './dev/clint.ts';
 export { Plic } from './dev/plic.ts';
 export { TestFinisher } from './dev/test.ts';
+export { GoldfishRtc } from './dev/rtc.ts';
 export { VirtioBlk } from './dev/virtio-blk.ts';
 export { VirtioMmio, type VQueue, type ChainDesc } from './dev/virtio-mmio.ts';
 export { VirtioNet } from './dev/virtio-net.ts';
