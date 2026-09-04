@@ -30,23 +30,58 @@ export class ProxyBackend implements NetBackend {
   private sink: ((frame: EthFrame) => void) | undefined;
   private peer?: dgram.RemoteInfo;
   private closed = false;
+  private lastSentAt = 0;
+  /**
+   * 保活心跳：Windows 防火墙对 UDP 入站有流状态超时（约 60s），
+   * guest 长时间静默（如停在 login）后再 ping，回包会被静默丢弃。
+   * 每 10s 检查一次，超 20s 没发包就发 0 字节心跳刷新防火墙流；
+   * 0 字节帧在守护端不入 TAP、在本端不入 guest，双方均无害。
+   */
+  private readonly keepalive = setInterval(() => {
+    if (this.closed) return;
+    if (Date.now() - this.lastSentAt > 20_000) {
+      this.sock.send(Buffer.alloc(0), this.opts.port, this.opts.host);
+    }
+  }, 10_000);
 
-  constructor(private readonly opts: ProxyOptions) {
+  private readonly opts: ProxyOptions;
+
+  private readonly debug = process.env.TS_NET_PROXY_DEBUG === '1';
+
+  constructor(opts: ProxyOptions) {
+    this.opts = opts;
     this.sock = dgram.createSocket('udp4');
     this.sock.on('message', (msg, rinfo) => {
+      if (this.debug) console.error(`[proxy] RX ${msg.length}B from ${rinfo.address}:${rinfo.port}`);
+      if (msg.length === 0) return; // 心跳
       this.peer = rinfo; // 学习回程地址
       this.sink?.(new Uint8Array(msg));
     });
-    this.sock.on('error', () => {
-      /* 端口冲突等：保持静默，guest 表现为无 RX */
+    this.sock.on('error', (e) => {
+      if (this.debug) console.error(`[proxy] socket error: ${e.message}`);
     });
-    this.sock.bind(opts.localPort ?? 0);
+    this.sock.bind(opts.localPort ?? 0, () => {
+      if (this.debug) console.error(`[proxy] 绑定 ${JSON.stringify(this.sock.address())}`);
+    });
   }
 
   send(frame: EthFrame): void {
     if (this.closed) return;
+    this.lastSentAt = Date.now();
     const data = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength);
-    const { host, port } = this.peer ?? this.opts;
+    // 注意：dgram RemoteInfo 的地址字段是 .address 而非 .host——
+    // 解构写错会让已学习 peer 后的所有帧发往 undefined（静默丢失）。
+    const host = this.peer ? this.peer.address : this.opts.host;
+    const port = this.peer ? this.peer.port : this.opts.port;
+    if (this.debug) {
+      const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+      const dst =
+        frame.length >= 6
+          ? [...frame.slice(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join(':')
+          : '?';
+      const type = frame.length >= 14 ? dv.getUint16(12).toString(16) : '?';
+      console.error(`[proxy] TX ${frame.length}B -> ${host}:${port} dst=${dst} type=0x${type}`);
+    }
     this.sock.send(data, port, host);
   }
 
@@ -56,6 +91,7 @@ export class ProxyBackend implements NetBackend {
 
   close(): void {
     this.closed = true;
+    clearInterval(this.keepalive);
     try {
       this.sock.close();
     } catch {
