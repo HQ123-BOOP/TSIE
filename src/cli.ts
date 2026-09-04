@@ -13,13 +13,16 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Machine, type MachineStats } from './machine.ts';
 import { FileDisk } from './dev/disk.ts';
 import { LoopbackBackend } from './dev/net.ts';
+import { ProxyBackend } from './dev/net-proxy.ts';
 import { CSR } from './cpu/csr.ts';
 
 interface Args {
   kernel?: string;
   bios?: string;
   disk?: string;
-  netdev?: 'loopback';
+  netdev?: 'loopback' | 'proxy';
+  proxyHost?: string;
+  proxyPort?: number;
   initrd?: string;
   append: string;
   memory: bigint;
@@ -46,6 +49,9 @@ ts-riscv64 —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
   -b, --bios <file>         固件（如 OpenSBI fw_jump.bin），缺省时启用内建 SBI
   -d, --disk <file>         磁盘镜像（挂载为 VirtIO 块设备）
       --netdev <backend>    网卡后端：loopback（TX 帧回注 RX，自发自收验证）
+                            proxy（经 UDP 转发到外部桥接守护，如 VM 上的 TAP 桥）
+      --proxy-host <ip>     proxy 后端的桥接守护地址（配合 --netdev proxy）
+      --proxy-port <n>      proxy 后端的桥接守护 UDP 端口（默认 7777）
   -i, --initrd <file>       initrd 镜像
   -a, --append <string>     内核命令行
   -m, --memory <size>       内存大小，支持 K/M/G 后缀（默认 512M）
@@ -113,10 +119,16 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--netdev': {
         const v = next();
-        if (v !== 'loopback') throw new Error(`未知网卡后端: ${v}（当前支持 loopback）`);
+        if (v !== 'loopback' && v !== 'proxy') throw new Error(`未知网卡后端: ${v}（当前支持 loopback/proxy）`);
         args.netdev = v;
         break;
       }
+      case '--proxy-host':
+        args.proxyHost = next();
+        break;
+      case '--proxy-port':
+        args.proxyPort = Number(parseNumber(next()));
+        break;
       case '-i':
       case '--initrd':
         args.initrd = next();
@@ -193,7 +205,12 @@ async function main(): Promise<number> {
       memSize: args.memory,
       bios: args.bios ? readFile(args.bios) : undefined,
       disk: args.disk ? new FileDisk(args.disk) : undefined,
-      net: args.netdev ? new LoopbackBackend() : undefined,
+      net:
+        args.netdev === 'loopback'
+          ? new LoopbackBackend()
+          : args.netdev === 'proxy'
+            ? new ProxyBackend({ host: args.proxyHost ?? '127.0.0.1', port: args.proxyPort ?? 7777 })
+            : undefined,
       initrd: args.initrd ? readFile(args.initrd) : undefined,
       kernel: args.kernel
         ? args.loadAt
