@@ -414,7 +414,9 @@ class TcpConn {
   }
 
   private synAck(): void {
-    this.backend.tcpEmit(this, TCP_SYN | TCP_ACK, this.sndIsn, 0, undefined, true);
+    // SYN-ACK 必须确认 guest 的 SYN（ack = guestIsn+1 = rcvNxt）——
+    // 真内核会丢弃 ack=0 的 SYN-ACK（单测的假 guest 不校验，曾漏过）
+    this.backend.tcpEmit(this, TCP_SYN | TCP_ACK, this.sndIsn, this.rcvNxt, undefined, true);
     this.sndNxt = (this.sndIsn + 1) >>> 0; // SYN 消耗一个序号
   }
 

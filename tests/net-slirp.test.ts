@@ -258,6 +258,7 @@ test('slirp：TCP 全往返（握手/数据回显/FIN 挥手）+ RST（连接拒
     return u16(l4, 0) === serverPort && (l4[13] & (TCP_SYN | TCP_ACK)) === (TCP_SYN | TCP_ACK);
   });
   const isn = u32(synAck.subarray(34), 4);
+  assert.equal(u32(synAck.subarray(34), 8), 1001, "SYN-ACK 必须确认 guest 的 SYN (ack=guestIsn+1)");
   assert.equal(ipStr(synAck.subarray(26, 30)), DIP);
 
   const mySeq = 1001;
