@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: 2026 TSIE
  */
 /**
- * ts-riscv64 —— 用 TypeScript 实现的 RISC-V 64 位模拟器。
+ * TSIE (TSIE Is an Emulator) —— 用 TypeScript 实现的 RISC-V 64 位模拟器。
  *
  * 主要组成：
  *  - CPU：RV64IMAFDC（RV64GC）+ Zicsr/Zifencei，M/S/U 三种特权级

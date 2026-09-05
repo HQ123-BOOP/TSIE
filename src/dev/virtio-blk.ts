@@ -147,7 +147,7 @@ export class VirtioBlk extends VirtioMmio {
           break;
         case BLK_T_GET_ID: {
           const id = Buffer.alloc(20, 0);
-          Buffer.from('ts-riscv64-virtio').copy(id);
+          Buffer.from('tsie-virtio').copy(id);
           let off = 0;
           for (const c of dataIn) {
             const n = Math.min(c.len, Math.max(0, id.length - off));

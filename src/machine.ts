@@ -315,7 +315,7 @@ export class Machine {
     root.propU32('#address-cells', [2]);
     root.propU32('#size-cells', [2]);
     root.propStr('compatible', 'riscv-virtio');
-    root.propStr('model', 'ts-riscv64,virt');
+    root.propStr('model', 'tsie,virt');
 
     const chosen = root.addChild('chosen');
     chosen.propStr('bootargs', cmdline);

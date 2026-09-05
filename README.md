@@ -51,7 +51,7 @@ tsx src/cli.ts --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/fir
 tsx src/cli.ts --bios .../fw_jump.bin --kernel hello-sbi.bin
 ```
 
-OpenSBI 会正确识别本模拟器（`Platform Name: ts-riscv64,virt`、`rv64imafdc`、
+OpenSBI 会正确识别本模拟器（`Platform Name: tsie,virt`、`rv64imafdc`、
 ACLINT 定时器、8250 串口、16 个 PMP），并把控制权移交给 S 模式内核。
 
 源码与编译方式见官方仓库：<https://github.com/riscv-software-src/opensbi>（国内可用

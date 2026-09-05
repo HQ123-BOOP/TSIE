@@ -4,7 +4,7 @@
  * SPDX-FileCopyrightText: 2026 TSIE
  */
 /**
- * ts-riscv64 —— RISC-V 64 位模拟器命令行入口
+ * TSIE (TSIE Is an Emulator) —— RISC-V 64 位模拟器命令行入口
  *
  *   tsx src/cli.ts --kernel vmlinux --disk rootfs.img --append "console=ttyS0 root=/dev/vda"
  *   tsx src/cli.ts --kernel hello.bin --trace --stats
@@ -43,10 +43,10 @@ interface Args {
 }
 
 const HELP = `
-ts-riscv64 —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
+TSIE (TSIE Is an Emulator) —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
 
 用法:
-  riscv64 [选项] --kernel <镜像>
+  tsie [选项] --kernel <镜像>
 
 选项:
   -k, --kernel <file>       内核 / 裸机程序（ELF64 或裸二进制）
@@ -258,7 +258,7 @@ async function main(): Promise<number> {
   }
 
   process.stderr.write(
-    `ts-riscv64: 入口 0x${machine.cpu.pc.toString(16)}，内存 ${machine.ramSize / 1024n / 1024n} MiB，` +
+    `TSIE: 入口 0x${machine.cpu.pc.toString(16)}，内存 ${machine.ramSize / 1024n / 1024n} MiB，` +
       `DTB @ 0x${machine.dtbAddress.toString(16)}\n`,
   );
 

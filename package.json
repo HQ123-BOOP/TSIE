@@ -1,12 +1,12 @@
 {
-  "name": "ts-riscv64",
+  "name": "tsie",
   "version": "1.0.0",
-  "description": "A RISC-V 64-bit (RV64GC) full-system emulator written in TypeScript",
+  "description": "TSIE (TSIE Is an Emulator) - a RISC-V 64-bit (RV64GC) full-system emulator written in TypeScript",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "riscv64": "dist/cli.js"
+    "tsie": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -24,9 +24,12 @@
     "rv64gc",
     "typescript",
     "sv39",
-    "sv48"
+    "sv48",
+    "tsie",
+    "virtio",
+    "9p"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
