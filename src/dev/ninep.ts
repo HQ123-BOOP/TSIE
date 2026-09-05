@@ -396,9 +396,15 @@ export class NinePServer {
     w.u64(BigInt(st.nlink)); w.u64(0n); // rdev
     w.u64(BigInt(st.size)); w.u64(BigInt(st.blksize || 4096)); w.u64(BigInt(Math.ceil(st.size / 512)));
     w.u64(BigInt(Math.floor(st.atimeMs / 1000)));
+    w.u64(0n); // atime_nsec
     w.u64(BigInt(Math.floor(st.mtimeMs / 1000)));
+    w.u64(0n); // mtime_nsec
     w.u64(BigInt(Math.floor(st.ctimeMs / 1000)));
-    w.u64(0n); w.u64(0n); w.u64(0n); // btime/gen/data_version
+    w.u64(0n); // ctime_nsec
+    w.u64(0n); w.u64(0n); // btime_sec / btime_nsec
+    w.u64(0n); // gen
+    w.u64(0n); // data_version
+    // 完整 9P2000.L Rgetattr 必须是 153B body；短了客户端报 EFAULT
     return w.finish(R_GETATTR, r.tag);
   }
 
