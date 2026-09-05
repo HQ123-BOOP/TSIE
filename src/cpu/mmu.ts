@@ -36,15 +36,47 @@ interface TlbEntry {
 }
 
 /**
+ * 虚拟页快路径表项：把一个已翻译的 4KB 虚拟页固定到 RAM 的 DataView 切片上。
+ * 命中后 fetch/load/store 只需 1 次 BigInt 移位 + 1 次 BigInt AND + Number 键
+ * Map 查找，完全绕开 isCanonical/tlbKey/checkPerm 的 BigInt 流水线。
+ */
+interface FastPage {
+  /** RAM 的 DataView（来自 fastRam） */
+  view: DataView;
+  /** 该虚拟页首字节在 DataView 中的偏移 */
+  off: number;
+  /** PTE 低 8 位（含 walk 时回写的 A/D） */
+  prot: number;
+  asid: number;
+  global: boolean;
+}
+
+/**
  * MMU：支持 Bare / Sv39 / Sv48，带可配置 TLB。
  * 故障信息通过 `faultCause` / `faultTval` 返回给 CPU。
  */
 export class Mmu {
+  /** 当前特权级（由 CPU 同步）；setter 顺带重算快路径权限位 */
+  get priv(): PrivLevel {
+    return this._priv;
+  }
+  set priv(v: PrivLevel) {
+    this._priv = v;
+    this.recalcFastPerms();
+  }
+  private _priv: PrivLevel = Priv.M;
+
+  /** mstatus（由 CPU 同步）；setter 顺带重算快路径权限位 */
+  get mstatus(): bigint {
+    return this._mstatus;
+  }
+  set mstatus(v: bigint) {
+    this._mstatus = v;
+    this.recalcFastPerms();
+  }
+  private _mstatus = 0n;
+
   readonly bus: Bus;
-  /** 当前特权级（由 CPU 同步） */
-  priv: PrivLevel = Priv.M;
-  /** mstatus（由 CPU 同步） */
-  mstatus = 0n;
 
   /**
    * satp 缓存的派生值：enabled/mode/asid/vaBits。
@@ -62,11 +94,20 @@ export class Mmu {
     return this._satp;
   }
   set satp(v: bigint) {
+    if (v === this._satp) return; // syncMmu 每次脏同步都赋值，等值直接短路
     this._satp = v;
     this._mode = Number((v >> 60n) & 0xfn);
     this._asid = Number((v >> 44n) & 0xffffn);
     this._vaBits = this._mode === 8 ? 39 : this._mode === 9 ? 48 : 0;
     this._enabled = this._mode !== 0;
+    // 切换到当前 asid 的快缓存桶（get-or-create）
+    let m = this.fastBy.get(this._asid);
+    if (m === undefined) {
+      m = new Map<number, FastPage>();
+      this.fastBy.set(this._asid, m);
+    }
+    this.fastCur = m;
+    this.recalcFastPerms();
   }
 
   faultCause = -1;
@@ -87,6 +128,48 @@ export class Mmu {
    */
   private tlb = new Map<bigint, TlbEntry>();
 
+  // ------------------------------------------------------------------
+  // 虚拟页快缓存（Number 键）
+  //
+  // 外层按 asid 分桶（与 TLB 的 asid 语义对齐），内层键 = Number(vaddr >> 12)。
+  // 内核 VA 的 vpn 有 44+ 位，Number 仍精确（< 2^53），且 Map 对 Number 键的
+  // 哈希远快于 BigInt。仅在 walk 成功且 4KB 切片完整落在 fastRam 时填充，
+  // 所以命中即可直读 DataView，不再经过 isCanonical/tlbKey/checkPerm。
+  // ------------------------------------------------------------------
+  private fastBy = new Map<number, Map<number, FastPage>>();
+  private fastCur: Map<number, FastPage> = new Map();
+
+  /**
+   * 快路径权限判定用的预计算位（由 recalcFastPerms 在
+   * priv/mstatus/satp 变化时刷新）：
+   *  - fOnI / fOnL：快路径总开关（翻译启用且有效特权级非 M；
+   *    L 含 MPRV 语义）
+   *  - fUokI/fSokI、fUokL/fSokL：U 页 / 非 U 页在对应有效特权级
+   *    下是否可访问（SUM 语义）
+   *  - fMxrL：MXR（加载允许 X 页）
+   */
+  private fOnI = false;
+  private fOnL = false;
+  private fUokI = false;
+  private fSokI = false;
+  private fUokL = false;
+  private fSokL = false;
+  private fMxrL = false;
+
+  private recalcFastPerms(): void {
+    const m = this._mstatus;
+    const mprv = (m & SR_MPRV) !== 0n;
+    const eL = mprv ? ((Number((m >> 11n) & 3n)) as PrivLevel) : this._priv;
+    const sum = (m & SR_SUM) !== 0n;
+    this.fOnI = this._enabled && this._priv !== Priv.M;
+    this.fOnL = this._enabled && eL !== Priv.M;
+    this.fUokI = this._priv === Priv.U || (this._priv === Priv.S && sum);
+    this.fSokI = this._priv !== Priv.U;
+    this.fUokL = eL === Priv.U || (eL === Priv.S && sum);
+    this.fSokL = eL !== Priv.U;
+    this.fMxrL = (m & SR_MXR) !== 0n;
+  }
+
   /** TLB 键：vpn*65536 + asid（bigint；flushBy 用 key>>16 反解 vpn） */
   private tlbKey(vaddr: bigint, asid: number): bigint {
     return (vaddr >> PAGE_SHIFT) * 65536n + BigInt(asid);
@@ -106,6 +189,7 @@ export class Mmu {
 
   flush(): void {
     this.tlb.clear();
+    for (const m of this.fastBy.values()) m.clear();
   }
 
   /** sfence.vma：按 asid / vaddr 失效 */
@@ -113,6 +197,17 @@ export class Mmu {
     if (vaddr === undefined && asid === undefined) {
       this.flush();
       return;
+    }
+    // 快缓存同步失效：vpn 精确匹配（超级页只填了访问到的 4K 切片，键即 vpn）
+    if (vaddr !== undefined) {
+      const vpn = Number(vaddr >> PAGE_SHIFT);
+      for (const m of this.fastBy.values()) m.delete(vpn);
+    } else {
+      // 仅按 asid：清该 asid 的桶；全局页（各桶里都可能有）一并清
+      for (const [a, m] of this.fastBy) {
+        if (a === asid) m.clear();
+        else for (const [k, e] of m) if (e.global) m.delete(k);
+      }
     }
     for (const [key, e] of this.tlb) {
       if (vaddr !== undefined && key >> 16n !== vaddr >> PAGE_SHIFT) continue;
@@ -253,7 +348,10 @@ export class Mmu {
       const shift = 12 + 9 * i;
       const paddr = (ppn << PAGE_SHIFT) | (vaddr & ((1n << BigInt(shift)) - 1n));
 
-      if (this.tlb.size >= this.maxEntries) this.tlb.clear();
+      if (this.tlb.size >= this.maxEntries) {
+        this.tlb.clear();
+        for (const m of this.fastBy.values()) m.clear();
+      }
       this.tlb.set(this.tlbKey(vaddr, asid), {
         base: ppn << PAGE_SHIFT,
         mask: (1n << BigInt(shift)) - 1n,
@@ -261,6 +359,27 @@ export class Mmu {
         global: (updated & PTE_G) !== 0n,
         asid,
       });
+
+      // 填虚拟页快缓存：仅当该 4KB 切片完整落在 fastRam（MMIO 页走慢路径）
+      const ram = this.fastRam;
+      if (ram !== undefined) {
+        const pb = Number(paddr & ~0xfffn);
+        if (pb >= ram.base && pb + 4096 <= ram.end) {
+          let m = this.fastBy.get(asid);
+          if (m === undefined) {
+            m = new Map<number, FastPage>();
+            this.fastBy.set(asid, m);
+            if (asid === this._asid) this.fastCur = m;
+          }
+          m.set(Number(vaddr >> PAGE_SHIFT), {
+            view: ram.view,
+            off: pb - ram.base,
+            prot: Number(updated & 0xffn),
+            asid,
+            global: (updated & PTE_G) !== 0n,
+          });
+        }
+      }
       return paddr;
     }
     return this.fault(faultCause, vaddr);
@@ -281,6 +400,17 @@ export class Mmu {
 
   /** 取指令半字（16 位）；返回 null 表示异常 */
   fetch16(vaddr: bigint): number | null {
+    // 虚拟页快路径：命中则零 BigInt 直读（取指有效特权级 = 当前 priv）
+    if (this.fOnI) {
+      const fp = this.fastCur.get(Number(vaddr >> PAGE_SHIFT));
+      if (fp !== undefined) {
+        const p = fp.prot;
+        if ((p & 8) !== 0 && ((p & 16) !== 0 ? this.fUokI : this.fSokI)) {
+          return fp.view.getUint16(fp.off + Number(vaddr & 0xfffn), true);
+        }
+        // 权限不满足 → 落慢路径产生正确的 page fault（不能静默放行）
+      }
+    }
     const pa = this.translate(vaddr, AccessType.Instruction);
     if (pa === null) return null;
     const ram = this.fastRam;
@@ -315,6 +445,21 @@ export class Mmu {
   }
 
   load(vaddr: bigint, size: MemSize): bigint | null {
+    // 虚拟页快路径（有效特权级已折算 MPRV，见 fOnL/fUokL/fMxrL）
+    if (this.fOnL) {
+      const fp = this.fastCur.get(Number(vaddr >> PAGE_SHIFT));
+      if (fp !== undefined) {
+        const p = fp.prot;
+        if (((p & 2) !== 0 || (this.fMxrL && (p & 8) !== 0)) && ((p & 16) !== 0 ? this.fUokL : this.fSokL)) {
+          const a = fp.off + Number(vaddr & 0xfffn);
+          const v = fp.view;
+          return size === 1 ? BigInt(v.getUint8(a))
+            : size === 2 ? BigInt(v.getUint16(a, true))
+            : size === 4 ? BigInt(v.getUint32(a, true))
+            : v.getBigUint64(a, true);
+        }
+      }
+    }
     const pa = this.translate(vaddr, AccessType.Load);
     if (pa === null) return null;
     const ram = this.fastRam;
@@ -337,6 +482,22 @@ export class Mmu {
   }
 
   store(vaddr: bigint, value: bigint, size: MemSize): boolean {
+    // 虚拟页快路径：存储额外要求 D=1（D=0 时慢路径会回写 PTE）
+    if (this.fOnL) {
+      const fp = this.fastCur.get(Number(vaddr >> PAGE_SHIFT));
+      if (fp !== undefined) {
+        const p = fp.prot;
+        if ((p & 4) !== 0 && (p & 128) !== 0 && ((p & 16) !== 0 ? this.fUokL : this.fSokL)) {
+          const a = fp.off + Number(vaddr & 0xfffn);
+          const v = fp.view;
+          if (size === 1) v.setUint8(a, Number(value & 0xffn));
+          else if (size === 2) v.setUint16(a, Number(value & 0xffffn), true);
+          else if (size === 4) v.setUint32(a, Number(value & 0xffffffffn), true);
+          else v.setBigUint64(a, value & MASK64, true);
+          return true;
+        }
+      }
+    }
     const pa = this.translate(vaddr, AccessType.Store);
     if (pa === null) return false;
     const ram = this.fastRam;

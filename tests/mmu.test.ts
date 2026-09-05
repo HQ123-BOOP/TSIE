@@ -18,6 +18,7 @@ import {
   PTE_X,
   Sv39Mapper,
   TEST_BASE,
+  TEST_RAM_SIZE,
   halt,
   makeCpu,
 } from './harness.ts';
@@ -302,3 +303,100 @@ function setSatp(h: ReturnType<typeof makeCpu>, satp: bigint): void {
 function syncMmu(h: ReturnType<typeof makeCpu>): void {
   h.cpu.syncMmu();
 }
+
+// ---- 虚拟页快路径（Number 键 fast page cache）----
+
+/** 给裸 CPU 挂上 fastRam（Machine 里同样做；测试里手动注入） */
+function attachFastRam(h: ReturnType<typeof makeCpu>): void {
+  h.cpu.mmu.fastRam = {
+    base: Number(TEST_BASE),
+    end: Number(TEST_BASE + BigInt(TEST_RAM_SIZE)),
+    data: h.ram.data,
+    view: h.ram.view,
+  };
+}
+
+test('快路径：load/store 走虚拟页缓存且数据真实落 RAM', () => {
+  const h = makeCpu([...halt()]);
+  attachFastRam(h);
+  const pt = setupSv39(h);
+  pt.map(0x1000000n, TEST_BASE, PTE_R | PTE_W | PTE_X | PTE_A | PTE_D, 0);
+  enablePaging(h, pt);
+  // 第一笔走 walk（同时填充快缓存）
+  assert.equal(h.cpu.mmu.load(0x1000100n, 8), 0n);
+  h.cpu.mmu.store(0x1000100n, 0x1122334455667788n, 8);
+  // 第二笔必须命中快路径：值可读回，且真实写入 RAM
+  assert.equal(h.cpu.mmu.load(0x1000100n, 8), 0x1122334455667788n);
+  assert.equal(h.ram.view.getBigUint64(0x100, true), 0x1122334455667788n, '落 RAM');
+  assert.equal(h.cpu.mmu.load(0x1000104n, 4), 0x11223344n, '不同 size 同页命中（LE 高半）');
+  // walks 只应为 1（后续全命中，快路径不增加 walks）
+  assert.equal(h.cpu.mmu.stats.walks, 1, '快路径不应再走页表');
+});
+
+test('快路径：U 态访问无 U 位页必须拒绝（安全回归）', () => {
+  const h = makeCpu([...halt()]);
+  attachFastRam(h);
+  const pt = setupSv39(h);
+  // S 页（无 U）与 U 页各一（映射到干净区域，避开 offset 0 的程序段）
+  pt.map(0x1000000n, TEST_BASE + 0x100000n, PTE_R | PTE_W | PTE_A | PTE_D, 0);
+  pt.map(0x1001000n, TEST_BASE + 0x101000n, PTE_R | PTE_W | PTE_U | PTE_A | PTE_D, 0);
+  enablePaging(h, pt);
+  h.ram.view.setUint32(0x101000, 0xdeadbeef, true);
+  // 先在 S 态访问 S 页填快缓存；U 页在 SUM=0 下必须拒绝
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0n);
+  assert.equal(h.cpu.mmu.load(0x1001000n, 4), null, 'S 态 SUM=0 读 U 页拒绝');
+  // 切到 U 态（触发权限位重算）
+  h.cpu.priv = Priv.U;
+  syncMmu(h);
+  // U 页允许；S 页必须拒绝——快路径不得放行
+  assert.equal(h.cpu.mmu.load(0x1001000n, 4), 0xdeadbeefn, 'U 态读 U 页');
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), null, 'U 态读 S 页必须 fault');
+  assert.equal(h.cpu.mmu.faultCause, Exc.LoadPageFault);
+  assert.equal(h.cpu.mmu.store(0x1000000n, 1n, 4), false, 'U 态写 S 页必须失败');
+});
+
+test('快路径：SUM/MPRV 语义与 translate 一致', () => {
+  const h = makeCpu([...halt()]);
+  attachFastRam(h);
+  const pt = setupSv39(h);
+  pt.map(0x1000000n, TEST_BASE + 0x100000n, PTE_R | PTE_W | PTE_U | PTE_A | PTE_D, 0);
+  enablePaging(h, pt);
+  // S 态 SUM=0：translate 与快路径 load 都必须拒绝 U 页
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), null);
+  h.cpu.csr.writeRaw(CSR.MSTATUS, SR_SUM);
+  syncMmu(h);
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0n, 'SUM=1 后 S 态可读 U 页');
+  // MPRV=1 且 MPP=U（无 SUM 概念，U 态规则）：仍允许 U 页
+  h.cpu.csr.writeRaw(CSR.MSTATUS, SR_MPRV | SR_SUM);
+  syncMmu(h);
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0n, 'MPRV(MPP=U) 读 U 页');
+});
+
+test('快路径：D=0 页先写触发置 D，随后进快路径', () => {
+  const h = makeCpu([...halt()]);
+  attachFastRam(h);
+  const pt = setupSv39(h);
+  pt.map(0x1000000n, TEST_BASE + 0x100000n, PTE_R | PTE_W | PTE_A, 0); // 无 D
+  enablePaging(h, pt);
+  // 先读一次：walk 填快缓存（prot 无 D）
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0n);
+  // 写：快路径因 D=0 放行去慢路径 → walk 回写 D → 成功
+  assert.equal(h.cpu.mmu.store(0x1000000n, 0x42n, 4), true);
+  assert.notEqual(pt.leafPte(0x1000000n, 0) & PTE_D, 0n, 'PTE D 位应被回写');
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0x42n, '写后读回');
+});
+
+test('快路径：sfence 按地址失效后重新走页表', () => {
+  const h = makeCpu([...halt()]);
+  attachFastRam(h);
+  const pt = setupSv39(h);
+  pt.map(0x1000000n, TEST_BASE + 0x100000n, PTE_R | PTE_W | PTE_A | PTE_D, 0);
+  enablePaging(h, pt);
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0n);
+  // 重映射到另一干净物理页并 sfence
+  pt.map(0x1000000n, TEST_BASE + 0x200000n, PTE_R | PTE_W | PTE_A | PTE_D, 0);
+  h.cpu.mmu.flushBy(0x1000000n, undefined);
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0n, '新映射读回 0');
+  h.ram.view.setUint32(0x200000, 0xcafebabe, true);
+  assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0xcafebaben, '读到新物理页的值');
+});
