@@ -40,7 +40,9 @@ const IID_RX = 0x04;
 const IID_FIFO = 0xc0;
 
 /**
- * NS16550A 兼容串口。支持轮询和中断两种模式，带 64 字节接收 FIFO。
+ * NS16550A 兼容串口。支持轮询和中断两种模式，带 64 字节接收 FIFO；
+ * FIFO 写满后溢出到内部无限队列，guest 每读一个字节自动回流补位——
+ * 任意长度的输入（如粘贴长命令）都不会丢失。
  */
 export class Uart implements Device {
   readonly name = 'uart';
@@ -55,6 +57,8 @@ export class Uart implements Device {
   private scr = 0;
   private fcr = 0;
   private rxFifo: number[] = [];
+  /** FIFO 满时溢出的输入队列，guest 读取时回流进 FIFO */
+  private rxQueue: number[] = [];
 
   private readonly onTx: (byte: number) => void;
   private readonly irq?: IrqLine;
@@ -76,17 +80,27 @@ export class Uart implements Device {
       });
     this.irq = opts.irq;
     this.regShift = opts.regShift ?? 0;
-    if (opts.rxBuffer) this.rxFifo.push(...opts.rxBuffer);
+    if (opts.rxBuffer) {
+      for (const b of opts.rxBuffer) this.pushRx(b);
+    }
   }
 
   private get dlab(): boolean {
     return (this.lcr & 0x80) !== 0;
   }
 
-  /** 外部向串口输入一个字节（模拟键盘/串口输入） */
+  /** 外部向串口输入一个字节（模拟键盘/串口输入）；FIFO 满则排队，永不丢失 */
   pushRx(byte: number): void {
     if (this.rxFifo.length < 64) this.rxFifo.push(byte & 0xff);
+    else this.rxQueue.push(byte & 0xff);
     this.updateIrq();
+  }
+
+  /** 把溢出队列的字节回流进 FIFO（guest 每读一个字节调用一次） */
+  private refillRx(): void {
+    while (this.rxFifo.length < 64 && this.rxQueue.length > 0) {
+      this.rxFifo.push(this.rxQueue.shift()!);
+    }
   }
 
   pushString(s: string): void {
@@ -127,6 +141,7 @@ export class Uart implements Device {
         // 否则电平敏感的 PLIC 会在 complete 之后立刻重新挂起（虚假中断风暴）。
         {
           const b = this.rxFifo.shift()!;
+          this.refillRx(); // 溢出队列回流，FIFO 保持有数据则中断保持
           this.updateIrq();
           return BigInt(b);
         }
@@ -175,7 +190,10 @@ export class Uart implements Device {
         return;
       case REG_IIR_FCR:
         this.fcr = v;
-        if ((v & 0x02) !== 0) this.rxFifo.length = 0;
+        if ((v & 0x02) !== 0) {
+          this.rxFifo.length = 0;
+          this.rxQueue.length = 0; // FIFO 复位连同溢出队列一起清空
+        }
         this.updateIrq();
         return;
       case REG_LCR:
