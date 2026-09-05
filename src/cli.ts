@@ -43,34 +43,44 @@ interface Args {
 }
 
 const HELP = `
-TSIE (TSIE Is an Emulator) —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
+TSIE is a TypeScript® RISC-V® Emulator. The full name is "TSIE Is an Emulator".
+It can run Linux® distributions (e.g., Debian® GNU/Linux®, Alpine Linux®) or
+FreeBSD® (not yet tested).
 
 用法:
   tsie [选项] --kernel <镜像>
 
 选项:
   -k, --kernel <file>       内核 / 裸机程序（ELF64 或裸二进制）
-  -b, --bios <file>         固件（如 OpenSBI fw_jump.bin），缺省时启用内建 SBI
-  -d, --disk <file>         磁盘镜像（挂载为 VirtIO 块设备）
-      --netdev <backend>    网卡后端：loopback（TX 帧回注 RX，自发自收验证）
-                            proxy（经 UDP 转发到外部桥接守护，如 VM 上的 TAP 桥）
-                            slirp（用户态网络，guest 直接 DHCP/ping 外网）
-      --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare）
+  -b, --bios <file>         固件（如 OpenSBI fw_jump.bin）；缺省时启用内建 SBI
+  -d, --disk <file>         磁盘镜像（挂载为 VirtIO 块设备 /dev/vda）
+  -i, --initrd <file>       initrd 镜像
+  -a, --append <string>     内核命令行（如 "console=ttyS0 root=/dev/vda rw"）
+  -m, --memory <size>       内存大小，支持 K/M/G 后缀（默认 512M）
+      --netdev <backend>    网卡后端：
+                            loopback  TX 帧回注 RX（自发自收，无外部依赖）
+                            slirp     用户态 NAT，guest 直连外网
+                                      （ICMP 仅网关应答；DNS 请配公网服务器）
+                            proxy     经 UDP 转发到外部桥接守护（真实链路，
+                                      配合 VM 上的 TAP 桥 + MASQUERADE）
       --proxy-host <ip>     proxy 后端的桥接守护地址（配合 --netdev proxy）
       --proxy-port <n>      proxy 后端的桥接守护 UDP 端口（默认 7777）
-  -i, --initrd <file>       initrd 镜像
-  -a, --append <string>     内核命令行
-  -m, --memory <size>       内存大小，支持 K/M/G 后缀（默认 512M）
+      --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare；
+                            guest 侧 mount -t 9p -o trans=virtio,version=9p2000.L
+                            hostshare /mnt）
       --load-at <addr>      内核加载地址（默认 0x80200000）
-  -n, --max <n>             最多执行的指令数
-      --trace               打印指令流
-      --trace-from <addr>   从指定地址开始打印
-      --dump-dtb <file>     把生成的设备树写到文件
+      --misaligned <mode>   非对齐访存策略：trap（默认，语义精确）或 slow（慢但宽容）
+      --script <file>       把文件中的每一行作为控制台输入逐条喂入（无人值守验证）
+      --interactive         交互模式：键盘直连串口（登录 shell 后可直接敲命令；
+                            退出请在 guest 里执行 poweroff/reboot，Ctrl+C 会交给 guest）
+      --trace               打印指令流（调试用，极慢）
+      --trace-from <addr>   从指定地址开始打印指令流
+      --dump-dtb <file>     把生成的设备树写到文件（检查 DTB 用）
       --stats               运行结束后打印统计信息
-      --script <file>        把文件中的每一行作为控制台输入逐条喂入（用于交互式固件）
-      --interactive          交互模式：键盘输入接到串口接收（登录 Linux shell 后可直接敲命令）
-      --misaligned <mode>   非对齐访存策略：trap（默认）或 slow
-  -h, --help                显示帮助
+  -n, --max <n>             最多执行的指令数（防止跑飞）
+  -h, --help                显示本帮助
+
+This TSIE not has Super Cow Powers.
 `;
 
 function parseSize(s: string): bigint {
