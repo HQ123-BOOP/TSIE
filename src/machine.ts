@@ -52,6 +52,8 @@ export interface MachineOptions {
   shared?: string;
   /** 9p 挂载 tag（默认 hostshare） */
   sharedTag?: string;
+  /** 9p 消息级调试日志 */
+  sharedDebug?: boolean;
   /** 固件（OpenSBI fw_jump.bin 等） */
   bios?: Uint8Array;
   /** 内核 ELF / 裸机程序 */
@@ -181,6 +183,7 @@ export class Machine {
 
     if (opts.shared) {
       this.virtio9p = new Virtio9p(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_9P, level), opts.shared, opts.sharedTag);
+      if (opts.sharedDebug) this.virtio9p.server.debug = true;
       this.bus.addDevice(VIRT_VIRTIO_9P, this.virtio9p);
     }
 

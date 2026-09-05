@@ -57,7 +57,7 @@ test('9p：version 协商 → attach → walk → lcreate → write → read 全
     assert.equal(rv.body.toString('utf8', 6, 14), '9P2000.L');
 
     // Tattach fid=1
-    const ra = parseR(await srv.handle(msg(104, 1, Buffer.concat([u32(1), u32(0), u32(0xffffffff), str('root'), str('')]))));
+    const ra = parseR(await srv.handle(msg(104, 1, Buffer.concat([u32(1), u32(0xffffffff), str('root'), str(''), u32(0)]))));
     assert.equal(ra.type, 105);
     assert.equal(ra.body[0], 0x80, '根目录 qid.type=QTDIR');
 
@@ -68,8 +68,8 @@ test('9p：version 协商 → attach → walk → lcreate → write → read 全
     assert.equal(rw.body.readUInt16LE(0), 0, '走失败返回 nwqid=0');
 
     // Tlcreate dfid=1 name=hello.txt —— 9P2000.L 语义：dfid 本身变成打开的文件 fid
-    const rc = parseR(await srv.handle(msg(128, 3, Buffer.concat([u32(1), str('hello.txt'), u32(0), u32(0), u32(0)]))));
-    assert.equal(rc.type, 129, 'Rlcreate');
+    const rc = parseR(await srv.handle(msg(14, 3, Buffer.concat([u32(1), str('hello.txt'), u32(0), u32(0), u32(0)]))));
+    assert.equal(rc.type, 15, 'Rlcreate');
 
     // Twrite fid=1（lcreate 后 dfid 即文件 fid）
     const data = Buffer.from('hello from 9p\n');
@@ -98,12 +98,12 @@ test('9p：getattr 反映真实文件大小 / mkdir 建目录', async () => {
   try {
     await fsp.writeFile(path.join(dir, 'a.txt'), Buffer.alloc(1234, 'A'));
     await srv.handle(msg(100, 0, Buffer.concat([u32(65536), str('9P2000.L')])));
-    await srv.handle(msg(104, 1, Buffer.concat([u32(1), u32(0), u32(0xffffffff), str('root'), str('')])));
+    await srv.handle(msg(104, 1, Buffer.concat([u32(1), u32(0xffffffff), str('root'), str(''), u32(0)])));
     // walk 到 a.txt → fid=2
     await srv.handle(msg(110, 2, Buffer.concat([u32(1), u32(2), u16(1), str('a.txt')])));
     // Tgetattr fid=2
-    const rg = parseR(await srv.handle(msg(138, 3, Buffer.concat([u32(2), u64(0x7ffn)]))));
-    assert.equal(rg.type, 139);
+    const rg = parseR(await srv.handle(msg(24, 3, Buffer.concat([u32(2), u64(0x7ffn)]))));
+    assert.equal(rg.type, 25); // Rgetattr
     // qid(13) 后是 mode[4]
     const mode = rg.body.readUInt32LE(21); // valid8+qid13 之后
     assert.ok(mode & 0x8000, 'S_IFREG 置位');
@@ -111,8 +111,8 @@ test('9p：getattr 反映真实文件大小 / mkdir 建目录', async () => {
     const size = Number(rg.body.readBigUInt64LE(49));
     assert.equal(size, 1234, 'getattr.size 与真实文件一致');
     // Tmkdir
-    const rm = parseR(await srv.handle(msg(146, 4, Buffer.concat([u32(1), str('subdir'), u32(0), u32(0)]))));
-    assert.equal(rm.type, 147);
+    const rm = parseR(await srv.handle(msg(72, 4, Buffer.concat([u32(1), str('subdir'), u32(0), u32(0)]))));
+    assert.equal(rm.type, 73); // Rmkdir
     const st = await fsp.stat(path.join(dir, 'subdir'));
     assert.ok(st.isDirectory(), 'Host 侧目录真实创建');
   } finally {
@@ -127,15 +127,15 @@ test('9p：路径逃逸防护与 statfs', async () => {
   try {
     await fsp.writeFile(path.join(os.tmpdir(), 'escape-canary.txt'), 'secret');
     await srv.handle(msg(100, 0, Buffer.concat([u32(65536), str('9P2000.L')])));
-    await srv.handle(msg(104, 1, Buffer.concat([u32(1), u32(0), u32(0xffffffff), str('root'), str('')])));
+    await srv.handle(msg(104, 1, Buffer.concat([u32(1), u32(0xffffffff), str('root'), str(''), u32(0)])));
     // Twalk '..' 出根：钳制在根上（nwqid=1，qid=根），绝不逃逸
     const rw = parseR(await srv.handle(msg(110, 2, Buffer.concat([u32(1), u32(3), u16(1), str('..')]))));
     assert.equal(rw.type, 111);
     assert.equal(rw.body.readUInt16LE(0), 1, '.. 在根上钳制为 1 步');
     assert.equal(rw.body[2], 0x80, '钳制后 qid 是根目录');
     // statfs
-    const rs = parseR(await srv.handle(msg(124, 3, Buffer.concat([u32(1)]))));
-    assert.equal(rs.type, 125);
+    const rs = parseR(await srv.handle(msg(8, 3, Buffer.concat([u32(1)]))));
+    assert.equal(rs.type, 9); // Rstatfs
     assert.ok(rs.body.readUInt32LE(4) > 0, 'bsize > 0');
   } finally {
     await srv.closeAll();
