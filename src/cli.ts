@@ -10,6 +10,7 @@
  *   tsx src/cli.ts --kernel hello.bin --trace --stats
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Machine, type MachineStats } from './machine.ts';
 import { FileDisk } from './dev/disk.ts';
 import { LoopbackBackend } from './dev/net.ts';
@@ -22,6 +23,8 @@ interface Args {
   bios?: string;
   disk?: string;
   netdev?: 'loopback' | 'proxy' | 'slirp';
+  /** virtio-9p 共享目录 */
+  shared9p?: string;
   proxyHost?: string;
   proxyPort?: number;
   initrd?: string;
@@ -117,6 +120,9 @@ function parseArgs(argv: string[]): Args {
       case '-d':
       case '--disk':
         args.disk = next();
+        break;
+      case '--9p':
+        args.shared9p = next();
         break;
       case '--netdev': {
         const v = next();
@@ -215,6 +221,7 @@ async function main(): Promise<number> {
             : args.netdev === 'slirp'
               ? new SlirpBackend()
               : undefined,
+      shared: args.shared9p ? resolve(args.shared9p) : undefined,
       initrd: args.initrd ? readFile(args.initrd) : undefined,
       kernel: args.kernel
         ? args.loadAt

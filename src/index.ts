@@ -43,6 +43,8 @@ export { VirtioNet } from './dev/virtio-net.ts';
 export { LoopbackBackend, type NetBackend, type EthFrame } from './dev/net.ts';
 export { ProxyBackend, type ProxyOptions } from './dev/net-proxy.ts';
 export { SlirpBackend, type SlirpOptions } from './dev/net-slirp.ts';
+export { Virtio9p } from './dev/virtio-9p.ts';
+export { NinePServer } from './dev/ninep.ts';
 export { MemoryDisk, FileDisk, SECTOR_SIZE, type DiskImage } from './dev/disk.ts';
 
 export { SbiFirmware, type SbiContext } from './firmware/sbi.ts';

@@ -13,6 +13,7 @@ import { Uart } from './dev/uart.ts';
 import { TestFinisher } from './dev/test.ts';
 import { VirtioBlk } from './dev/virtio-blk.ts';
 import { VirtioNet } from './dev/virtio-net.ts';
+import { Virtio9p } from './dev/virtio-9p.ts';
 import { GoldfishRtc } from './dev/rtc.ts';
 import type { NetBackend } from './dev/net.ts';
 import type { DiskImage } from './dev/disk.ts';
@@ -27,6 +28,7 @@ export const VIRT_PLIC = 0xc000000n;
 export const VIRT_UART0 = 0x10000000n;
 export const VIRT_VIRTIO = 0x10001000n;
 export const VIRT_VIRTIO_NET = 0x10002000n;
+export const VIRT_VIRTIO_9P = 0x10003000n;
 export const VIRT_RTC = 0x101000n;
 export const VIRT_FIRMWARE = 0x80000000n;
 export const VIRT_KERNEL = 0x80200000n;
@@ -35,6 +37,7 @@ export const VIRT_DTB = 0x82200000n;
 /** PLIC 中断源编号 */
 const IRQ_VIRTIO = 1;
 const IRQ_VIRTIO_NET = 2;
+const IRQ_VIRTIO_9P = 3;
 const IRQ_UART = 10;
 const IRQ_RTC = 11;
 
@@ -45,6 +48,10 @@ export interface MachineOptions {
   disk?: DiskImage;
   /** 网络后端（提供则挂载 virtio-net 网卡） */
   net?: NetBackend;
+  /** Host 共享目录（提供则挂载 virtio-9p 设备，guest 内挂载 tag=hostshare） */
+  shared?: string;
+  /** 9p 挂载 tag（默认 hostshare） */
+  sharedTag?: string;
   /** 固件（OpenSBI fw_jump.bin 等） */
   bios?: Uint8Array;
   /** 内核 ELF / 裸机程序 */
@@ -105,6 +112,7 @@ export class Machine {
   readonly netdev?: VirtioNet;
   readonly test: TestFinisher;
   readonly rtc: GoldfishRtc;
+  readonly virtio9p?: Virtio9p;
   readonly sbi?: SbiFirmware;
 
   readonly ramBase = VIRT_RAM_BASE;
@@ -169,6 +177,11 @@ export class Machine {
     if (opts.net) {
       this.netdev = new VirtioNet(this.bus, opts.net, (level) => this.plic.setIrq(IRQ_VIRTIO_NET, level));
       this.bus.addDevice(VIRT_VIRTIO_NET, this.netdev);
+    }
+
+    if (opts.shared) {
+      this.virtio9p = new Virtio9p(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_9P, level), opts.shared, opts.sharedTag);
+      this.bus.addDevice(VIRT_VIRTIO_9P, this.virtio9p);
     }
 
     this.cpu = new Cpu(this.bus, { misaligned: opts.misaligned ?? 'trap' });
@@ -389,6 +402,14 @@ export class Machine {
       netNode.propReg('reg', [[VIRT_VIRTIO_NET, 0x1000n]]);
       netNode.propU32('interrupts', [IRQ_VIRTIO_NET]);
       netNode.propU32('interrupt-parent', [2]);
+    }
+
+    if (this.virtio9p) {
+      const p9Node = soc.addChild(`virtio_mmio@${VIRT_VIRTIO_9P.toString(16)}`);
+      p9Node.propStr('compatible', 'virtio,mmio');
+      p9Node.propReg('reg', [[VIRT_VIRTIO_9P, 0x1000n]]);
+      p9Node.propU32('interrupts', [IRQ_VIRTIO_9P]);
+      p9Node.propU32('interrupt-parent', [2]);
     }
 
     const testNode = soc.addChild(`test@${VIRT_TEST.toString(16)}`);
