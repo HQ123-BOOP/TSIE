@@ -217,12 +217,13 @@ export class NinePServer {
   // ---- 各消息实现 ----
 
   private async tVersion(r: Reader): Promise<Buffer> {
-    r.u32(); // 请求 msize
+    const reqMsize = r.u32();
     const version = r.str();
-    const reply = version === '9P2000.L' ? '9P2000.L' : 'unknown';
-    if (reply !== '9P2000.L') throw new NinePError('ENOSYS', 38);
+    if (version !== '9P2000.L') throw new NinePError('ENOSYS', 38);
+    // 回复 msize 不得超过客户端请求值（否则内核报 Protocol error）
+    this.msize = Math.min(Math.max(reqMsize, 4096), MSIZE_MAX);
     this.fids.clear(); // version 重置会话
-    return new Writer().u32(Math.min(this.msize, MSIZE_MAX)).str(reply).finish(R_VERSION, r.tag);
+    return new Writer().u32(this.msize).str('9P2000.L').finish(R_VERSION, r.tag);
   }
 
   private async statQid(p: string): Promise<{ type: number; version: number; path: bigint; st: fs.Stats }> {

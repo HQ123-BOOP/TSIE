@@ -49,10 +49,10 @@ test('9p：version 协商 → attach → walk → lcreate → write → read 全
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'tsie-9p-'));
   const srv = new NinePServer(dir, 'hostshare');
   try {
-    // Tversion
-    const rv = parseR(await srv.handle(msg(100, 0, Buffer.concat([u32(65536), str('9P2000.L')]))));
+    // Tversion：请求 8192 时回复必须 ≤ 8192（协议违规会报 Protocol error）
+    const rv = parseR(await srv.handle(msg(100, 0, Buffer.concat([u32(8192), str('9P2000.L')]))));
     assert.equal(rv.type, 101);
-    assert.equal(rv.body.readUInt32LE(0) <= 65536, true, 'msize 协商');
+    assert.equal(rv.body.readUInt32LE(0), 8192, 'msize 应回显请求值');
     assert.equal(rv.body.readUInt16LE(4), 8, "version 串长度 8 ('9P2000.L')");
     assert.equal(rv.body.toString('utf8', 6, 14), '9P2000.L');
 
