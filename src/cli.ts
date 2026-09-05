@@ -54,6 +54,8 @@ ts-riscv64 —— 用 TypeScript 实现的 RISC-V64 (RV64GC) 全系统模拟器
   -d, --disk <file>         磁盘镜像（挂载为 VirtIO 块设备）
       --netdev <backend>    网卡后端：loopback（TX 帧回注 RX，自发自收验证）
                             proxy（经 UDP 转发到外部桥接守护，如 VM 上的 TAP 桥）
+                            slirp（用户态网络，guest 直接 DHCP/ping 外网）
+      --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare）
       --proxy-host <ip>     proxy 后端的桥接守护地址（配合 --netdev proxy）
       --proxy-port <n>      proxy 后端的桥接守护 UDP 端口（默认 7777）
   -i, --initrd <file>       initrd 镜像
@@ -122,6 +124,7 @@ function parseArgs(argv: string[]): Args {
         args.disk = next();
         break;
       case '--9p':
+      case '--shared9p':
         args.shared9p = next();
         break;
       case '--netdev': {
