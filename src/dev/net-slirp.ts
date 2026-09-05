@@ -357,6 +357,7 @@ class TcpConn {
   sndUna: number; // 最早未确认
   peerWindow = 0;
   established = false;
+  connected = false;
   hostFin = false;
   guestFin = false;
   sentFin = false;
@@ -392,11 +393,16 @@ class TcpConn {
     this.rcvNxt = (guestIsn + 1) >>> 0; // SYN 消耗一个序号
     // 注意：SYN-ACK 必须等连接注册进 tcpConns 之后再发（handleTcp 里调
     // start()）——否则 onFrame 回调同步回包时会因查不到连接而静默丢帧。
-    // Host 侧真实连接立即发起（数据在 connect 后 flush）。
+    // Host 侧真实连接立即发起；guest 数据进 pending，'connect' 之后才
+    // 真正写 socket——实测 connect 前队列的 write 在 connect 后可能丢失。
     const sock = net.connect({ host: ipStr(dstIp), port: dstPort });
     this.sock = sock;
-    sock.on('connect', () => this.pump());
+    sock.on('connect', () => {
+      this.backend.debug(`host connected ${ipStr(dstIp)}:${dstPort}`);
+      this.pump();
+    });
     sock.on('data', (d: Buffer) => {
+      this.backend.debug(`host data ${d.length}B from ${ipStr(dstIp)}:${dstPort}`);
       this.pending = Buffer.concat([this.pending, d]);
       this.pump();
     });
@@ -454,6 +460,7 @@ class TcpConn {
     if (payload.length > 0) {
       if (seq === this.rcvNxt) {
         this.rcvNxt = (seq + payload.length) >>> 0;
+        // guest → host：直接写真实 socket（guest→host 方向）
         if (this.sock && this.established) this.sock.write(Buffer.from(payload));
         // 立即 ACK
         this.backend.tcpEmit(this, TCP_ACK, this.sndNxt, this.rcvNxt);
@@ -472,22 +479,14 @@ class TcpConn {
   private pump(): void {
     if (this.closed || !this.established) return;
     let window = Math.min(this.peerWindow, 65535);
-    if (window === 0) return;
-    // 先取走待发数据：sendSegment→emit→onFrame 可能同步重入 pump，
-    // 若此时 pending 未清空会导致同一段数据无限重发。
-    let out = this.pending;
-    this.pending = Buffer.alloc(0);
-    let inFlight = (this.sndNxt - this.sndUna) >>> 0;
+    if (window === 0) return; // 等 guest 的窗口更新 ACK
 
-    while (out.length > 0 && window - inFlight > 0) {
-      const len = Math.min(MSS, out.length, window - inFlight);
-      const seg = new Uint8Array(out.subarray(0, len));
-      out = out.subarray(len);
+    while (this.pending.length > 0 && window - (this.sndNxt - this.sndUna) > 0) {
+      const len = Math.min(MSS, this.pending.length, window - (this.sndNxt - this.sndUna));
+      const seg = new Uint8Array(this.pending.subarray(0, len));
       this.sendSegment(seg);
-      inFlight = (this.sndNxt - this.sndUna) >>> 0;
+      this.pending = this.pending.subarray(len);
     }
-    // 窗口不够没发完的，放回队头
-    if (out.length > 0) this.pending = Buffer.concat([out, this.pending]);
 
     if (this.hostFin && this.pending.length === 0 && !this.sentFin) {
       this.sentFin = true;
