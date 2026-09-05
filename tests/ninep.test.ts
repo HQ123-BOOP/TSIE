@@ -143,3 +143,44 @@ test('9p：路径逃逸防护与 statfs', async () => {
     await fsp.rm(path.join(os.tmpdir(), 'escape-canary.txt'), { force: true });
   }
 });
+
+// 回归：Rgetattr body 必须是 153B（短 PDU 会让 guest 客户端报 EFAULT / "Bad address"）
+test('9p：Rgetattr 完整长度与 readdir dirent 编码', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'tsie-9p-len-'));
+  const srv = new NinePServer(dir, 'hostshare');
+  try {
+    await fsp.writeFile(path.join(dir, 'a.txt'), '1234');
+    await fsp.mkdir(path.join(dir, 'sub'));
+    await srv.handle(msg(100, 0, Buffer.concat([u32(65536), str('9P2000.L')])));
+    await srv.handle(msg(104, 1, Buffer.concat([u32(1), u32(0xffffffff), str('root'), str(''), u32(0)])));
+    // getattr：body 153B（valid8+qid13+mode/uid/gid 12+...+btime/gen/data_version）
+    const rg = parseR(await srv.handle(msg(24, 2, Buffer.concat([u32(1), u64(0x7ffn)]))));
+    assert.equal(rg.type, 25, 'Rgetattr');
+    assert.equal(rg.body.length, 153, 'Rgetattr body 必须 153B，否则客户端 EFAULT');
+    // readdir：count[4] + dirent(qid13+offset8+type1+name[s])
+    const rd = parseR(await srv.handle(msg(40, 3, Buffer.concat([u32(1), u64(0n), u32(4096)]))));
+    assert.equal(rd.type, 41, 'Rreaddir');
+    const count = rd.body.readUInt32LE(0);
+    const names: string[] = [];
+    const types: number[] = [];
+    let o = 4;
+    while (o < 4 + count) {
+      o += 13; // qid
+      o += 8; // offset
+      types.push(rd.body[o]);
+      o += 1;
+      const nl = rd.body.readUInt16LE(o);
+      o += 2;
+      names.push(rd.body.toString('utf8', o, o + nl));
+      o += nl;
+    }
+    assert.deepEqual(names.sort(), ['a.txt', 'sub'], 'dirent 名称');
+    assert.ok(types.includes(4) && types.includes(8), '应含 DT_DIR(4) 与 DT_REG(8)');
+    // 游标到末尾：再读一次应为空（EOF）
+    const rd2 = parseR(await srv.handle(msg(40, 4, Buffer.concat([u32(1), u64(2n), u32(4096)]))));
+    assert.equal(rd2.body.readUInt32LE(0), 0, '末尾返回 count=0');
+  } finally {
+    await srv.closeAll();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
