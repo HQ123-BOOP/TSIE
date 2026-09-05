@@ -9,3 +9,6 @@ tmp/
 .DS_Store
 *.tsbuildinfo
 .vscode/
+
+# 9p 共享目录：保留 host.txt 作为验证素材，guest 写入物不入库
+share/from-guest.txt
