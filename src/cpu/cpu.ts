@@ -52,14 +52,6 @@ import {
 
 export type MisalignedMode = 'trap' | 'slow';
 
-/** SBI 层的抽象（由 machine 注入） */
-export interface SbiLayer {
-  /** 处理 S 模式的 ECALL，返回 true 表示已处理（异常不再陷入 M 模式） */
-  handleEcall(cpu: Cpu): boolean;
-  /** M 模式定时器中断是否可以由 SBI 转成 S 模式定时器中断 */
-  forwardTimerInterrupt(cpu: Cpu): boolean;
-}
-
 export interface CpuOptions {
   misaligned?: MisalignedMode;
   hartId?: number;
@@ -103,7 +95,6 @@ export class Cpu {
 
   misaligned: MisalignedMode;
   hartId: number;
-  sbi?: SbiLayer;
 
   /** 指令跟踪回调 */
   onTrace?: (pc: bigint, inst: number, len: number, priv: PrivLevel) => void;
@@ -1273,10 +1264,6 @@ export class Cpu {
   /** 同步异常入口 */
   takeException(cause: number, tval: bigint): void {
     this.onTrap?.(cause, tval, this.pc, this.priv);
-    // 内建 SBI：拦截 S 模式的 ECALL
-    if (cause === Exc.EnvCallFromS && this.sbi && this.priv <= Priv.S) {
-      if (this.sbi.handleEcall(this)) return;
-    }
     const medeleg = this.csr.read(CSR.MEDELEG) ?? 0n;
     const toM = this.priv === Priv.M || (medeleg & (1n << BigInt(cause))) === 0n;
     this.stats.traps++;
@@ -1342,10 +1329,6 @@ export class Cpu {
 
       if (toM) {
         if (this.priv === Priv.M && (mstatus & SR_MIE) === 0n) return false;
-        // 内建 SBI：把 M 模式定时器中断转成 S 模式定时器中断
-        if (irq === Irq.MTimer && this.sbi && delegated === false && this.sbi.forwardTimerInterrupt(this)) {
-          continue;
-        }
         this.trapInterrupt(irq, Priv.M);
         return true;
       }

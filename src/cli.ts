@@ -52,7 +52,7 @@ FreeBSD® (not yet tested).
 
 选项:
   -k, --kernel <file>       内核 / 裸机程序（ELF64 或裸二进制）
-  -b, --bios <file>         固件（如 OpenSBI fw_jump.bin）；缺省时启用内建 SBI
+  -b, --bios <file>         固件（如 OpenSBI fw_jump.bin）；启动 Linux 必需，裸机程序可不带
   -d, --disk <file>         磁盘镜像（挂载为 VirtIO 块设备 /dev/vda）
   -i, --initrd <file>       initrd 镜像
   -a, --append <string>     内核命令行（如 "console=ttyS0 root=/dev/vda rw"）

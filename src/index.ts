@@ -9,7 +9,6 @@
  *  - CPU：RV64IMAFDC（RV64GC）+ Zicsr/Zifencei，M/S/U 三种特权级
  *  - MMU：Sv39 / Sv48 分页 + TLB
  *  - 外设：NS16550 UART、CLINT、PLIC、VirtIO 块设备、SiFive Test
- *  - 固件：内建 SBI v0.2（无需外部 OpenSBI 即可启动 Linux）
  *  - 加载：ELF64 装载 + 扁平设备树（DTB）生成
  */
 
@@ -47,7 +46,6 @@ export { Virtio9p } from './dev/virtio-9p.ts';
 export { NinePServer } from './dev/ninep.ts';
 export { MemoryDisk, FileDisk, SECTOR_SIZE, type DiskImage } from './dev/disk.ts';
 
-export { SbiFirmware, type SbiContext } from './firmware/sbi.ts';
 
 export { loadElf, loadBinary, parseElf, ElfError, type ElfSegment, type LoadedImage, type LoadOptions } from './loader/elf.ts';
 export { FdtNode, buildDtb } from './loader/dtb.ts';

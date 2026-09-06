@@ -19,7 +19,6 @@ import type { NetBackend } from './dev/net.ts';
 import type { DiskImage } from './dev/disk.ts';
 import { loadBinary, loadElf, type LoadedImage } from './loader/elf.ts';
 import { FdtNode, buildDtb } from './loader/dtb.ts';
-import { SbiFirmware } from './firmware/sbi.ts';
 
 export const VIRT_RAM_BASE = 0x80000000n;
 export const VIRT_TEST = 0x100000n;
@@ -70,8 +69,6 @@ export interface MachineOptions {
   misaligned?: 'trap' | 'slow';
   /** 串口输出回调（逐字节） */
   stdout?: (byte: number) => void;
-  /** 是否启用内建 SBI（未提供 bios 时默认启用） */
-  useBuiltinSbi?: boolean;
   /** 入口地址（裸机程序） */
   entry?: bigint;
 }
@@ -115,7 +112,6 @@ export class Machine {
   readonly test: TestFinisher;
   readonly rtc: GoldfishRtc;
   readonly virtio9p?: Virtio9p;
-  readonly sbi?: SbiFirmware;
 
   readonly ramBase = VIRT_RAM_BASE;
   readonly ramSize: bigint;
@@ -206,15 +202,6 @@ export class Machine {
       this.syncIrqs();
     });
 
-    if (opts.useBuiltinSbi ?? opts.bios === undefined) {
-      this.sbi = new SbiFirmware({
-        clint: this.clint,
-        uart: this.uart,
-        shutdown: (reason) => this.shutdown(0, reason),
-      });
-      this.cpu.sbi = this.sbi;
-    }
-
     // 加载顺序：固件 → 内核 → initrd → DTB
     if (opts.bios) this.loadFirmware(opts.bios);
     if (opts.kernel) {
@@ -229,24 +216,11 @@ export class Machine {
 
     const entry = opts.entry ?? (this.firmwareEntry !== 0n ? this.firmwareEntry : this.kernelEntry);
     this.cpu.reset(entry);
-    if (this.sbi) this.setupDefaultMmodeState();
     // RISC-V 启动约定：a0 = hartid，a1 = DTB 物理地址
     this.cpu.x[10] = BigInt(this.cpu.hartId);
     this.cpu.x[11] = this.dtbAddress;
   }
 
-  /** 内建 SBI 时初始化 M 模式状态（中断委派等） */
-  private setupDefaultMmodeState(): void {
-    // 把 S 模式的软件/定时器/外部中断委派给 S 模式
-    this.cpu.csr.writeRaw(CSR.MIDELEG, (1n << 1n) | (1n << 5n) | (1n << 9n));
-    // 常规异常委派给 S 模式；S 模式 ECALL（SBI 调用）保留在 M 模式
-    this.cpu.csr.writeRaw(CSR.MEDELEG, 0xfdffn);
-    // 与 OpenSBI 一致：M 模式打开定时器与软件中断，再由 SBI 转发给 S 模式
-    this.cpu.csr.writeRaw(CSR.MIE, (1n << BigInt(Irq.MTimer)) | (1n << BigInt(Irq.MSoftware)));
-    // M 模式异常入口：指向 RAM 起始（正常不会到达）
-    this.cpu.csr.writeRaw(CSR.MTVEC, this.ramBase);
-    this.cpu.csr.writeRaw(CSR.MSCRATCH, 0n);
-  }
 
   private shutdown(code: number, reason: string): void {
     this.exitCode = code;

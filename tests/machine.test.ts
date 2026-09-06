@@ -87,72 +87,6 @@ test('裸机程序：直接写 UART 输出字符串', () => {
   assert.equal(m.exitCode, 0);
 });
 
-test('内建 SBI：M 模式切换到 S 模式并调用 console_putchar', () => {
-  const smode: number[] = [];
-  const msg = 'Hello SBI';
-  for (const ch of msg) {
-    smode.push(...li(17, 1n)); // a7 = legacy console_putchar
-    smode.push(...li(10, BigInt(ch.charCodeAt(0)))); // a0 = 字符
-    smode.push(ecall());
-  }
-  smode.push(...li(17, 8n)); // a7 = legacy shutdown
-  smode.push(ecall());
-
-  const { m, text } = build(bytes(mModeStub()));
-  m.bus.writeBytes(S_ENTRY, bytes(smode));
-  m.run({ maxInstructions: 20000 });
-
-  assert.equal(m.cpu.halted, true, `应正常关机（exit=${m.exitReason}）`);
-  assert.equal(text(), msg);
-  assert.equal(m.exitReason, 'sbi-shutdown');
-});
-
-test('内建 SBI：BASE 扩展 probe / get_impl_id', () => {
-  const smode = [
-    // probe_extension(TIMER)
-    ...li(17, 0x10n),
-    ...li(16, 3n), // probe_extension
-    ...li(10, 0n), // TIMER
-    ecall(),
-    addi(28, 11, 0), // a1 = probe 结果
-    addi(31, 10, 0), // a0 = 错误码
-    // get_impl_id
-    ...li(17, 0x10n),
-    ...li(16, 1n),
-    ecall(),
-    addi(29, 11, 0),
-    // get_spec_version
-    ...li(17, 0x10n),
-    ...li(16, 0n),
-    ecall(),
-    addi(30, 11, 0),
-    ...li(17, 8n), // shutdown
-    ecall(),
-  ];
-  const { m } = build(bytes(mModeStub()));
-  m.bus.writeBytes(S_ENTRY, bytes(smode));
-  m.run({ maxInstructions: 20000 });
-  assert.equal(m.cpu.halted, true);
-  assert.equal(m.cpu.x[31], 0n, 'a0 = SBI_SUCCESS');
-  assert.equal(m.cpu.x[28], 1n, 'TIMER 扩展应可用');
-  assert.equal(m.cpu.x[29], 0x999n, '实现 ID');
-  assert.equal(m.cpu.x[30], 2n, 'SBI 版本 0.2 → 2');
-});
-
-test('内建 SBI：set_timer 编程 mtimecmp', () => {
-  const smode = [
-    ...li(17, 0n), // EID = TIMER
-    ...li(10, 5000n), // stime_value
-    ecall(),
-    ...li(17, 8n),
-    ecall(),
-  ];
-  const { m } = build(bytes(mModeStub()));
-  m.bus.writeBytes(S_ENTRY, bytes(smode));
-  m.run({ maxInstructions: 20000 });
-  assert.equal(m.clint.mtimecmp, 5000n);
-});
-
 test('启动约定：a0 = hartid，a1 = DTB 地址', () => {
   const program = bytes([...li(1, VIRT_TEST), ...li(2, 0x5555n), sw(1, 2, 0)]);
   const { m } = build(program);
@@ -193,37 +127,6 @@ test('DTB：挂载磁盘时出现 virtio 节点与内核命令行', () => {
   assert.ok(m.virtio !== undefined);
 });
 
-test('CLINT 定时器中断经由 SBI 转成 S 模式定时器中断', () => {
-  const SPIN = S_ENTRY + 0x80n;
-  // S 模式：开中断、设定定时器后自旋等待
-  const smode = [
-    ...li(1, S_ENTRY + 0x100n), // 中断入口
-    csrw(CSR.STVEC, 1),
-    ...li(2, (1n << 5n) | (1n << 9n)), // sie: STIE | SEIE
-    csrw(CSR.SIE, 2),
-    ...li(3, 2n), // sstatus.SIE
-    csrs(CSR.SSTATUS, 3),
-    ...li(17, 0n), // sbi_set_timer(50)
-    ...li(10, 50n),
-    ecall(),
-  ];
-  // 自旋：j .
-  const spin = [...li(4, SPIN), 0x00028067]; // jalr? 用 jal x0,0 死循环
-  // 中断处理：标记并退出
-  const handler = [addi(20, 0, 1), ...li(6, VIRT_TEST), ...li(7, 0x5555n), sw(6, 7, 0)];
-
-  const { m } = build(bytes(mModeStub()));
-  m.bus.writeBytes(S_ENTRY, bytes(smode));
-  m.bus.writeBytes(SPIN, bytes([0x0000006f])); // jal x0, 0 → 原地跳转
-  m.bus.writeBytes(S_ENTRY + 0x100n, bytes(handler));
-  void spin;
-
-  m.run({ maxInstructions: 500000 });
-  assert.equal(m.cpu.halted, true, `应通过定时器中断退出（exit=${m.exitReason}）`);
-  assert.equal(m.cpu.x[20], 1n, '中断处理程序应被执行');
-  assert.equal(m.exitReason, 'test-pass');
-});
-
 test('机器状态快照与统计', () => {
   const { m } = build(bytes([...li(1, VIRT_TEST), ...li(2, 0x5555n), sw(1, 2, 0)]));
   const stats = m.run({ maxInstructions: 1000 });
@@ -235,37 +138,65 @@ test('机器状态快照与统计', () => {
   assert.ok(m.clint.mtime > 0n, 'mtime 应随时间推进');
 });
 
-test('WFI 后靠定时器中断唤醒', () => {
+test('WFI 后靠 UART 中断唤醒（SEIP 委派链路）', () => {
   const HANDLER = S_ENTRY + 0x100n;
+  // M 模式存根：委派外部中断（mideleg.SEIP）给 S 模式 → mret 进 S 模式
+  const stub = [
+    ...li(6, 1n << 9n),
+    csrw(CSR.MIDELEG, 6),
+    ...li(5, S_ENTRY),
+    csrw(CSR.MEPC, 5),
+    ...li(6, 0x1800n), // MPP 掩码
+    csrc(CSR.MSTATUS, 6),
+    ...li(6, 0x800n), // MPP = S
+    csrs(CSR.MSTATUS, 6),
+    mret(),
+  ];
   const smode = [
     ...li(1, HANDLER),
     csrw(CSR.STVEC, 1),
-    ...li(2, 1n << 5n), // STIE
+    ...li(2, 1n << 9n), // SEIE
     csrw(CSR.SIE, 2),
-    ...li(3, 2n),
+    ...li(3, 2n), // sstatus.SIE
     csrs(CSR.SSTATUS, 3),
-    ...li(17, 0n), // set_timer(30)
-    ...li(10, 30n),
-    ecall(),
+    // PLIC：源 10（UART）优先级 = 1，context 1（S 态）使能源 10
+    ...li(5, 0xc000028n),
+    ...li(7, 1n),
+    sw(5, 7, 0),
+    ...li(5, 0xc002080n),
+    ...li(7, 0x400n),
+    sw(5, 7, 0),
+    // UART IER = RDAI（接收中断使能）；字节写（sb x7,1(x6)）避免非对齐陷阱
+    ...li(6, VIRT_UART0),
+    ...li(7, 1n),
+    0x007300A3,
     0x10500073, // wfi
     addi(21, 21, 1), // 唤醒后才会执行到
     ...li(1, VIRT_TEST),
     ...li(2, 0x5555n),
     sw(1, 2, 0),
   ];
-  // 处理函数：标记、把定时器推远后立即返回
+  // 处理函数：标记、读 RBR 清中断源、立即返回
   // 注意：WFI 正常完成，sepc 已指向 WFI 之后的一条指令
   const handler = [
-    addi(20, 0, 1),
-    ...li(17, 0n),
-    ...li(10, 0xffffffffn),
-    ecall(),
+    addi(20, 20, 1),
+    ...li(6, VIRT_UART0),
+    lw(6, 6, 0), // 读 RBR 清 RX 中断源
     0x10200073, // sret
   ];
-  const { m } = build(bytes(mModeStub()));
+  const { m } = build(bytes(stub));
   m.bus.writeBytes(S_ENTRY, bytes(smode));
   m.bus.writeBytes(HANDLER, bytes(handler));
-  m.run({ maxInstructions: 500000 });
+  let injected = false;
+  m.run({
+    maxInstructions: 500000,
+    onStep: (_cpu, count) => {
+      if (!injected && count >= 2000) {
+        injected = true;
+        m.uart.pushString('A');
+      }
+    },
+  });
 
   assert.equal(m.cpu.halted, true, '唤醒后应正常退出');
   assert.equal(m.cpu.x[20], 1n, '中断处理函数被执行');
