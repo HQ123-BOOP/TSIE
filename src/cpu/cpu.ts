@@ -878,8 +878,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
     const isImm = (funct3 & 0x4) !== 0;
     const writeVal = isImm ? BigInt(uimm) : this.x[rs1];
 
-    const level = (csrAddr >> 8) & 3;
-    if (this.priv < level) return this.illegal(inst);
+    if (!this.csr.canRead(csrAddr, this.priv)) return this.illegal(inst);
 
     const old = this.csr.read(csrAddr);
     if (old === null) return this.illegal(inst);

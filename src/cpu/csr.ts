@@ -222,6 +222,23 @@ export class CsrFile {
     return !def.readOnly;
   }
 
+  /**
+   * 读特权检查。除常规特权级门槛外，还实现 Zicntr 的 counteren 门控：
+   * 特权规范 §3.1.10 —— S/U 态读 cycle/time/instret 时，若 mcounteren
+   * 对应位为 0（U 态还要求 scounteren 对应位为 1）则抛非法指令。
+   */
+  canRead(addr: number, priv: PrivLevel): boolean {
+    const level = (addr >> 8) & 3;
+    if (priv < level) return false;
+    if (this.defs[addr] === undefined) return false;
+    if (priv < 3 && addr >= CSR.CYCLE && addr <= CSR.INSTRET) {
+      const bit = 1n << BigInt(addr & 0x1f);
+      if (((this.regs[CSR.MCOUNTEREN] ?? 0n) & bit) === 0n) return false;
+      if (priv === 0 && ((this.regs[CSR.SCOUNTEREN] ?? 0n) & bit) === 0n) return false;
+    }
+    return true;
+  }
+
   has(addr: number): boolean {
     return this.defs[addr] !== undefined;
   }
@@ -272,8 +289,10 @@ export class CsrFile {
     this.define(CSR.MCYCLE, 0n, { mask: MASK64 });
     this.define(CSR.MINSTRET, 0n, { mask: MASK64 });
     this.define(CSR.MCOUNTINHIBIT, 0n, { mask: 0xffffffffn });
-    this.define(CSR.MCOUNTEREN, 0n, { mask: 0xffffn });
-    this.define(CSR.SCOUNTEREN, 0n, { mask: 0xffffn });
+    // 默认开放 cycle/time/instret 给 S 与 U 态（QEMU/Spike 固件通常如此初始化，
+    // 否则用户态 rdcycle/rdtime 一上来就是非法指令）
+    this.define(CSR.MCOUNTEREN, 0x7n, { mask: 0xffffn });
+    this.define(CSR.SCOUNTEREN, 0x7n, { mask: 0xffffn });
 
     // ---------------- mstatus / sstatus ----------------
     this.define(CSR.MSTATUS, SR_MPP | (SR_UXL & (2n << 30n)) | (SR_SXL & (2n << 32n)), {
