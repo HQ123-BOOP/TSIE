@@ -124,8 +124,8 @@ export const MSTATUS_WRITABLE =
 export const SSTATUS_MASK =
   (SR_SIE | SR_SPIE | SR_UBE | SR_SPP | SR_FS | SR_XS | SR_SUM | SR_MXR | SR_UXL) & MASK64;
 
-/** RV64GC：MXL=2, 扩展集合 I M A F D C S U */
-export const MISA_VALUE = 0x800000000014112dn;
+/** RV64GC + B：MXL=2, 扩展集合 I M A F D C B S U */
+export const MISA_VALUE = 0x800000000014112fn;
 
 /** 计数器来源（由 CPU/机器提供） */
 export interface CounterSource {

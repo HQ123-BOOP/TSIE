@@ -62,6 +62,28 @@ function isInf(x: number): boolean {
   return x === Infinity || x === -Infinity;
 }
 
+// ---------------- Zba / Zbb / Zbs 位计数助手 ----------------
+
+/** 32 位 popcount（输入按无符号 32 位解释） */
+function popcnt32(n: number): number {
+  n = n - ((n >>> 1) & 0x55555555);
+  n = (n & 0x33333333) + ((n >>> 2) & 0x33333333);
+  n = (n + (n >>> 4)) & 0x0f0f0f0f;
+  return (n * 0x01010101) >>> 24;
+}
+
+function clz64(v: bigint): number {
+  return v === 0n ? 64 : 64 - v.toString(2).length;
+}
+
+function ctz64(v: bigint): number {
+  return v === 0n ? 64 : (v & -v).toString(2).length - 1;
+}
+
+function popcount64(v: bigint): number {
+  return popcnt32(Number(v >> 32n)) + popcnt32(Number(v & 0xffffffffn));
+}
+
 /** RV64GC 处理器核心 */
 export class Cpu {
   /** 整数寄存器 x0-x31（x0 恒为 0） */
@@ -369,16 +391,26 @@ export class Cpu {
           case 7: this.setX(rd, a & imm); return; // ANDI
           case 1: // SLLI
           case 5: {
-            // SRLI / SRAI
+            // SRLI / SRAI / rori / bexti（Zbb/Zbs）
             const shamt = BigInt((inst >> 20) & 0x3f);
             const f6 = (inst >>> 26) & 0x3f;
             if (funct3 === 1) {
-              if (f6 !== 0) return this.illegal(inst);
-              this.setX(rd, u64(a << shamt));
+              // SLLI + Zbs 立即数形态（bseti/bclri/binvi；f6=imm[11:6]）
+              const bit = 1n << shamt;
+              if (f6 === 0x00) this.setX(rd, u64(a << shamt));
+              else if (f6 === 0x0a) this.setX(rd, u64(a | bit)); // bseti
+              else if (f6 === 0x12) this.setX(rd, u64(a & ~bit)); // bclri
+              else if (f6 === 0x1a) this.setX(rd, u64(a ^ bit)); // binvi
+              else return this.illegal(inst);
             } else if (f6 === 0x00) {
               this.setX(rd, a >> shamt);
             } else if (f6 === 0x10) {
               this.setX(rd, u64(s64(a) >> shamt));
+            } else if (f6 === 0x18) {
+              // rori：BigInt 位移无 64 位上限问题，n=0 天然成立
+              this.setX(rd, shamt === 0n ? a & MASK64 : u64((a >> shamt) | (a << (64n - shamt))));
+            } else if (f6 === 0x12) {
+              this.setX(rd, (a >> shamt) & 1n); // bexti
             } else {
               return this.illegal(inst);
             }
@@ -394,16 +426,24 @@ export class Cpu {
         switch (funct3) {
           case 0: this.setX(rd, s32(a + immI(inst))); return; // ADDIW
           case 1: {
-            // SLLIW：shamt 为 5 位，funct7 必须为 0
-            if (funct7 !== 0x00) return this.illegal(inst);
-            this.setX(rd, s32(a << BigInt((inst >> 20) & 0x1f)));
+            // SLLIW（funct7=0）与 slli.uw（Zba，f6=000010，64 位结果不符号扩展）
+            const f6 = (inst >>> 26) & 0x3f;
+            const shamt = BigInt((inst >> 20) & 0x3f);
+            if (funct7 === 0x00 && f6 === 0) this.setX(rd, s32(a << shamt));
+            else if (f6 === 0x02) this.setX(rd, (a & 0xffffffffn) << shamt);
+            else return this.illegal(inst);
             return;
           }
           case 5: {
             const shamt = BigInt((inst >> 20) & 0x1f);
+            const f6 = (inst >>> 26) & 0x3f;
             if (funct7 === 0x00) this.setX(rd, s32((a & 0xffffffffn) >> shamt));
             else if (funct7 === 0x20) this.setX(rd, sext(s32(a) >> shamt, 32));
-            else return this.illegal(inst);
+            else if (f6 === 0x18) {
+              // roriw：32 位循环右移后符号扩展
+              const u = a & 0xffffffffn;
+              this.setX(rd, s32(shamt === 0n ? u : (u >> shamt) | ((u << (32n - shamt)) & 0xffffffffn)));
+            } else return this.illegal(inst);
             return;
           }
           default: return this.illegal(inst);
@@ -456,6 +496,8 @@ export class Cpu {
             }
             default: return this.illegal(inst);
           }
+        } else if (this.execBext(is32, funct7, funct3, rd, rs1, rs2)) {
+          return;
         } else {
           switch (funct3) {
             case 0:
@@ -509,10 +551,130 @@ export class Cpu {
     }
   }
 
-  /** 跳转：目标最低位由调用者负责清零（JALR）或天然为 0（JAL） */
-  private jump(target: bigint): void {
-    this.nextPc = target & MASK64;
+/** 跳转：目标最低位由调用者负责清零（JALR）或天然为 0（JAL） */
+private jump(target: bigint): void {
+  this.nextPc = target & MASK64;
+}
+
+/**
+ * Zba/Zbb/Zbs 位运算扩展。命中并执行返回 true；返回 false 表示
+ * 该 funct7/funct3 组合不属于 B（走通用分发）。
+ * 注意 BigInt 位移无 32 位上限截断，rol/ror 的 n=0 边界天然正确。
+ */
+private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1: number, rs2: number): boolean {
+  const a = this.x[rs1] & MASK64;
+  const b = this.x[rs2] & MASK64;
+  if (!is32) {
+    switch (funct7) {
+      case 0x05: // min/max/minu/maxu
+        switch (funct3) {
+          case 4: this.setX(rd, s64(a) < s64(b) ? a : b); return true; // min
+          case 5: this.setX(rd, a < b ? a : b); return true; // minu
+          case 6: this.setX(rd, s64(a) > s64(b) ? a : b); return true; // max
+          case 7: this.setX(rd, a > b ? a : b); return true; // maxu
+          default: return false;
+        }
+      case 0x10: // sh1add/sh2add/sh3add（f3=000 是 SUB，不在 B 内）
+        switch (funct3) {
+          case 2: this.setX(rd, u64((a << 1n) + b)); return true;
+          case 4: this.setX(rd, u64((a << 2n) + b)); return true;
+          case 6: this.setX(rd, u64((a << 3n) + b)); return true;
+          default: return false;
+        }
+      case 0x18: // clz/ctz/cpop/sext.b/sext.h（rs2 限定编码）与 rol/ror
+        switch (funct3) {
+          case 1:
+            switch (rs2) {
+              case 0: this.setX(rd, BigInt(clz64(a))); return true;
+              case 1: this.setX(rd, BigInt(ctz64(a))); return true;
+              case 2: this.setX(rd, BigInt(popcount64(a))); return true;
+              case 4: this.setX(rd, sext(a & 0xffn, 8)); return true; // sext.b
+              case 5: this.setX(rd, sext(a & 0xffffn, 16)); return true; // sext.h
+              default: { // rol
+                const n = b & 63n;
+                this.setX(rd, n === 0n ? a : u64((a << n) | (a >> (64n - n))));
+                return true;
+              }
+            }
+          case 5: { // ror
+            const n = b & 63n;
+            this.setX(rd, n === 0n ? a : u64((a >> n) | (a << (64n - n))));
+            return true;
+          }
+          default: return false;
+        }
+      case 0x20: // andn/orn/xnor（f3=000 是 SUB、f3=101 是 SRA，不在 B 内）
+        switch (funct3) {
+          case 7: this.setX(rd, a & ~b); return true; // andn
+          case 6: this.setX(rd, a | ~b); return true; // orn
+          case 4: this.setX(rd, u64(~(a ^ b))); return true; // xnor
+          default: return false;
+        }
+      case 0x14: // bset
+        if (funct3 === 1) {
+          this.setX(rd, a | (1n << (b & 63n)));
+          return true;
+        }
+        return false;
+      case 0x24: // bclr/bext
+        switch (funct3) {
+          case 1: this.setX(rd, a & ~(1n << (b & 63n))); return true;
+          case 5: this.setX(rd, (a >> (b & 63n)) & 1n); return true;
+          default: return false;
+        }
+      case 0x34: // binv
+        if (funct3 === 1) {
+          this.setX(rd, a ^ (1n << (b & 63n)));
+          return true;
+        }
+        return false;
+      default: return false;
+    }
   }
+  // ---- 0x3b：字半宽（*W 结果符号扩展；*.uw 结果 64 位） ----
+  const ua = a & 0xffffffffn;
+  switch (funct7) {
+    case 0x04: // add.uw / zext.h
+      switch (funct3) {
+        case 0: this.setX(rd, ua + b); return true; // add.uw
+        case 4:
+          if (rs2 === 0) {
+            this.setX(rd, ua & 0xffffn); // zext.h：零扩展低 16 位
+            return true;
+          }
+          return false;
+        default: return false;
+      }
+    case 0x10: // sh1add.uw/sh2add.uw/sh3add.uw
+      switch (funct3) {
+        case 2: this.setX(rd, (ua << 1n) + b); return true;
+        case 4: this.setX(rd, (ua << 2n) + b); return true;
+        case 6: this.setX(rd, (ua << 3n) + b); return true;
+        default: return false;
+      }
+    case 0x18: // clzw/ctzw/cpopw/rolw/rorw
+      switch (funct3) {
+        case 1:
+          switch (rs2) {
+            case 0: this.setX(rd, BigInt(ua === 0n ? 32 : 32 - ua.toString(2).length)); return true;
+            case 1: this.setX(rd, BigInt(ua === 0n ? 32 : (ua & -ua).toString(2).length - 1)); return true;
+            case 2: this.setX(rd, BigInt(popcnt32(Number(ua)))); return true;
+              default: { // rolw
+                const n = b & 31n;
+                this.setX(rd, s32(n === 0n ? ua : ((ua << n) | (ua >> (32n - n))) & 0xffffffffn));
+                return true;
+              }
+          }
+        case 5: { // rorw
+          const n = b & 31n;
+          this.setX(rd, s32(n === 0n ? ua : ((ua >> n) | ((ua << (32n - n)) & 0xffffffffn))));
+          return true;
+        }
+        default: return false;
+      }
+    default: return false;
+  }
+}
 
   // ------------------------------------------------------------------
   // 访存

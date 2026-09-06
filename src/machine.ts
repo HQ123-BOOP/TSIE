@@ -318,7 +318,7 @@ export class Machine {
     cpu0.propU32('reg', [0]);
     cpu0.propStr('status', 'okay');
     cpu0.propStr('compatible', 'riscv');
-    cpu0.propStr('riscv,isa', 'rv64imafdcsu');
+    cpu0.propStr('riscv,isa', 'rv64imafdcbsu');
     cpu0.propStr('mmu-type', 'riscv,sv48');
     const intc = cpu0.addChild('interrupt-controller');
     intc.propU32('#address-cells', [0]);

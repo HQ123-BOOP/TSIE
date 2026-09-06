@@ -398,3 +398,43 @@ export function li(rd: Reg, value: bigint | number, scratch: Reg = 31): number[]
 function sext12(v: number): number {
   return v >= 0x800 ? v - 0x1000 : v;
 }
+
+// ---- Zba / Zbb / Zbs ----
+export const andn = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 7, rs1, rs2, 0x20);
+export const orn = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 6, rs1, rs2, 0x20);
+export const xnor = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 4, rs1, rs2, 0x20);
+export const clz = (rd: Reg, rs1: Reg) => R(OP_OP, rd, 1, rs1, 0, 0x18);
+export const ctz = (rd: Reg, rs1: Reg) => R(OP_OP, rd, 1, rs1, 1, 0x18);
+export const cpop = (rd: Reg, rs1: Reg) => R(OP_OP, rd, 1, rs1, 2, 0x18);
+export const sextb = (rd: Reg, rs1: Reg) => R(OP_OP, rd, 1, rs1, 4, 0x18);
+export const sexth = (rd: Reg, rs1: Reg) => R(OP_OP, rd, 1, rs1, 5, 0x18);
+export const rol = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 1, rs1, rs2, 0x18);
+export const ror = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 5, rs1, rs2, 0x18);
+export const min_ = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 4, rs1, rs2, 0x05);
+export const max_ = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 6, rs1, rs2, 0x05);
+export const minu = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 5, rs1, rs2, 0x05);
+export const maxu = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 7, rs1, rs2, 0x05);
+export const bset = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 1, rs1, rs2, 0x14);
+export const bclr = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 1, rs1, rs2, 0x24);
+export const binv = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 1, rs1, rs2, 0x34);
+export const bext = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 5, rs1, rs2, 0x24);
+export const sh1add = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 2, rs1, rs2, 0x10);
+export const sh2add = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 4, rs1, rs2, 0x10);
+export const sh3add = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP, rd, 6, rs1, rs2, 0x10);
+export const bseti = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 1, rs1, 0x280 | sh);
+export const bclri = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 1, rs1, 0x480 | sh);
+export const binvi = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 1, rs1, 0x680 | sh);
+export const bexti = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 5, rs1, 0x480 | sh);
+export const rori = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 5, rs1, 0x600 | sh);
+export const adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 0, rs1, rs2, 0x04);
+export const zexth = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 4, rs1, 0, 0x04);
+export const sh1adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 2, rs1, rs2, 0x10);
+export const sh2adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 4, rs1, rs2, 0x10);
+export const sh3adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 6, rs1, rs2, 0x10);
+export const slliuw = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM32, rd, 1, rs1, 0x80 | sh);
+export const clzw = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 1, rs1, 0, 0x18);
+export const ctzw = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 1, rs1, 1, 0x18);
+export const cpopw = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 1, rs1, 2, 0x18);
+export const rolw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 1, rs1, rs2, 0x18);
+export const rorw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 5, rs1, rs2, 0x18);
+export const roriw = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM32, rd, 5, rs1, 0x600 | sh);
