@@ -40,6 +40,7 @@ interface Args {
   script?: string;
   interactive: boolean;
   help: boolean;
+  moo?: boolean;
 }
 
 const HELP = `
@@ -187,6 +188,10 @@ function parseArgs(argv: string[]): Args {
       case '--interactive':
         args.interactive = true;
         break;
+      case 'moo':
+      case '--moo':
+        args.moo = true;
+        break;
       case '--misaligned': {
         const v = next();
         if (v !== 'trap' && v !== 'slow') throw new Error('--misaligned 只能是 trap 或 slow');
@@ -214,6 +219,21 @@ async function main(): Promise<number> {
   } catch (e) {
     process.stderr.write(`${(e as Error).message}\n${HELP}`);
     return 2;
+  }
+  if (args.moo) {
+    process.stdout.write(
+      [
+        '        (__)',
+        '        (- -)',
+        '  /------\\/',
+        ' / |    ||',
+        '*  /\\---/\\',
+        '   ~~  ~~',
+        '"This cow has no strength..."',
+        '',
+      ].join('\n'),
+    );
+    return 0;
   }
   if (args.help || (!args.kernel && !args.bios)) {
     process.stdout.write(HELP);
