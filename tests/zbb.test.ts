@@ -29,6 +29,8 @@ import {
   min_,
   minu,
   orn,
+  orcb,
+  rev8,
   rol,
   rolw,
   ror,
@@ -164,4 +166,21 @@ test('misa 应上报 B 位（bit1）', () => {
   const misa = h.cpu.csr.read(0x301 as never);
   assert.equal((misa! & 0x2n) !== 0n, true, 'misa.B 应置位');
   assert.equal((misa! & 0x1n) !== 0n, true, 'misa.A 保持');
+});
+
+test('Zbb：orc.b（非零字节展开为 0xff）', () => {
+  // 0x00 → 0x00；每个非零字节 → 0xff
+  assert.equal(exec1(orcb(7, 5), 0x0102030405060708n, 0n), 0xffffffffffffffffn);
+  assert.equal(exec1(orcb(7, 5), 0x00ff00ee00120034n, 0n), 0x00ff00ff00ff00ffn);
+  assert.equal(exec1(orcb(7, 5), 0n, 0n), 0n);
+  // 边界：0x80（最高位字节）
+  assert.equal(exec1(orcb(7, 5), 0x8000000000000000n, 0n), 0xff00000000000000n);
+});
+
+test('Zbb：rev8（64 位字节序反转）', () => {
+  assert.equal(exec1(rev8(7, 5), 0x0123456789abcdefn, 0n), 0xefcdab8967452301n);
+  assert.equal(exec1(rev8(7, 5), 0x00000000000000ffn, 0n), 0xff00000000000000n);
+  assert.equal(exec1(rev8(7, 5), 0n, 0n), 0n);
+  // 与 RV32 rev8.w 不同：RV64 是完整 8 字节反转
+  assert.equal(exec1(rev8(7, 5), 0x1122334455667788n, 0n), 0x8877665544332211n);
 });

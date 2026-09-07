@@ -426,6 +426,8 @@ export const bclri = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 1, rs1, 0x
 export const binvi = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 1, rs1, 0x680 | sh);
 export const bexti = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 5, rs1, 0x480 | sh);
 export const rori = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM, rd, 5, rs1, 0x600 | sh);
+export const orcb = (rd: Reg, rs1: Reg) => I(OP_IMM, rd, 5, rs1, 0x287);
+export const rev8 = (rd: Reg, rs1: Reg) => I(OP_IMM, rd, 5, rs1, 0x698);
 export const adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 0, rs1, rs2, 0x04);
 export const zexth = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 4, rs1, 0, 0x04);
 export const sh1adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 2, rs1, rs2, 0x10);

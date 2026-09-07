@@ -411,6 +411,18 @@ export class Cpu {
               this.setX(rd, shamt === 0n ? a & MASK64 : u64((a >> shamt) | (a << (64n - shamt))));
             } else if (f6 === 0x12) {
               this.setX(rd, (a >> shamt) & 1n); // bexti
+            } else if (f6 === 0x0a && shamt === 0x07n) {
+              // orc.b（Zbb）：每个非零字节展开为 0xff
+              let r = 0n;
+              for (let i = 0n; i < 8n; i++) {
+                if (((a >> (i * 8n)) & 0xffn) !== 0n) r |= 0xffn << (i * 8n);
+              }
+              this.setX(rd, r);
+            } else if (f6 === 0x1a && shamt === 0x18n) {
+              // rev8（Zbb）：64 位字节序反转
+              let r = 0n;
+              for (let i = 0n; i < 8n; i++) r = (r << 8n) | ((a >> (i * 8n)) & 0xffn);
+              this.setX(rd, r);
             } else {
               return this.illegal(inst);
             }
