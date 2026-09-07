@@ -428,7 +428,7 @@ export class Cpu {
                 if (((a >> (i * 8n)) & 0xffn) !== 0n) r |= 0xffn << (i * 8n);
               }
               this.setX(rd, r);
-            } else if (f6 === 0x1a && shamt === 0x18n) {
+            } else if (f6 === 0x1a && shamt === 0x38n) {
               // rev8（Zbb）：64 位字节序反转
               let r = 0n;
               for (let i = 0n; i < 8n; i++) r = (r << 8n) | ((a >> (i * 8n)) & 0xffn);
