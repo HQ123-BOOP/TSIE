@@ -434,9 +434,9 @@ export const sh1adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 2, rs1, 
 export const sh2adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 4, rs1, rs2, 0x10);
 export const sh3adduw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 6, rs1, rs2, 0x10);
 export const slliuw = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM32, rd, 1, rs1, 0x80 | sh);
-export const clzw = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 1, rs1, 0, 0x30);
-export const ctzw = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 1, rs1, 1, 0x30);
-export const cpopw = (rd: Reg, rs1: Reg) => R(OP_OP32, rd, 1, rs1, 2, 0x30);
+export const clzw = (rd: Reg, rs1: Reg) => I(OP_IMM32, rd, 1, rs1, 0x600);
+export const ctzw = (rd: Reg, rs1: Reg) => I(OP_IMM32, rd, 1, rs1, 0x601);
+export const cpopw = (rd: Reg, rs1: Reg) => I(OP_IMM32, rd, 1, rs1, 0x602);
 export const rolw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 1, rs1, rs2, 0x30);
 export const rorw = (rd: Reg, rs1: Reg, rs2: Reg) => R(OP_OP32, rd, 5, rs1, rs2, 0x30);
 export const roriw = (rd: Reg, rs1: Reg, sh: number) => I(OP_IMM32, rd, 5, rs1, 0x600 | sh);

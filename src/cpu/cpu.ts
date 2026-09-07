@@ -448,12 +448,21 @@ export class Cpu {
         switch (funct3) {
           case 0: this.setX(rd, s32(a + immI(inst))); return; // ADDIW
           case 1: {
-            // SLLIW（funct7=0）与 slli.uw（Zba，f6=000010，64 位结果不符号扩展）
+            // SLLIW（funct7=0）、slli.uw（Zba，f6=000010）与 clzw/ctzw/cpopw（Zbb，f6=011000）
             const f6 = (inst >>> 26) & 0x3f;
             const shamt = BigInt((inst >> 20) & 0x3f);
             if (funct7 === 0x00 && f6 === 0) this.setX(rd, s32(a << shamt));
             else if (f6 === 0x02) this.setX(rd, (a & 0xffffffffn) << shamt);
-            else return this.illegal(inst);
+            else if (f6 === 0x18) {
+              // clzw/ctzw/cpopw：规范编码在 OP-IMM-32（funct12=0x600|k），结果按 32 位符号扩展
+              const ua = a & 0xffffffffn;
+              switch (shamt) {
+                case 0n: this.setX(rd, s32(BigInt(ua === 0n ? 32 : 32 - ua.toString(2).length))); break;
+                case 1n: this.setX(rd, s32(BigInt(ua === 0n ? 32 : (ua & -ua).toString(2).length - 1))); break;
+                case 2n: this.setX(rd, s32(BigInt(popcnt32(Number(ua))))); break;
+                default: return this.illegal(inst);
+              }
+            } else return this.illegal(inst);
             return;
           }
           case 5: {
@@ -666,19 +675,13 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
         case 6: this.setX(rd, (ua << 3n) + b); return true;
         default: return false;
       }
-    case 0x30: // clzw/ctzw/cpopw（rs2=0/1/2）与 rolw（rs2=其他）/rorw
+    case 0x30: // rolw/rorw（clzw/ctzw/cpopw 在 OP-IMM-32，不在这）
       switch (funct3) {
-        case 1:
-          switch (rs2) {
-            case 0: this.setX(rd, s32(BigInt(ua === 0n ? 32 : 32 - ua.toString(2).length))); return true;
-            case 1: this.setX(rd, s32(BigInt(ua === 0n ? 32 : (ua & -ua).toString(2).length - 1))); return true;
-            case 2: this.setX(rd, s32(BigInt(popcnt32(Number(ua))))); return true;
-            default: { // rolw
-              const n = b & 31n;
-              this.setX(rd, s32(n === 0n ? ua : ((ua << n) | (ua >> (32n - n))) & 0xffffffffn));
-              return true;
-            }
-          }
+        case 1: { // rolw
+          const n = b & 31n;
+          this.setX(rd, s32(n === 0n ? ua : ((ua << n) | (ua >> (32n - n))) & 0xffffffffn));
+          return true;
+        }
         case 5: { // rorw
           const n = b & 31n;
           this.setX(rd, s32(n === 0n ? ua : ((ua >> n) | ((ua << (32n - n)) & 0xffffffffn))));
