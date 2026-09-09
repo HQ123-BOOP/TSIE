@@ -4,6 +4,7 @@
  */
 import * as dgram from 'node:dgram';
 import * as net from 'node:net';
+import * as nodeDns from 'node:dns';
 import type { EthFrame, NetBackend } from './net.ts';
 
 /**
@@ -35,6 +36,12 @@ export interface SlirpOptions {
   gwIp?: string;
   /** 虚拟网关 MAC（缺省 52:54:00:12:34:02） */
   gwMac?: string;
+  /**
+   * 发往网关 53 端口的 DNS 查询转发到哪个上游（缺省取宿主机 DNS，失败退
+   * 223.5.5.5）。QEMU slirp 同样在网关地址上做 DNS 拦截——否则 guest 把
+   * 网关当 DNS 服务器时，查询会被原样发到 10.0.0.2:53 而无人应答。
+   */
+  dns?: string;
   /** 调试日志（stderr） */
   debug?: boolean;
 }
@@ -100,6 +107,7 @@ export class SlirpBackend implements NetBackend {
   private readonly guestMacB: Uint8Array;
   private readonly gwMacB: Uint8Array;
   private readonly guestIpB: Uint8Array;
+  private readonly gwIpB: Uint8Array;
   private sink: ((frame: EthFrame) => void) | undefined;
   private closed = false;
   private ipId = 1;
@@ -114,12 +122,26 @@ export class SlirpBackend implements NetBackend {
       guestMac: opts.guestMac ?? '52:54:00:12:34:56',
       gwIp: opts.gwIp ?? '10.0.0.2',
       gwMac: opts.gwMac ?? '52:54:00:12:34:02',
+      dns: opts.dns ?? ((nodeDns.getServers?.()[0] ?? '') || '223.5.5.5'),
       debug: opts.debug,
     } as Required<SlirpOptions>;
     this.guestMacB = parseMac(this.opts.guestMac);
     this.gwMacB = parseMac(this.opts.gwMac);
     this.guestIpB = parseIp(this.opts.guestIp);
+    this.gwIpB = parseIp(this.opts.gwIp);
+    // 上游 DNS 支持 "ip" 或 "ip:port"（后者便于单测指向本地服务器）
+    const [h, p] = this.opts.dns.split(':');
+    this.dnsHost = h;
+    this.dnsPort = p !== undefined && /^\d+$/.test(p) ? Number(p) : 53;
   }
+
+  /**
+   * 发往网关 53 端口的 DNS 查询转发到哪个上游（缺省取宿主机 DNS，失败退
+   * 223.5.5.5）。QEMU slirp 同样在网关地址上做 DNS 拦截——否则 guest 把
+   * 网关当 DNS 服务器时，查询会被原样发到 10.0.0.2:53 而无人应答。
+   */
+  private dnsHost: string;
+  private dnsPort: number;
 
   private debug(...args: unknown[]): void {
     if (this.opts.debug) console.error('[slirp]', ...args);
@@ -232,7 +254,14 @@ export class SlirpBackend implements NetBackend {
     const srcPort = u16(p, 0);
     const dstPort = u16(p, 2);
     const data = p.subarray(8);
-    const key = `${ipStr(srcIp)}:${srcPort}`;
+    let upHost = ipStr(dstIp);
+    let upPort = dstPort;
+    const isDnsToGw = dstPort === 53 && upHost === this.opts.gwIp;
+    if (isDnsToGw) {
+      upHost = this.dnsHost;
+      upPort = this.dnsPort;
+    }
+    const key = `${ipStr(srcIp)}:${srcPort}:${upHost}:${upPort}`;
     let flow = this.udpFlows.get(key);
     if (!flow) {
       if (this.udpFlows.size >= MAX_UDP_FLOWS) {
@@ -240,7 +269,7 @@ export class SlirpBackend implements NetBackend {
         if (oldest) this.closeUdpFlow(oldest[0]);
       }
       const sock = dgram.createSocket('udp4');
-      flow = { sock, srcIp: Uint8Array.from(srcIp), srcPort, lastUsed: Date.now() };
+      flow = { sock, srcIp: Uint8Array.from(srcIp), srcPort, lastUsed: Date.now(), spoof: isDnsToGw };
       this.udpFlows.set(key, flow);
       sock.on('message', (msg, rinfo) => {
         this.udpBack(flow!, msg, rinfo.address, rinfo.port);
@@ -250,7 +279,7 @@ export class SlirpBackend implements NetBackend {
       this.debug(`UDP 流新增 ${key} (共 ${this.udpFlows.size})`);
     }
     flow.lastUsed = Date.now();
-    sockSend(flow.sock, data, ipStr(dstIp), dstPort);
+    sockSend(flow.sock, data, upHost, upPort);
   }
 
   private udpBack(flow: UdpFlow, data: Buffer, remoteIp: string, remotePort: number): void {
@@ -261,9 +290,11 @@ export class SlirpBackend implements NetBackend {
     putU16(udp, 2, flow.srcPort);
     putU16(udp, 4, total);
     udp.set(data, 8);
+    // DNS 拦截流：源地址伪装成网关，让 guest 解析器认账
+    const srcIpB = flow.spoof ? this.gwIpB : parseIp(remoteIp);
     // 注意：伪头必须用字节形式的 IP——传字符串会让校验和按 ASCII 码累加
-    putU16(udp, 6, udpChecksum(udp, parseIp(remoteIp), this.guestIpB));
-    this.emitIp(parseIp(remoteIp), flow.srcIp, 17, udp);
+    putU16(udp, 6, udpChecksum(udp, srcIpB, this.guestIpB));
+    this.emitIp(srcIpB, flow.srcIp, 17, udp);
   }
 
   private closeUdpFlow(key: string): void {
@@ -341,6 +372,8 @@ interface UdpFlow {
   srcIp: Uint8Array;
   srcPort: number;
   lastUsed: number;
+  /** true 表示这是被拦截的 DNS 流：回包源地址要伪装成网关 */
+  spoof: boolean;
 }
 
 function sockSend(sock: dgram.Socket, data: Uint8Array, host: string, port: number): void {

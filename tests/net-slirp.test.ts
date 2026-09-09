@@ -312,3 +312,32 @@ test('slirp：TCP 全往返（握手/数据回显/FIN 挥手）+ RST（连接拒
   b.close();
   server.close();
 });
+
+test('slirp：发往网关 53 端口的 DNS 查询转发到上游，回包源地址伪装成网关', async () => {
+  // 上游 DNS：本地 dgram 服务器，把查询原样回给发件人
+  const upstream = dgram.createSocket('udp4');
+  const upPort = await new Promise<number>((resolve) => {
+    upstream.on('message', (msg, rinfo) =>
+      upstream.send(Buffer.concat([Buffer.from('dns:'), msg]), rinfo.port, rinfo.address));
+    upstream.bind(0, '127.0.0.1', () => resolve(upstream.address().port));
+  });
+
+  const b = new SlirpBackend({ dns: `127.0.0.1:${upPort}` });
+  const g = new Guest(b);
+  // guest 把网关当 DNS 服务器：10.0.0.2:53
+  g.udp(49152, GW_IP, 53, Buffer.from('query'));
+
+  const f = await g.waitFor((x) => {
+    if (u16(x, 12) !== 0x0800) return false;
+    const ip = g.parseIpFrame(x);
+    return ip?.proto === 17 && ip.srcIp === GW_IP; // 必须是网关发回，否则解析器丢弃
+  });
+  const ip = g.parseIpFrame(f)!;
+  assert.equal(ip.srcIp, GW_IP, '源 IP 伪装成网关');
+  const l4 = f.subarray(34);
+  assert.equal(l4.subarray(8).toString(), 'dns:query', '上游应答原样回传');
+  assert.equal(l4Checksum(l4, parseIp(GW_IP), parseIp(GUEST_IP), 17), 0, '伪头按网关 IP 校验');
+
+  b.close();
+  upstream.close();
+});
