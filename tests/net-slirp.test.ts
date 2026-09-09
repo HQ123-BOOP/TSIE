@@ -341,3 +341,9 @@ test('slirp：发往网关 53 端口的 DNS 查询转发到上游，回包源地
   b.close();
   upstream.close();
 });
+
+test('slirp：未指定 dns 时上游必须挑 IPv4（Windows 的 getServers 首项常是 IPv6）', () => {
+  const b = new SlirpBackend();
+  assert.match(b.dnsUpstream, /^\d+\.\d+\.\d+\.\d+(:\d+)?$/, `上游=${b.dnsUpstream} 应为 IPv4`);
+  b.close();
+});

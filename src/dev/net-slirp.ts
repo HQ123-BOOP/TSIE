@@ -100,6 +100,18 @@ const UDP_IDLE_MS = 30_000;
 const MAX_UDP_FLOWS = 256;
 const RETRANSMIT_MS = 300;
 
+/**
+ * 取宿主机的 DNS：只挑 IPv4——转发走的是 udp4 socket，IPv6 地址（Windows
+ * 上 getServers() 常把 2400:3200::1 之类排在前面）根本发不出去。
+ */
+function pickHostDns(): string | undefined {
+  try {
+    return nodeDns.getServers().find((s) => net.isIPv4(s));
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------- SlirpBackend ----------
 
 export class SlirpBackend implements NetBackend {
@@ -122,7 +134,7 @@ export class SlirpBackend implements NetBackend {
       guestMac: opts.guestMac ?? '52:54:00:12:34:56',
       gwIp: opts.gwIp ?? '10.0.0.2',
       gwMac: opts.gwMac ?? '52:54:00:12:34:02',
-      dns: opts.dns ?? ((nodeDns.getServers?.()[0] ?? '') || '223.5.5.5'),
+      dns: opts.dns ?? (pickHostDns() ?? '223.5.5.5'),
       debug: opts.debug,
     } as Required<SlirpOptions>;
     this.guestMacB = parseMac(this.opts.guestMac);
@@ -142,6 +154,11 @@ export class SlirpBackend implements NetBackend {
    */
   private dnsHost: string;
   private dnsPort: number;
+
+  /** 当前生效的上游 DNS（ip 或 ip:port），便于测试与排障 */
+  get dnsUpstream(): string {
+    return this.dnsPort === 53 ? this.dnsHost : `${this.dnsHost}:${this.dnsPort}`;
+  }
 
   private debug(...args: unknown[]): void {
     if (this.opts.debug) console.error('[slirp]', ...args);
