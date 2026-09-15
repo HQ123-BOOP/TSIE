@@ -23,6 +23,8 @@ interface Args {
   bios?: string;
   disk?: string;
   netdev?: 'loopback' | 'proxy' | 'slirp';
+  /** virtio-gpu 显示设备分辨率 */
+  gpu?: { width: number; height: number };
   /** virtio-9p 共享目录 */
   shared9p?: string;
   proxyHost?: string;
@@ -66,6 +68,8 @@ FreeBSD® (not yet tested).
                                       配合 VM 上的 TAP 桥 + MASQUERADE）
       --proxy-host <ip>     proxy 后端的桥接守护地址（配合 --netdev proxy）
       --proxy-port <n>      proxy 后端的桥接守护 UDP 端口（默认 7777）
+      --gpu <WxH>           挂载 virtio-gpu 显示设备（如 --gpu 1024x768）。
+                            guest 侧由内核 virtio_gpu 驱动接管，经 fbdev 控制台输出画面
       --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare；
                             guest 侧 mount -t 9p -o trans=virtio,version=9p2000.L
                             hostshare /mnt）
@@ -151,6 +155,12 @@ function parseArgs(argv: string[]): Args {
       case '--proxy-port':
         args.proxyPort = Number(parseNumber(next()));
         break;
+      case '--gpu': {
+        const m = /^(\d+)x(\d+)$/.exec(next());
+        if (!m) throw new Error('--gpu 需要 WxH 形式，例如 --gpu 1024x768');
+        args.gpu = { width: Number(m[1]), height: Number(m[2]) };
+        break;
+      }
       case '-i':
       case '--initrd':
         args.initrd = next();
@@ -240,12 +250,25 @@ async function main(): Promise<number> {
     return args.help ? 0 : 2;
   }
 
+  let gpuReported = false;
   let machine: Machine;
   try {
     machine = new Machine({
       memSize: args.memory,
       bios: args.bios ? readFile(args.bios) : undefined,
       disk: args.disk ? new FileDisk(args.disk) : undefined,
+      gpu: args.gpu
+        ? {
+            width: args.gpu.width,
+            height: args.gpu.height,
+            // 尚无显示前端：首帧尺寸报到 stderr，供无人值守启动验证确认通路已打通
+            onFlush: (fb) => {
+              if (gpuReported) return;
+              gpuReported = true;
+              process.stderr.write(`显示: virtio-gpu 首帧就绪 ${fb.width}x${fb.height}（format ${fb.format}）\n`);
+            },
+          }
+        : undefined,
       net:
         args.netdev === 'loopback'
           ? new LoopbackBackend()

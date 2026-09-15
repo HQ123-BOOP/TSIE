@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { Bus } from '../src/mem/bus.ts';
 import { RAM } from '../src/mem/ram.ts';
 import { VirtioGpu, type GpuFramebuffer } from '../src/dev/virtio-gpu.ts';
+import { Machine, VIRT_VIRTIO_GPU } from '../src/machine.ts';
 
 const RAM_BASE = 0x80000000n;
 const BASE = 0x10004000n;
@@ -288,4 +289,21 @@ test('virtio-gpu：错误路径与光标队列', () => {
   // 光标队列（queue 1）：应答但不绘制
   const move = cat(hdr(CMD_MOVE_CURSOR), u32(0), u32(10), u32(20), u32(0), u32(0), u32(0));
   assert.equal(dispType(drv.submit(1, move)), RESP_OK_NODATA, 'cursorq 必须应答，否则驱动会卡住');
+});
+
+test('virtio-gpu：挂载到 virt 机器后 DTB 出现 GPU 节点', () => {
+  const dtbText = (m: Machine) => new TextDecoder('latin1').decode(m.generateDtb('console=ttyS0'));
+
+  assert.equal(VIRT_VIRTIO_GPU, 0x10004000n, 'GPU 的 MMIO 基址');
+  const withGpu = new Machine({ memSize: 128n * 1024n * 1024n, gpu: { width: 800, height: 600 } });
+  assert.ok(withGpu.gpu, 'gpu 设备应已挂载到总线');
+  const nodeName = 'virtio_mmio@' + VIRT_VIRTIO_GPU.toString(16);
+  const text = dtbText(withGpu);
+  assert.ok(text.includes(nodeName), 'DTB 应含 GPU 的 virtio_mmio 节点');
+  assert.ok(text.includes('virtio,mmio'), 'GPU 节点应为 virtio,mmio 兼容');
+
+  // 不启用时节点不该出现（否则 guest 会去找一个不存在的设备）
+  const plain = new Machine({ memSize: 128n * 1024n * 1024n });
+  assert.equal(plain.gpu, undefined);
+  assert.ok(!dtbText(plain).includes('10004000'), '未启用 GPU 时 DTB 不应含该节点');
 });
