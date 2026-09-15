@@ -194,6 +194,10 @@ test('VirtIO：设备识别与配置空间', () => {
   assert.equal(Number(dev.read(0x34n, 4)), 256, 'QueueNumMax');
   assert.equal(dev.read(0x100n, 8), 8n, 'capacity = 8 个扇区');
   assert.equal(Number(dev.read(0x114n, 4)), 512, 'blk_size = 512');
+  // 回归：宣告了 SIZE_MAX 就绝不能返回 0。U-Boot 用 size_max/512 算单段上限，
+  // 得 0 会让它的分块循环永不前进，疯狂发零长度读后卡死（2026-09-16 实机复现）。
+  assert.notEqual(Number(dev.read(0x108n, 4)), 0, 'size_max 不能为 0');
+  assert.notEqual(Number(dev.read(0x10cn, 4)), 0, 'seg_max 不能为 0');
 });
 
 test('VirtIO：读请求（VIRTIO_BLK_T_IN）', () => {

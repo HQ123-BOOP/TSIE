@@ -42,6 +42,16 @@ export class VirtioBlk extends VirtioMmio {
   private readonly disk: DiskImage;
   private reqCount = 0;
 
+  /**
+   * 调试：记录**前** 60 条块请求（类型/扇区/描述符数/状态）。
+   * Linux 只用整盘不读分区表，所以这些路径一直没被压过；U-Boot 会扫分区表，
+   * 出问题时要能看清它到底在读哪些扇区。同时统计扇区访问范围。
+   */
+  cmdTrace = false;
+  readonly cmdTraceLog: string[] = [];
+  sectorMin = -1n;
+  sectorMax = -1n;
+
   constructor(bus: Bus, disk: DiskImage, irq?: IrqLine) {
     // 单队列（块设备请求队列）；不暴露 RING_EVENT_IDX（避免 avail/used 环布局变化）
     super(bus, irq, 1, QUEUE_SIZE);
@@ -74,7 +84,11 @@ export class VirtioBlk extends VirtioMmio {
     switch (o) {
       case 0x00: return cap & 0xffffffffn; // capacity low
       case 0x04: return (cap >> 32n) & 0xffffffffn; // capacity high
-      case 0x08: return 0n; // size_max
+      // size_max 必须非 0！我们宣告了 VIRTIO_BLK_F_SIZE_MAX，而 U-Boot 会照这个值
+      // 算单段上限：seg_sec_cnt = size_max / 512，再 blk_per_sg = min(剩余, seg_sec_cnt*seg_max)。
+      // 返回 0 会让 U-Boot 的 blk_per_sg 恒为 0 → while (i < blkcnt) 永不前进 →
+      // 疯狂发零长度读（实测 9.8 万次）后卡死。Linux 不读这个字段，所以只有 U-Boot 中招。
+      case 0x08: return 0x7fffffffn; // size_max（语义：单段不超过这么多字节）
       case 0x0c: return BigInt(QUEUE_SIZE - 2); // seg_max
       case 0x10: {
         // geometry: cylinders(u16) heads(u8) sectors(u8)
@@ -168,6 +182,21 @@ export class VirtioBlk extends VirtioMmio {
     if (statusDesc >= 0) {
       const sd = chain[statusDesc];
       this.bus.write(sd.addr + BigInt(sd.len - 1), BigInt(status), 1);
+    }
+    if (this.sectorMin < 0n || sector < this.sectorMin) this.sectorMin = sector;
+    if (sector > this.sectorMax) this.sectorMax = sector;
+    if (this.cmdTrace && this.cmdTraceLog.length < 60) {
+      const shape = chain.map((c, i) => `[${i}]${c.write ? 'W' : 'R'}${c.len}`).join(' ');
+      // 原始描述符（含 flags/next）：判断是不是 indirect 表、或链在中间被截断
+      const rawDesc = (i: number): string => {
+        const d = q.desc + BigInt(i * 16);
+        return `d${i}(addr=0x${this.mem64(d).toString(16)} len=${this.mem32(d + 8n)} fl=${this.mem16(d + 12n)} nx=${this.mem16(d + 14n)})`;
+      };
+      const rawDump = [0, 1, 2].map(rawDesc).join(' ');
+      this.cmdTraceLog.push(
+        `type=${type} sector=${sector} ndesc=${chain.length} qnum=${q.num} status=${status}` +
+          ` | ${shape} | dataIn=${dataIn.length} dataOut=${dataOut.length} statusDesc=${statusDesc} | ${rawDump}`,
+      );
     }
     this.pushUsed(q, headId, 0);
   }
