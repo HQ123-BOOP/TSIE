@@ -206,3 +206,45 @@ test('CFI flash：通过总线读写走的是同一份阵列', () => {
   assert.equal(Number(m.bus.read(VIRT_FLASH + 0x40n, 1)), 0x5a, '总线读应命中预置内容');
   assert.equal(Number(m.bus.read(VIRT_FLASH + FLASH_SIZE + 0x40n, 1)), 0xff, 'VARS 未被预置');
 });
+
+test('CFI flash：0xE8 之后回读同一地址必须满足 EDK2 的缓冲可用性检查', () => {
+  // 回归：EDK2 的 NorFlashWriteBuffer() 发 0xE8 后会回读同一地址当状态寄存器，
+  // 检查 (v & (BIT7<<16 | BIT7)) == (BIT7<<16 | BIT7) 判断缓冲是否可用。
+  // 若这里返回阵列数据而非全 1，检查失败 → EDK2 带 1000 万次上限空转，
+  // 且连续的 0xE8 会被误当成"字数"（0xE8=232 → 233 个字），把缓冲编程彻底带偏。
+  // 实机表现：BUF_PROGRAM_SETUP → BUF_COUNT words=233 → BUF_ABORT 无限重复。
+  const BIT7_23 = 0x00800080;
+  const f = make();
+  const TARGET = 0x1000;
+
+  // 预置一个"非全 1、但不把待写数据的位清零"的值，
+  // 这样既能区分命令态全 1 与阵列数据，又不影响后面 NOR 的 & 语义
+  // （NOR 只能把 1 变 0：0xFFFFFF00 & 0xa5a5a500 == 0xa5a5a500）
+  w32(f, TARGET, 0x40);
+  w32(f, TARGET, 0xffffff00);
+  assert.equal(r32(f, TARGET), 0xffffff00, '前置：阵列里是非全 1 的 0xffffff00');
+
+  w32(f, TARGET, 0xe8); // 缓冲编程 setup
+  const avail = r32(f, TARGET);
+  assert.equal(avail, 0xffffffff, '0xE8 之后回读应为全 1（命令态）');
+  assert.equal(avail & BIT7_23, BIT7_23, 'EDK2 的缓冲可用性检查必须通过');
+
+  // 检查通过后，完整走一遍 32 字的缓冲编程（EDK2 的 P30_MAX_BUFFER_SIZE_IN_BYTES=128）
+  const WORDS = 32;
+  w32(f, TARGET, WORDS - 1); // 字数 = BufferSizeInWords-1
+  for (let i = 0; i < WORDS; i++) w32(f, TARGET + i * 4, 0xa5a5a500 + i);
+  w32(f, 0, 0xd0); // confirm 发到**设备基址**（注意不是 TargetAddress）
+  assert.ok(!f.cmdTraceLog.join('\n').includes('BUF_ABORT'), '不应 ABORT');
+  assert.equal(r32(f, TARGET), 0xa5a5a500, '第 1 个字');
+  assert.equal(r32(f, TARGET + 4 * 31), 0xa5a5a51f, '第 32 个字');
+});
+
+test('CFI flash：擦除/字编程命令态下回读也返回全 1', () => {
+  const f = make();
+  w32(f, 0x2000, 0x20); // 擦除 setup（等待 confirm）
+  assert.equal(r32(f, 0x2000), 0xffffffff, '擦除命令态读到全 1');
+  w32(f, 0x2000, 0x60); // 锁 setup
+  assert.equal(r32(f, 0x2000), 0xffffffff, '锁命令态读到全 1');
+  w32(f, 0x2000, 0xff); // 回读阵列
+  assert.equal(r32(f, 0x2000), 0xffffffff, '擦除后该处本就是 0xff');
+});

@@ -131,9 +131,20 @@ export class CfiFlash implements Device {
     return v;
   }
 
+  /** 全 1（未处理命令态下的读回值） */
+  private allOnes(size: MemSize): bigint {
+    let v = 0n;
+    for (let i = 0; i < size; i++) v |= 0xffn << BigInt(8 * i);
+    return v;
+  }
+
   read(offset: bigint, size: MemSize): bigint {
     const off = Number(offset);
     switch (this.cmd) {
+      // 读阵列就是"无命令态"：0xff 与 0x00 都归到这里（0x00 是静止态）
+      case CMD_READ_ARRAY:
+      case CMD_READ_ARRAY_ALT:
+        return this.readArray(off, size);
       case CMD_READ_STATUS:
         return this.replicate(this.status, size);
       case CMD_READ_ID: {
@@ -147,7 +158,18 @@ export class CfiFlash implements Device {
         return this.replicate(b, size);
       }
       default:
-        return this.readArray(off, size);
+        // 其他命令态（0x40 字编程 setup、0xE8 缓冲编程 setup、0x20 擦除、0x60 锁）
+        // 下，读回**全 1**。这是 QEMU pflash_read 的 default 分支行为（返回 -1），
+        // 而且 EDK2 依赖它：
+        //
+        //   NorFlashWriteBuffer() 发完 0xE8 后会回读同一地址，把返回值当状态寄存器，
+        //   检查 (v & (BIT7<<16|BIT7)) == (BIT7<<16|BIT7) 来判断缓冲是否可用。
+        //   若这里返回的是阵列数据，检查就失败，EDK2 会带着
+        //   MAX_BUFFERED_PROG_ITERATIONS(=1000 万) 的重试上限空转；更要命的是
+        //   连续的 0xE8 会被状态机误当成"字数"（0xE8=232 → 233 个字），
+        //   于是缓冲编程彻底跑偏（实机表现就是 BUF_ABORT 无限重复）。
+        //   返回全 1 后该检查通过，EDK2 才会继续发字数与数据。
+        return this.allOnes(size);
     }
   }
 
