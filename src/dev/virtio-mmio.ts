@@ -31,6 +31,11 @@ export const R_QUEUE_AVAIL_LOW = 0x90;
 export const R_QUEUE_AVAIL_HIGH = 0x94;
 export const R_QUEUE_USED_LOW = 0xa0;
 export const R_QUEUE_USED_HIGH = 0xa4;
+export const R_SHM_SEL = 0xac;
+export const R_SHM_LEN_LOW = 0xb0;
+export const R_SHM_LEN_HIGH = 0xb4;
+export const R_SHM_BASE_LOW = 0xb8;
+export const R_SHM_BASE_HIGH = 0xbc;
 export const R_CONFIG_GENERATION = 0xfc;
 export const R_CONFIG = 0x100;
 
@@ -153,6 +158,16 @@ export abstract class VirtioMmio implements Device {
       case R_QUEUE_AVAIL_HIGH: return (this.curQueue().driver >> 32n) & 0xffffffffn;
       case R_QUEUE_USED_LOW: return this.curQueue().device & 0xffffffffn;
       case R_QUEUE_USED_HIGH: return (this.curQueue().device >> 32n) & 0xffffffffn;
+      // 共享内存寄存器：本实现不提供任何 SHM 区域。
+      // 约定是「读回全 1（-1）」表示不存在 —— Linux vm_get_shm_region() 只在
+      // len == ~0ULL 时返回 false；返回 0 会被理解成「存在一个长度为 0 的区域」，
+      // 于是 virtio_gpu 去 devm_request_mem_region(0, 0) 失败并 -EBUSY 放弃 probe。
+      case R_SHM_SEL: return 0n;
+      case R_SHM_LEN_LOW:
+      case R_SHM_LEN_HIGH:
+      case R_SHM_BASE_LOW:
+      case R_SHM_BASE_HIGH:
+        return (1n << BigInt(size * 8)) - 1n;
       case R_CONFIG_GENERATION: return 0n;
       default: return 0n;
     }

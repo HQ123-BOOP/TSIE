@@ -180,6 +180,19 @@ test('virtio-gpu：设备识别与 config 空间', () => {
   assert.equal(Number(dev.read(0x10n, 4)), 1, '高 32 位应含 VIRTIO_F_VERSION_1');
 });
 
+test('virtio-mmio：SHM 寄存器必须读回全 1（约定 -1 = 无共享内存区）', () => {
+  // 回归：Linux vm_get_shm_region() 只在 len == ~0ULL 时判定「没有该区域」。
+  // 若这些寄存器读回 0，virtio_gpu 会认为存在一个长度 0、地址 0 的 host visible 区域，
+  // 进而 devm_request_mem_region(0,0) 失败 → probe 报 "Could not reserve host visible
+  // region" 并以 -EBUSY 退出（2026-09-16 实机复现）。
+  const { dev } = makeEnv();
+  assert.equal(Number(dev.read(0xb0n, 4)), 0xffffffff, 'SHM_LEN_LOW');
+  assert.equal(Number(dev.read(0xb4n, 4)), 0xffffffff, 'SHM_LEN_HIGH');
+  assert.equal(Number(dev.read(0xb8n, 4)), 0xffffffff, 'SHM_BASE_LOW');
+  assert.equal(Number(dev.read(0xbcn, 4)), 0xffffffff, 'SHM_BASE_HIGH');
+  assert.equal(Number(dev.read(0xacn, 4)), 0, 'SHM_SEL 是写寄存器，读回 0');
+});
+
 test('virtio-gpu：GET_DISPLAY_INFO 报出可用扫描输出并回显 fence', () => {
   const { dev, ram, irqs } = makeEnv();
   initDriver(dev);
