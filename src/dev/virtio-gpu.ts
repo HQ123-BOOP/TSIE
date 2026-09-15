@@ -51,6 +51,21 @@ const MAX_DIM = 8192;
 const MAX_RESOURCE_BYTES = 64 * 1024 * 1024;
 const MAX_BACKING_ENTRIES = 1024;
 
+/** 命令名（仅调试追踪用） */
+const CMD_NAMES: Record<number, string> = {
+  [CMD_GET_DISPLAY_INFO]: 'GET_DISPLAY_INFO',
+  [CMD_RESOURCE_CREATE_2D]: 'RESOURCE_CREATE_2D',
+  [CMD_RESOURCE_UNREF]: 'RESOURCE_UNREF',
+  [CMD_SET_SCANOUT]: 'SET_SCANOUT',
+  [CMD_RESOURCE_FLUSH]: 'RESOURCE_FLUSH',
+  [CMD_TRANSFER_TO_HOST_2D]: 'TRANSFER_TO_HOST_2D',
+  [CMD_RESOURCE_ATTACH_BACKING]: 'ATTACH_BACKING',
+  [CMD_RESOURCE_DETACH_BACKING]: 'DETACH_BACKING',
+  [CMD_GET_EDID]: 'GET_EDID',
+  [CMD_UPDATE_CURSOR]: 'UPDATE_CURSOR',
+  [CMD_MOVE_CURSOR]: 'MOVE_CURSOR',
+};
+
 export interface VirtioGpuOptions {
   /** 上报给 guest 的扫描输出分辨率，默认 1024x768 */
   width?: number;
@@ -117,6 +132,14 @@ export class VirtioGpu extends VirtioMmio {
 
   private cmdCount = 0;
   private flushCount = 0;
+
+  /** 调试：记录控制队列命令（设备侧协议追踪，最多 200 条）。与基类的 MMIO trace 相互独立 */
+  cmdTrace = false;
+  readonly cmdTraceLog: string[] = [];
+  private traceLine(s: string): void {
+    if (!this.cmdTrace || this.cmdTraceLog.length >= 200) return;
+    this.cmdTraceLog.push(s);
+  }
 
   constructor(bus: Bus, irq: IrqLine | undefined, opts: VirtioGpuOptions = {}) {
     // 两队列：controlq + cursorq（Linux virtio_gpu 固定申请 2 个，少一个 probe 就失败）
@@ -255,6 +278,8 @@ export class VirtioGpu extends VirtioMmio {
     const rv = new DataView(resp.buffer);
     let respLen = HDR_SIZE;
     let respType = RESP_OK_NODATA;
+    /** 供 trace 使用的命令关键参数 */
+    let detail = '';
 
     const need = (n: number): boolean => req.length >= n;
     const rectAt = (o: number) => ({
@@ -298,6 +323,7 @@ export class VirtioGpu extends VirtioMmio {
           respType = RESP_ERR_INVALID_PARAMETER;
           break;
         }
+        detail = `id=${id} fmt=${format} ${w}x${h}`;
         this.resources.set(id, {
           id,
           format,
@@ -331,6 +357,7 @@ export class VirtioGpu extends VirtioMmio {
           entries.push({ addr: dv.getBigUint64(b, true), length: dv.getUint32(b + 8, true) });
         }
         res.backing = entries;
+        detail = `id=${id} nr=${nr} e0=${entries[0].addr}/${entries[0].length}`;
         break;
       }
 
@@ -345,6 +372,7 @@ export class VirtioGpu extends VirtioMmio {
           break;
         }
         res.backing = [];
+        detail = `id=${res.id}`;
         break;
       }
 
@@ -376,6 +404,7 @@ export class VirtioGpu extends VirtioMmio {
         target.y = r.y;
         target.width = r.width;
         target.height = r.height;
+        detail = `scr=${scanoutId} res=${resourceId} ${r.x},${r.y} ${r.width}x${r.height}`;
         break;
       }
 
@@ -408,6 +437,7 @@ export class VirtioGpu extends VirtioMmio {
           this.readBacking(res, offset + (r.y + row) * stride + r.x * BPP, res.host, dstOff, rowBytes);
         }
         if (!ok) respType = RESP_ERR_INVALID_PARAMETER;
+        detail = `res=${res.id} off=${offset} ${r.x},${r.y} ${r.width}x${r.height} resSz=${res.width}x${res.height}`;
         break;
       }
 
@@ -422,6 +452,10 @@ export class VirtioGpu extends VirtioMmio {
           break;
         }
         this.flushCount++;
+        {
+          const fr = rectAt(HDR_SIZE);
+          detail = `res=${res.id} ${fr.x},${fr.y} ${fr.width}x${fr.height}`;
+        }
         const fb = this.getFramebuffer();
         if (fb && this.onFlush) this.onFlush(fb);
         break;
@@ -437,6 +471,7 @@ export class VirtioGpu extends VirtioMmio {
           respType = RESP_ERR_INVALID_RESOURCE_ID;
           break;
         }
+        detail = `id=${id}`;
         for (const s of this.scanouts) {
           if (s.resourceId === id) {
             s.enabled = false;
@@ -461,6 +496,11 @@ export class VirtioGpu extends VirtioMmio {
         break;
     }
 
+    this.traceLine(
+      (CMD_NAMES[type] ?? 'cmd=0x' + type.toString(16)) +
+        (detail ? ' ' + detail : '') +
+        (respType === RESP_OK_NODATA ? '' : ' -> resp=0x' + respType.toString(16)),
+    );
     rv.setUint32(0, respType, true);
     rv.setUint32(4, flags & FLAG_FENCE, true);
     rv.setBigUint64(8, fenceId, true);

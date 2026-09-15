@@ -215,6 +215,7 @@ test('virtio-gpu：GET_DISPLAY_INFO 报出可用扫描输出并回显 fence', ()
 test('virtio-gpu：2D 全流程（建资源→挂散射表→上屏→搬运→刷新）', () => {
   const seen: GpuFramebuffer[] = [];
   const { dev, ram } = makeEnv((fb) => seen.push(fb));
+  dev.cmdTrace = true; // 顺便验证协议追踪能记录到关键命令
   initDriver(dev);
   const drv = makeDriver(dev, ram);
 
@@ -276,6 +277,16 @@ test('virtio-gpu：2D 全流程（建资源→挂散射表→上屏→搬运→�
   // 7) UNREF 之后不再有画面
   assert.equal(dispType(drv.submit(0, cat(hdr(CMD_RESOURCE_UNREF), u32(1), u32(0)))), RESP_OK_NODATA);
   assert.equal(dev.getFramebuffer(), undefined, '资源释放后扫描输出应解绑');
+
+  // cmdTrace 应完整记录本轮的协议交互（含关键参数）
+  const t = dev.cmdTraceLog.join('\n');
+  assert.ok(t.includes('RESOURCE_CREATE_2D'), '追踪应含建资源');
+  assert.ok(t.includes('fmt=2 64x32'), '追踪应含格式与尺寸');
+  assert.ok(t.includes('ATTACH_BACKING') && t.includes('nr=2'), '追踪应含散射表条目数');
+  assert.ok(t.includes('SET_SCANOUT') && t.includes('res=1'), '追踪应含上屏');
+  assert.ok(t.includes('TRANSFER_TO_HOST_2D'), '追踪应含搬运');
+  assert.ok(t.includes('RESOURCE_FLUSH'), '追踪应含刷新');
+  assert.ok(t.includes('RESOURCE_UNREF'), '追踪应含释放');
 });
 
 test('virtio-gpu：错误路径与光标队列', () => {
