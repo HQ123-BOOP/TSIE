@@ -16,6 +16,8 @@ import { FileDisk } from './dev/disk.ts';
 import { LoopbackBackend } from './dev/net.ts';
 import { ProxyBackend } from './dev/net-proxy.ts';
 import { SlirpBackend } from './dev/net-slirp.ts';
+import { encodeBmp } from './dev/bmp.ts';
+import type { GpuFramebuffer } from './dev/virtio-gpu.ts';
 import { CSR } from './cpu/csr.ts';
 
 interface Args {
@@ -25,6 +27,8 @@ interface Args {
   netdev?: 'loopback' | 'proxy' | 'slirp';
   /** virtio-gpu 显示设备分辨率 */
   gpu?: { width: number; height: number };
+  /** 把 virtio-gpu 的画面写成 BMP 文件 */
+  fbDump?: string;
   /** virtio-9p 共享目录 */
   shared9p?: string;
   proxyHost?: string;
@@ -70,6 +74,8 @@ FreeBSD® (not yet tested).
       --proxy-port <n>      proxy 后端的桥接守护 UDP 端口（默认 7777）
       --gpu <WxH>           挂载 virtio-gpu 显示设备（如 --gpu 1024x768）。
                             guest 侧由内核 virtio_gpu 驱动接管，经 fbdev 控制台输出画面
+      --fb-dump <file>      把 virtio-gpu 的画面写成 BMP（配合 --gpu）。
+                            每次画面刷新写入同一个文件（限流 250ms），运行结束时再落最后一帧
       --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare；
                             guest 侧 mount -t 9p -o trans=virtio,version=9p2000.L
                             hostshare /mnt）
@@ -161,6 +167,9 @@ function parseArgs(argv: string[]): Args {
         args.gpu = { width: Number(m[1]), height: Number(m[2]) };
         break;
       }
+      case '--fb-dump':
+        args.fbDump = resolve(next());
+        break;
       case '-i':
       case '--initrd':
         args.initrd = next();
@@ -251,6 +260,25 @@ async function main(): Promise<number> {
   }
 
   let gpuReported = false;
+  let lastFrame: GpuFramebuffer | undefined;
+  let lastDumpAt = 0;
+  let dumpCount = 0;
+  /** 把当前画面写成 BMP。limit=true 时限流 —— guest 刷屏时画面刷新很快，不限流会把磁盘写爆 */
+  const dumpFrame = (fb: GpuFramebuffer, limit: boolean): void => {
+    if (!args.fbDump) return;
+    const now = Date.now();
+    if (limit && now - lastDumpAt < 250) return;
+    lastDumpAt = now;
+    try {
+      writeFileSync(args.fbDump, encodeBmp(fb));
+      dumpCount++;
+      if (dumpCount === 1 || dumpCount % 20 === 0) {
+        process.stderr.write(`显示: 已写出画面 ${fb.width}x${fb.height} → ${args.fbDump}（第 ${dumpCount} 帧）\n`);
+      }
+    } catch (e) {
+      process.stderr.write(`显示: 写画面失败: ${(e as Error).message}\n`);
+    }
+  };
   let machine: Machine;
   try {
     machine = new Machine({
@@ -261,11 +289,13 @@ async function main(): Promise<number> {
         ? {
             width: args.gpu.width,
             height: args.gpu.height,
-            // 尚无显示前端：首帧尺寸报到 stderr，供无人值守启动验证确认通路已打通
             onFlush: (fb) => {
-              if (gpuReported) return;
-              gpuReported = true;
-              process.stderr.write(`显示: virtio-gpu 首帧就绪 ${fb.width}x${fb.height}（format ${fb.format}）\n`);
+              lastFrame = fb;
+              if (!gpuReported) {
+                gpuReported = true;
+                process.stderr.write(`显示: virtio-gpu 首帧就绪 ${fb.width}x${fb.height}（format ${fb.format}）\n`);
+              }
+              dumpFrame(fb, true);
             },
           }
         : undefined,
@@ -388,6 +418,9 @@ async function main(): Promise<number> {
       },
     });
   }
+
+  // 收尾：限流可能刚好跳过最后一帧，这里强制再落一张，保证磁盘上是最新画面
+  if (lastFrame) dumpFrame(lastFrame, false);
 
   if (args.stats || !machine.cpu.halted) {
     const mips = stats.ips / 1e6;
