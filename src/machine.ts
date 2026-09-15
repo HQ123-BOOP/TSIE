@@ -16,6 +16,7 @@ import { VirtioNet } from './dev/virtio-net.ts';
 import { Virtio9p } from './dev/virtio-9p.ts';
 import { VirtioGpu, type VirtioGpuOptions } from './dev/virtio-gpu.ts';
 import { GoldfishRtc } from './dev/rtc.ts';
+import { CfiFlash } from './dev/flash.ts';
 import type { NetBackend } from './dev/net.ts';
 import type { DiskImage } from './dev/disk.ts';
 import { loadBinary, loadElf, type LoadedImage } from './loader/elf.ts';
@@ -31,6 +32,13 @@ export const VIRT_VIRTIO_NET = 0x10002000n;
 export const VIRT_VIRTIO_9P = 0x10003000n;
 export const VIRT_VIRTIO_GPU = 0x10004000n;
 export const VIRT_RTC = 0x101000n;
+/**
+ * pflash（CFI NOR flash）区域。EDK II 的 RiscVVirtQemu 要求两块各 32MiB：
+ * CODE（只读固件卷）与 VARS（UEFI 变量存储，需要真写）。
+ * 这一对地址与 QEMU virt 的 VIRT_FLASH 布局一致。
+ */
+export const VIRT_FLASH = 0x20000000n;
+export const FLASH_SIZE = 0x2000000n;
 export const VIRT_FIRMWARE = 0x80000000n;
 export const VIRT_KERNEL = 0x80200000n;
 export const VIRT_DTB = 0x82200000n;
@@ -52,6 +60,12 @@ export interface MachineOptions {
   net?: NetBackend;
   /** 显示设备（提供则挂载 virtio-gpu 显卡；guests 侧 win 由内核 virtio_gpu 驱动接管） */
   gpu?: VirtioGpuOptions;
+  /**
+   * pflash 固件卷。给出即挂载一对 CFI NOR flash（各 32MiB）：
+   * code 放固件（EDK2 的 RISCV_VIRT_CODE.fd），vars 是 UEFI 变量存储。
+   * EDK2 强制要求这一对设备，否则 RiscVVirtQemu 直接报错退出。
+   */
+  flash?: { code?: Uint8Array; vars?: Uint8Array };
   /** Host 共享目录（提供则挂载 virtio-9p 设备，guest 内挂载 tag=hostshare） */
   shared?: string;
   /** 9p 挂载 tag（默认 hostshare） */
@@ -118,6 +132,9 @@ export class Machine {
   readonly test: TestFinisher;
   readonly rtc: GoldfishRtc;
   readonly virtio9p?: Virtio9p;
+  /** CFI NOR flash：固件卷（CODE）与 UEFI 变量存储（VARS） */
+  readonly flashCode?: CfiFlash;
+  readonly flashVars?: CfiFlash;
 
   readonly ramBase = VIRT_RAM_BASE;
   readonly ramSize: bigint;
@@ -186,6 +203,15 @@ export class Machine {
     if (opts.gpu) {
       this.gpu = new VirtioGpu(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_GPU, level), opts.gpu);
       this.bus.addDevice(VIRT_VIRTIO_GPU, this.gpu);
+    }
+
+    // CFI NOR flash：EDK II 要求 CODE/VARS 成对出现，各 32MiB，
+    // 且 RISC-V 平台从设备树的 compatible="cfi-flash" 节点发现它们（不走 PCI）
+    if (opts.flash) {
+      this.flashCode = new CfiFlash({ size: Number(FLASH_SIZE), data: opts.flash.code });
+      this.bus.addDevice(VIRT_FLASH, this.flashCode);
+      this.flashVars = new CfiFlash({ size: Number(FLASH_SIZE), data: opts.flash.vars });
+      this.bus.addDevice(VIRT_FLASH + FLASH_SIZE, this.flashVars);
     }
 
     if (opts.shared) {
@@ -419,6 +445,22 @@ export class Machine {
     rtcNode.propReg('reg', [[VIRT_RTC, 0x1000n]]);
     rtcNode.propU32('interrupts', [IRQ_RTC]);
     rtcNode.propU32('interrupt-parent', [2]);
+
+    // CFI NOR flash。放在**根节点**下（QEMU virt 也是这么放的）：根是
+    // #address-cells=2 / #size-cells=2，所以 reg 里每个 bank 恰好 4 个 cell，
+    // 正是 EDK2 VirtNorFlashDeviceTreeLib 期望的 <base_hi base_lo size_hi size_lo>。
+    if (this.flashCode && this.flashVars) {
+      const flashNode = root.addChild(`flash@${VIRT_FLASH.toString(16)}`);
+      flashNode.propStr('compatible', 'cfi-flash');
+      flashNode.propReg('reg', [
+        [VIRT_FLASH, FLASH_SIZE],
+        [VIRT_FLASH + FLASH_SIZE, FLASH_SIZE],
+      ]);
+      flashNode.propU32('bank-width', [4]);
+      flashNode.propU32('device-width', [2]);
+      flashNode.propU32('#address-cells', [1]);
+      flashNode.propU32('#size-cells', [1]);
+    }
 
     return buildDtb(root);
   }

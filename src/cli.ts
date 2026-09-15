@@ -29,6 +29,10 @@ interface Args {
   gpu?: { width: number; height: number };
   /** 把 virtio-gpu 的画面写成 BMP 文件 */
   fbDump?: string;
+  /** pflash 固件卷（EDK2 的 RISCV_VIRT_CODE.fd），给出即挂载一对 CFI NOR flash */
+  flashCode?: string;
+  /** pflash 变量存储（EDK2 的 RISCV_VIRT_VARS.fd） */
+  flashVars?: string;
   /** virtio-9p 共享目录 */
   shared9p?: string;
   proxyHost?: string;
@@ -74,6 +78,10 @@ FreeBSD® (not yet tested).
       --proxy-port <n>      proxy 后端的桥接守护 UDP 端口（默认 7777）
       --gpu <WxH>           挂载 virtio-gpu 显示设备（如 --gpu 1024x768）。
                             guest 侧由内核 virtio_gpu 驱动接管，经 fbdev 控制台输出画面
+      --flash-code <file>   挂载一对 CFI NOR flash（各 32MiB）并载入固件卷，
+                            如 EDK2 的 RISCV_VIRT_CODE.fd（UEFI 固件）
+      --flash-vars <file>   同上，载入 UEFI 变量存储（RISCV_VIRT_VARS.fd）。
+                            EDK2 要求 CODE/VARS 成对提供，缺一会报错
       --fb-dump <file>      把 virtio-gpu 的画面写成 BMP（配合 --gpu）。
                             每次画面刷新写入同一个文件（限流 250ms），运行结束时再落最后一帧
       --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare；
@@ -169,6 +177,12 @@ function parseArgs(argv: string[]): Args {
       }
       case '--fb-dump':
         args.fbDump = resolve(next());
+        break;
+      case '--flash-code':
+        args.flashCode = resolve(next());
+        break;
+      case '--flash-vars':
+        args.flashVars = resolve(next());
         break;
       case '-i':
       case '--initrd':
@@ -285,6 +299,13 @@ async function main(): Promise<number> {
       memSize: args.memory,
       bios: args.bios ? readFile(args.bios) : undefined,
       disk: args.disk ? new FileDisk(args.disk) : undefined,
+      flash:
+        args.flashCode || args.flashVars
+          ? {
+              code: args.flashCode ? new Uint8Array(readFile(args.flashCode)) : undefined,
+              vars: args.flashVars ? new Uint8Array(readFile(args.flashVars)) : undefined,
+            }
+          : undefined,
       gpu: args.gpu
         ? {
             width: args.gpu.width,
