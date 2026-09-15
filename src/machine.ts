@@ -14,6 +14,7 @@ import { TestFinisher } from './dev/test.ts';
 import { VirtioBlk } from './dev/virtio-blk.ts';
 import { VirtioNet } from './dev/virtio-net.ts';
 import { Virtio9p } from './dev/virtio-9p.ts';
+import { VirtioGpu, type VirtioGpuOptions } from './dev/virtio-gpu.ts';
 import { GoldfishRtc } from './dev/rtc.ts';
 import type { NetBackend } from './dev/net.ts';
 import type { DiskImage } from './dev/disk.ts';
@@ -28,6 +29,7 @@ export const VIRT_UART0 = 0x10000000n;
 export const VIRT_VIRTIO = 0x10001000n;
 export const VIRT_VIRTIO_NET = 0x10002000n;
 export const VIRT_VIRTIO_9P = 0x10003000n;
+export const VIRT_VIRTIO_GPU = 0x10004000n;
 export const VIRT_RTC = 0x101000n;
 export const VIRT_FIRMWARE = 0x80000000n;
 export const VIRT_KERNEL = 0x80200000n;
@@ -37,6 +39,7 @@ export const VIRT_DTB = 0x82200000n;
 const IRQ_VIRTIO = 1;
 const IRQ_VIRTIO_NET = 2;
 const IRQ_VIRTIO_9P = 3;
+const IRQ_VIRTIO_GPU = 4;
 const IRQ_UART = 10;
 const IRQ_RTC = 11;
 
@@ -47,6 +50,8 @@ export interface MachineOptions {
   disk?: DiskImage;
   /** 网络后端（提供则挂载 virtio-net 网卡） */
   net?: NetBackend;
+  /** 显示设备（提供则挂载 virtio-gpu 显卡；guests 侧 win 由内核 virtio_gpu 驱动接管） */
+  gpu?: VirtioGpuOptions;
   /** Host 共享目录（提供则挂载 virtio-9p 设备，guest 内挂载 tag=hostshare） */
   shared?: string;
   /** 9p 挂载 tag（默认 hostshare） */
@@ -109,6 +114,7 @@ export class Machine {
   readonly plic: Plic;
   readonly virtio?: VirtioBlk;
   readonly netdev?: VirtioNet;
+  readonly gpu?: VirtioGpu;
   readonly test: TestFinisher;
   readonly rtc: GoldfishRtc;
   readonly virtio9p?: Virtio9p;
@@ -175,6 +181,11 @@ export class Machine {
     if (opts.net) {
       this.netdev = new VirtioNet(this.bus, opts.net, (level) => this.plic.setIrq(IRQ_VIRTIO_NET, level));
       this.bus.addDevice(VIRT_VIRTIO_NET, this.netdev);
+    }
+
+    if (opts.gpu) {
+      this.gpu = new VirtioGpu(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_GPU, level), opts.gpu);
+      this.bus.addDevice(VIRT_VIRTIO_GPU, this.gpu);
     }
 
     if (opts.shared) {
@@ -388,6 +399,14 @@ export class Machine {
       p9Node.propReg('reg', [[VIRT_VIRTIO_9P, 0x1000n]]);
       p9Node.propU32('interrupts', [IRQ_VIRTIO_9P]);
       p9Node.propU32('interrupt-parent', [2]);
+    }
+
+    if (this.gpu) {
+      const gpuNode = soc.addChild(`virtio_mmio@${VIRT_VIRTIO_GPU.toString(16)}`);
+      gpuNode.propStr('compatible', 'virtio,mmio');
+      gpuNode.propReg('reg', [[VIRT_VIRTIO_GPU, 0x1000n]]);
+      gpuNode.propU32('interrupts', [IRQ_VIRTIO_GPU]);
+      gpuNode.propU32('interrupt-parent', [2]);
     }
 
     const testNode = soc.addChild(`test@${VIRT_TEST.toString(16)}`);

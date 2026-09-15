@@ -64,6 +64,12 @@ export class RAM implements Device {
     this.data.set(bytes, Number(offset));
   }
 
+  /** 批量读取到调用方缓冲（设备 DMA 用，避免逐字节走 bus） */
+  readBytes(offset: bigint, dst: Uint8Array): void {
+    const at = Number(offset);
+    dst.set(this.data.subarray(at, at + dst.length));
+  }
+
   /** 批量填充 */
   fill(offset: bigint, length: number, value: number): void {
     this.data.fill(value, Number(offset), Number(offset) + length);

@@ -86,7 +86,21 @@ export class Bus {
 
   readBytes(addr: bigint, length: number): Uint8Array {
     const out = new Uint8Array(length);
-    for (let i = 0; i < length; i++) out[i] = Number(this.read(addr + BigInt(i), 1) & 0xffn);
+    let off = 0;
+    let cur = addr & MASK64;
+    while (off < length) {
+      const [dev, devOff] = this.find(cur);
+      const chunk = Math.min(Number(dev.size - devOff), length - off);
+      if (chunk <= 0) throw new BusError(`zero-length region at ${hex(cur)}`);
+      // RAM 走批量快路径（DMA 搬 MB 级数据时逐字节读完全不可用）
+      if (dev.name === 'ram') {
+        (dev as unknown as { readBytes(o: bigint, b: Uint8Array): void }).readBytes(devOff, out.subarray(off, off + chunk));
+      } else {
+        for (let i = 0; i < chunk; i++) out[off + i] = Number(dev.read(devOff + BigInt(i), 1) & 0xffn);
+      }
+      off += chunk;
+      cur += BigInt(chunk);
+    }
     return out;
   }
 

@@ -43,6 +43,7 @@ export { LoopbackBackend, type NetBackend, type EthFrame } from './dev/net.ts';
 export { ProxyBackend, type ProxyOptions } from './dev/net-proxy.ts';
 export { SlirpBackend, type SlirpOptions } from './dev/net-slirp.ts';
 export { Virtio9p } from './dev/virtio-9p.ts';
+export { VirtioGpu, type VirtioGpuOptions, type GpuFramebuffer } from './dev/virtio-gpu.ts';
 export { NinePServer } from './dev/ninep.ts';
 export { MemoryDisk, FileDisk, SECTOR_SIZE, type DiskImage } from './dev/disk.ts';
 
@@ -57,6 +58,7 @@ export {
   VIRT_PLIC,
   VIRT_UART0,
   VIRT_VIRTIO,
+  VIRT_VIRTIO_GPU,
   VIRT_TEST,
   VIRT_FIRMWARE,
   VIRT_KERNEL,
