@@ -79,27 +79,51 @@ export class VirtioBlk extends VirtioMmio {
     return QUEUE_SIZE;
   }
 
-  protected readConfig(o: number, _size: MemSize): bigint {
+  /**
+   * config 空间读取。
+   *
+   * ⚠️ **必须按字节组装，不能只匹配对齐的 4 字节偏移。** 同一个字段，不同驱动的
+   * 读法不一样：Linux / OpenBSD 用对齐的 32 位读（capacity 低/高各一次 readl），
+   * 而 EDK II 的 `VirtioMmioDeviceRead` 会**逐字节**读那 8 字节 capacity
+   * （实测寄存器追踪是 `R 0x100, 0x101, … 0x107` 连续 8 次 1 字节访问）。
+   *
+   * 只按 0x00/0x04/0x08… 匹配的话，偏移 1/2/3/5/6/7 全部落到 default 返回 0，
+   * 于是 capacity 被读成 **0**，VirtioBlkInit 紧接着
+   * `if (NumSectors == 0) { Status = EFI_UNSUPPORTED; goto Failed; }`，
+   * 写状态 `0x83`(=ACK|DRIVER|FAILED) 放弃 —— UEFI 里磁盘就此消失。
+   * 而 Linux 走对齐读，永远碰不到这些偏移，所以这个洞藏了很久。
+   *
+   * 字段布局（virtio spec §5.2，小端）：
+   *   0x00 u64 capacity        0x08 u32 size_max      0x0c u32 seg_max
+   *   0x10 geometry(u16,u8,u8) 0x14 u32 blk_size      0x18 topology(8B)
+   *   0x20 u8  writeback
+   */
+  protected readConfig(o: number, size: MemSize): bigint {
     const cap = this.disk.sectorCount;
-    switch (o) {
-      case 0x00: return cap & 0xffffffffn; // capacity low
-      case 0x04: return (cap >> 32n) & 0xffffffffn; // capacity high
-      // size_max 必须非 0！我们宣告了 VIRTIO_BLK_F_SIZE_MAX，而 U-Boot 会照这个值
-      // 算单段上限：seg_sec_cnt = size_max / 512，再 blk_per_sg = min(剩余, seg_sec_cnt*seg_max)。
-      // 返回 0 会让 U-Boot 的 blk_per_sg 恒为 0 → while (i < blkcnt) 永不前进 →
-      // 疯狂发零长度读（实测 9.8 万次）后卡死。Linux 不读这个字段，所以只有 U-Boot 中招。
-      case 0x08: return 0x7fffffffn; // size_max（语义：单段不超过这么多字节）
-      case 0x0c: return BigInt(QUEUE_SIZE - 2); // seg_max
-      case 0x10: {
-        // geometry: cylinders(u16) heads(u8) sectors(u8)
-        const cyl = Number(cap) > 0xffff ? 0xffff : Number(cap);
-        return BigInt((cyl << 16) | (16 << 8) | 63);
-      }
-      case 0x14: return 512n; // blk_size
-      case 0x18: return 0n; // topology
-      case 0x20: return 1n; // writeback
-      default: return 0n;
+    const cfg = new Uint8Array(0x24);
+    const dv = new DataView(cfg.buffer);
+    dv.setBigUint64(0x00, cap, true); // capacity（扇区数）
+    // size_max **必须非 0**！我们宣告了 VIRTIO_BLK_F_SIZE_MAX，而 U-Boot 会照它算
+    // 单段上限：seg_sec_cnt = size_max / 512，再 blk_per_sg = min(剩余, seg_sec_cnt*seg_max)。
+    // 返回 0 会让 U-Boot 的 blk_per_sg 恒为 0 → while (i < blkcnt) 永不前进 →
+    // 疯狂发零长度读（实测 9.8 万次）后卡死。Linux 不读这个字段，所以只有 U-Boot 中招。
+    dv.setUint32(0x08, 0x7fffffff, true); // size_max（单段不超过这么多字节）
+    dv.setUint32(0x0c, QUEUE_SIZE - 2, true); // seg_max
+    // geometry: cylinders(u16) heads(u8) sectors(u8)
+    dv.setUint16(0x10, cap > 0xffffn ? 0xffff : Number(cap), true);
+    cfg[0x12] = 16; // heads
+    cfg[0x13] = 63; // sectors
+    dv.setUint32(0x14, 512, true); // blk_size
+    // 0x18 topology 全 0：physical_block_exp / alignment_offset / min_io_size / opt_io_size
+    cfg[0x20] = 1; // writeback（回写缓存开启）
+
+    let v = 0n;
+    for (let i = 0; i < size; i++) {
+      const off = o + i;
+      if (off >= cfg.length) break;
+      v |= BigInt(cfg[off]) << BigInt(8 * i);
     }
+    return v;
   }
 
   protected handleRequest(q: VQueue, headId: number): void {

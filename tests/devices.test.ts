@@ -441,3 +441,68 @@ test('UART：读走 RBR 字节后中断线随 FIFO 排空而撤销', () => {
   uart.read(0n, 1);
   assert.deepEqual(levels, [false], '取走最后一个字节后才撤销');
 });
+
+// ----------------------------------------------------------------------
+// virtio-blk：config 空间必须**按字节**可读，不能只匹配对齐的 4 字节偏移。
+//
+// 回归背景：不同驱动读同一个字段的方式不同。Linux/OpenBSD 用对齐的 32 位读
+// （capacity 低/高各一次 readl），EDK II 的 VirtioMmioDeviceRead 却**逐字节**
+// 读那 8 字节 capacity。旧实现只匹配 0x00/0x04/0x08…，偏移 1/2/3/5/6/7 全落到
+// default 返回 0，capacity 被读成 0，VirtioBlkInit 随即
+//   if (NumSectors == 0) { Status = EFI_UNSUPPORTED; goto Failed; }
+// 并写 0x83(=ACK|DRIVER|FAILED) 放弃，UEFI 里磁盘直接消失。
+// 实机寄存器追踪是 `R 0x100, 0x101, … 0x107` 连续 8 次 1 字节访问。
+// ----------------------------------------------------------------------
+const R_CONFIG = 0x100n;
+
+/** 按 EDK2 的方式逐字节读 config 空间，小端拼成 64 位 */
+function readConfigBytes(dev: VirtioBlk, off: number, len: number): bigint {
+  let v = 0n;
+  for (let i = 0; i < len; i++) {
+    v |= dev.read(R_CONFIG + BigInt(off + i), 1) << BigInt(8 * i);
+  }
+  return v;
+}
+
+test('virtio-blk：逐字节读 capacity 必须得到真实扇区数（EDK II 的读法）', () => {
+  const { dev } = makeVirtio(0xfc000); // 1032192 扇区
+  assert.equal(readConfigBytes(dev, 0, 8), 0xfc000n, '逐字节读 8 字节 capacity');
+  // 中间字节也要对：0xfc000 的低 4 字节是 00 c0 0f 00
+  assert.equal(Number(dev.read(R_CONFIG + 0n, 1)), 0x00, 'capacity 字节 0');
+  assert.equal(Number(dev.read(R_CONFIG + 1n, 1)), 0xc0, 'capacity 字节 1');
+  assert.equal(Number(dev.read(R_CONFIG + 2n, 1)), 0x0f, 'capacity 字节 2');
+  assert.equal(Number(dev.read(R_CONFIG + 3n, 1)), 0x00, 'capacity 字节 3');
+});
+
+test('virtio-blk：对齐的 32/64 位读也要得到同样的值（Linux 的读法）', () => {
+  const { dev } = makeVirtio(0xfc000);
+  assert.equal(Number(dev.read(R_CONFIG, 4)), 0xfc000, '32 位读低半');
+  assert.equal(Number(dev.read(R_CONFIG + 4n, 4)), 0, '32 位读高半');
+  assert.equal(dev.read(R_CONFIG, 8), 0xfc000n, '64 位读');
+  // 两种读法必须一致，否则就是"只照顾了一个消费者"
+  assert.equal(readConfigBytes(dev, 0, 8), dev.read(R_CONFIG, 8), '逐字节 == 64 位读');
+});
+
+test('virtio-blk：跨字段的任意偏移/宽度读都取到正确的字节', () => {
+  const { dev } = makeVirtio(0xfc000);
+  // size_max @0x08 = 0x7fffffff
+  assert.equal(readConfigBytes(dev, 8, 4), 0x7fffffffn, 'size_max');
+  assert.equal(Number(dev.read(R_CONFIG + 8n, 1)), 0xff, 'size_max 字节 0');
+  assert.equal(Number(dev.read(R_CONFIG + 10n, 1)), 0xff, 'size_max 字节 2');
+  // blk_size @0x14 = 512
+  assert.equal(readConfigBytes(dev, 0x14, 4), 512n, 'blk_size');
+  // writeback @0x20 = 1
+  assert.equal(Number(dev.read(R_CONFIG + 0x20n, 1)), 1, 'writeback');
+  // 未定义区读 0，且不越界
+  assert.equal(Number(dev.read(R_CONFIG + 0x30n, 1)), 0, '未定义区应为 0');
+});
+
+test('virtio-blk：每个字段按字节读与按字读结果一致', () => {
+  const { dev } = makeVirtio(0xfc000);
+  for (const off of [0x08, 0x0c, 0x14, 0x18]) {
+    const byByte = readConfigBytes(dev, off, 4);
+    const byWord = dev.read(R_CONFIG + BigInt(off), 4);
+    assert.equal(byByte, byWord, 'offset 0x' + off.toString(16) + ' 两种读法应一致');
+  }
+  assert.equal(readConfigBytes(dev, 0x20, 1), 1n, 'writeback 逐字节读');
+});
