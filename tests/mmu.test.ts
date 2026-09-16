@@ -401,81 +401,74 @@ test('快路径：sfence 按地址失效后重新走页表', () => {
   assert.equal(h.cpu.mmu.load(0x1000000n, 4), 0xcafebaben, '读到新物理页的值');
 });
 
+
 // ----------------------------------------------------------------------
-// 回归：MXR 对**取指**同样有效。
+// 回归：MXR **不影响取指**（只影响加载）。
 //
-// RISC-V 规范 §4.3.1 规定取指在两种情况下允许：页可执行(X)，**或** MXR=1 且页可读(R)。
-// 早先 checkPerm 的取指分支硬要求 X 位、完全忽略 MXR，是个真 bug：
-// OpenBSD/riscv64 的内核映射用 R+W / X=0 的页配 mstatus.MXR=1 取指，
-// 于是 EFI→内核交接跳进 0x84200000（实机 PTE=0x210800e7，R=1 W=1 X=0）时，
-// 我们抛 EXCEPT_RISCV_INST_ACCESS_PAGE_FAULT(cause 12)，内核根本没机会跑。
-// 加载方向的 MXR 本来就有（见上面的用例），只有取指漏了 ——
-// U-Boot 那条路径不开分页，所以这个洞一直没暴露。
+// 规范原文（RISC-V 特权手册 §3.1.6.3）：
+//   "The MXR (Make eXecutable Readable) bit modifies the privilege with which
+//    **loads** access virtual memory. When MXR=0, only loads from pages marked
+//    readable (R=1) will succeed. When MXR=1, loads from pages marked either
+//    readable or executable (R=1 or X=1) will succeed."
+// 注释也点明用途：MXR allows instruction words to be **loaded** from pages
+// marked execute-only —— 方向是「让 load 能读 X-only 页」，**不是**让只读页可执行。
+//
+// 这条负向断言是有来历的：排查 EDK2→OpenBSD 内核交接页错时，我一度以为
+// "MXR=1 时可从只读页取指"，并按此改了取指权限检查（提交 88d7fdc）。
+// 那是错的 —— 取指**只**看 X 位。删除该改动时补上这几条测试，把这个易错点钉死。
 // ----------------------------------------------------------------------
-test('MXR：允许从可读页取指（规范 §4.3.1，OpenBSD 内核映射依赖它）', () => {
+test('MXR：不得让只读页变得可取指（MXR 只管 load，不管 fetch）', () => {
   const h = makeCpu([...halt()]);
   const pt = setupSv39(h);
-  // 只可读、不可执行 —— 正是 OpenBSD 内核代码段的映射方式
-  pt.map(0x1000000n, 0x1000000n, PTE_R | PTE_A | PTE_D, 0);
+  pt.map(0x1000000n, 0x1000000n, PTE_R | PTE_A | PTE_D, 0); // 只读
   enablePaging(h, pt);
 
-  // MXR=0：不可执行 → 取指页故障
-  assert.equal(
-    h.cpu.mmu.translate(0x1000000n, AccessType.Instruction),
-    null,
-    'MXR=0 时不可从只读页取指',
-  );
-  assert.equal(h.cpu.mmu.faultCause, Exc.InstPageFault, '应为取指页故障(cause 12)');
+  // MXR=0：不可取指
+  assert.equal(h.cpu.mmu.translate(0x1000000n, AccessType.Instruction), null);
+  assert.equal(h.cpu.mmu.faultCause, Exc.InstPageFault);
 
-  // MXR=1：可读即可取指
+  // MXR=1：**仍然**不可取指（这是本测试的核心）
   h.cpu.csr.writeRaw(CSR.MSTATUS, SR_MXR);
   syncMmu(h);
   assert.equal(
     h.cpu.mmu.translate(0x1000000n, AccessType.Instruction),
-    0x1000000n,
-    'MXR=1 时应可从只读页取指',
+    null,
+    'MXR=1 也不允许从只读页取指',
   );
+  assert.equal(h.cpu.mmu.faultCause, Exc.InstPageFault);
+  // 但同一页的 load 在 MXR=1 下当然允许（MXR 管的就是这个方向）
+  assert.equal(h.cpu.mmu.translate(0x1000000n, AccessType.Load), 0x1000000n);
+
+  // 快路径同样不能放行：fetch16 也要拒绝
+  assert.equal(h.cpu.mmu.fetch16(0x1000000n), null, 'fetch16 不得放行只读页');
 });
 
-test('MXR：取指仍拒绝既不可读也不可执行的页', () => {
+test('MXR：可执行页始终可取指，无论 MXR 取值', () => {
   const h = makeCpu([...halt()]);
   const pt = setupSv39(h);
-  // 只可写（W=1,R=0 在 RISC-V 里是非法组合，所以用纯 RW 之外的合法页：仅 A/D 无权限位）
-  pt.map(0x2000000n, 0x2000000n, PTE_A | PTE_D, 0); // 无 R/W/X → 非法页表项
+  pt.map(0x2000000n, 0x2000000n, PTE_X | PTE_A, 0); // 只可执行
   enablePaging(h, pt);
+  assert.equal(h.cpu.mmu.translate(0x2000000n, AccessType.Instruction), 0x2000000n);
   h.cpu.csr.writeRaw(CSR.MSTATUS, SR_MXR);
   syncMmu(h);
-  assert.equal(
-    h.cpu.mmu.translate(0x2000000n, AccessType.Instruction),
-    null,
-    'MXR 不能让非法页变得可取指',
-  );
+  assert.equal(h.cpu.mmu.translate(0x2000000n, AccessType.Instruction), 0x2000000n);
+  // 而 load 需要 MXR：X-only 页在 MXR=0 时不可读
+  h.cpu.csr.writeRaw(CSR.MSTATUS, 0n);
+  syncMmu(h);
+  assert.equal(h.cpu.mmu.translate(0x2000000n, AccessType.Load), null, 'MXR=0 时不可读 X-only 页');
+  h.cpu.csr.writeRaw(CSR.MSTATUS, SR_MXR);
+  syncMmu(h);
+  assert.equal(h.cpu.mmu.translate(0x2000000n, AccessType.Load), 0x2000000n, 'MXR=1 时可读');
 });
 
-test('MXR：可写但不可执行的超级页在 MXR=1 下可以取指（OpenBSD 内核 RW 段）', () => {
+test('X=0 页即使可读可写也不可取指（OpenBSD 内核页 PTE=0x210800e7 的情形）', () => {
   const h = makeCpu([...halt()]);
   const pt = setupSv39(h);
-  // 实机 OpenBSD 页表就是 0xe7 = V|R|W|A|D（X=0），2MB 超级页。
-  // 地址取测试 RAM 范围内（TEST_BASE=0x80000000, 4MB）的 2MB 对齐页，
-  // 否则 fetch16 会因物理地址无 RAM 支撑而报 access fault —— 那是测试环境问题，不是被测行为。
+  // 实机 OpenBSD 页表项：V|R|W|G|A|D，唯独没有 X
   const A = 0x80200000n;
   pt.map(A, A, PTE_R | PTE_W | PTE_A | PTE_D, 1); // 2MB 超级页
   enablePaging(h, pt);
-  h.cpu.csr.writeRaw(CSR.MSTATUS, SR_MXR);
-  syncMmu(h);
-  assert.equal(
-    h.cpu.mmu.translate(A, AccessType.Instruction),
-    A,
-    'R+W / X=0 的超级页在 MXR=1 下应可取指（实机 0x84200000 的 PTE 正是 0x210800e7）',
-  );
-  // 同页的数据访问当然也允许
-  assert.equal(h.cpu.mmu.translate(A, AccessType.Load), A);
-  // 取指路径本身也要认这条规则（不只是 translate）
-  assert.notEqual(h.cpu.mmu.fetch16(A), null, 'fetch16 也应成功');
-
-  // MXR=0 时同一页必须拒绝取指（否则就是把权限检查改宽了）
-  h.cpu.csr.writeRaw(CSR.MSTATUS, 0n);
-  syncMmu(h);
-  assert.equal(h.cpu.mmu.fetch16(A), null, 'MXR=0 时不可从 RW 页取指');
-  assert.equal(h.cpu.mmu.faultCause, Exc.InstPageFault, '应为取指页故障');
+  assert.equal(h.cpu.mmu.translate(A, AccessType.Load), A, '数据访问正常');
+  assert.equal(h.cpu.mmu.translate(A, AccessType.Instruction), null, '取指必须被拒（X=0）');
+  assert.equal(h.cpu.mmu.faultCause, Exc.InstPageFault);
 });

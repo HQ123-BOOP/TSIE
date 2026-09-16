@@ -155,8 +155,6 @@ export class Mmu {
   private fUokL = false;
   private fSokL = false;
   private fMxrL = false;
-  /** 取指快路径的 MXR（MXR=1 时取指可走可读页） */
-  private fMxrI = false;
 
   private recalcFastPerms(): void {
     const m = this._mstatus;
@@ -170,7 +168,6 @@ export class Mmu {
     this.fUokL = eL === Priv.U || (eL === Priv.S && sum);
     this.fSokL = eL !== Priv.U;
     this.fMxrL = (m & SR_MXR) !== 0n;
-    this.fMxrI = (m & SR_MXR) !== 0n;
   }
 
   /** TLB 键：vpn*65536 + asid（bigint；flushBy 用 key>>16 反解 vpn） */
@@ -254,23 +251,22 @@ export class Mmu {
   private checkPerm(prot: number, effPriv: PrivLevel, access: AccessTypeValue): boolean {
     if ((prot & Number(PTE_U)) === 0 && effPriv === Priv.U) return false;
     if ((prot & Number(PTE_U)) !== 0 && effPriv === Priv.S && (this.mstatus & SR_SUM) === 0n) return false;
-    const mxr = (this.mstatus & SR_MXR) !== 0n;
-    if (access === AccessType.Instruction) {
-      // RISC-V 规范 §4.3.1：取指在「页可执行」**或**「MXR=1 且页可读」时允许。
-      //
-      // ⚠️ 早先这里硬要求 X 位、完全忽略 MXR，是个真 bug：
-      // OpenBSD/riscv64 的内核映射用 R+W / X=0 的页配 mstatus.MXR=1 来取指，
-      // 于是 EFI→内核交接跳进 0x84200000（PTE=0x210800e7，R=1 W=1 X=0）时，
-      // 我们抛 EXCEPT_RISCV_INST_ACCESS_PAGE_FAULT(cause 12)。
-      // 而**加载路径本来就有 MXR 支持**（见 fMxrL），只有取指漏了 —— 典型的
-      // 「一个消费者没覆盖到」。U-Boot 那条路径不开分页，所以从没暴露。
-      const executable = (prot & Number(PTE_X)) !== 0;
-      const readableViaMxr = mxr && (prot & Number(PTE_R)) !== 0;
-      return executable || readableViaMxr;
-    }
+    // ⚠️ 取指**只**看 X 位，与 MXR 无关。
+    //
+    // 规范原文（特权手册 §3.1.6.3）：
+    //   "The MXR (Make eXecutable Readable) bit modifies the privilege with which
+    //    **loads** access virtual memory. When MXR=0, only loads from pages marked
+    //    readable (R=1) will succeed. When MXR=1, loads from pages marked either
+    //    readable or executable (R=1 or X=1) will succeed."
+    // MXR 的作用方向是「让 load 能读 X-only 页」（注释里也写明 MXR allows
+    // instruction words to be **loaded** from execute-only pages），**不是**让只读页
+    // 可执行。所以这里绝不能把 MXR 引入取指判定。
+    //
+    // 曾经误以为 MXR 能放行取指而改过一次（提交 88d7fdc），那是错的，已改回。
+    if (access === AccessType.Instruction) return (prot & Number(PTE_X)) !== 0;
     if (access === AccessType.Load) {
       const readable = (prot & Number(PTE_R)) !== 0;
-      const executable = (prot & Number(PTE_X)) !== 0 && mxr;
+      const executable = (prot & Number(PTE_X)) !== 0 && (this.mstatus & SR_MXR) !== 0n;
       return readable || executable;
     }
     return (prot & Number(PTE_W)) !== 0;
@@ -446,9 +442,8 @@ export class Mmu {
       const fp = this.fastCur.get(Number(vaddr >> PAGE_SHIFT));
       if (fp !== undefined) {
         const p = fp.prot;
-        // 取指：X 位满足，或 MXR=1 且 R 位满足（规范 §4.3.1）
-        const okExec = (p & 8) !== 0 || (this.fMxrI && (p & 2) !== 0);
-        if (okExec && ((p & 16) !== 0 ? this.fUokI : this.fSokI)) {
+        // 取指只看 X 位（MXR 不影响取指，见 checkPerm 的说明）
+        if ((p & 8) !== 0 && ((p & 16) !== 0 ? this.fUokI : this.fSokI)) {
           return fp.view.getUint16(fp.off + Number(vaddr & 0xfffn), true);
         }
         // 权限不满足 → 落慢路径产生正确的 page fault（不能静默放行）
