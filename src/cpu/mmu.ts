@@ -155,6 +155,8 @@ export class Mmu {
   private fUokL = false;
   private fSokL = false;
   private fMxrL = false;
+  /** 取指快路径的 MXR（MXR=1 时取指可走可读页） */
+  private fMxrI = false;
 
   private recalcFastPerms(): void {
     const m = this._mstatus;
@@ -168,6 +170,7 @@ export class Mmu {
     this.fUokL = eL === Priv.U || (eL === Priv.S && sum);
     this.fSokL = eL !== Priv.U;
     this.fMxrL = (m & SR_MXR) !== 0n;
+    this.fMxrI = (m & SR_MXR) !== 0n;
   }
 
   /** TLB 键：vpn*65536 + asid（bigint；flushBy 用 key>>16 反解 vpn） */
@@ -251,10 +254,23 @@ export class Mmu {
   private checkPerm(prot: number, effPriv: PrivLevel, access: AccessTypeValue): boolean {
     if ((prot & Number(PTE_U)) === 0 && effPriv === Priv.U) return false;
     if ((prot & Number(PTE_U)) !== 0 && effPriv === Priv.S && (this.mstatus & SR_SUM) === 0n) return false;
-    if (access === AccessType.Instruction) return (prot & Number(PTE_X)) !== 0;
+    const mxr = (this.mstatus & SR_MXR) !== 0n;
+    if (access === AccessType.Instruction) {
+      // RISC-V 规范 §4.3.1：取指在「页可执行」**或**「MXR=1 且页可读」时允许。
+      //
+      // ⚠️ 早先这里硬要求 X 位、完全忽略 MXR，是个真 bug：
+      // OpenBSD/riscv64 的内核映射用 R+W / X=0 的页配 mstatus.MXR=1 来取指，
+      // 于是 EFI→内核交接跳进 0x84200000（PTE=0x210800e7，R=1 W=1 X=0）时，
+      // 我们抛 EXCEPT_RISCV_INST_ACCESS_PAGE_FAULT(cause 12)。
+      // 而**加载路径本来就有 MXR 支持**（见 fMxrL），只有取指漏了 —— 典型的
+      // 「一个消费者没覆盖到」。U-Boot 那条路径不开分页，所以从没暴露。
+      const executable = (prot & Number(PTE_X)) !== 0;
+      const readableViaMxr = mxr && (prot & Number(PTE_R)) !== 0;
+      return executable || readableViaMxr;
+    }
     if (access === AccessType.Load) {
       const readable = (prot & Number(PTE_R)) !== 0;
-      const executable = (prot & Number(PTE_X)) !== 0 && (this.mstatus & SR_MXR) !== 0n;
+      const executable = (prot & Number(PTE_X)) !== 0 && mxr;
       return readable || executable;
     }
     return (prot & Number(PTE_W)) !== 0;
@@ -303,6 +319,9 @@ export class Mmu {
     const levels = mode === 8 ? 3 : 4;
     let base = (this.satp & PTE_PPN_MASK) << PAGE_SHIFT;
     this.stats.walks++;
+    // ⚠️ 必须在这里清空：早先只在 fault() 里清，导致**成功的 walk 会累积残留**，
+    // 于是故障记录附带的是上一次成功 walk 的轨迹（地址对不上，会把人带偏）。
+    this.lastWalkTrace.length = 0;
 
     for (let i = levels - 1; i >= 0; i--) {
       const vpn = Number((vaddr >> BigInt(12 + 9 * i)) & 0x1ffn);
@@ -311,7 +330,10 @@ export class Mmu {
       try {
         pte = this.bus.read(pteAddr, 8);
       } catch (e) {
-        if (e instanceof BusError) return this.fault(faultCause, vaddr);
+        if (e instanceof BusError) {
+          this.lastWalkTrace.push(`  !! 读 PTE 越界（BUSERR）@L${i}`);
+          return this.fault(faultCause, vaddr);
+        }
         throw e;
       }
       if (this.debug && this.lastWalkTrace.length < 40) {
@@ -322,6 +344,11 @@ export class Mmu {
 
       const prot = Number(pte & 0xffn);
       if ((prot & 1) === 0 || ((prot & Number(PTE_W)) !== 0 && (prot & Number(PTE_R)) === 0)) {
+        if (this.lastWalkTrace.length < 40) {
+          this.lastWalkTrace.push(
+            `  !! L${i} PTE 非法：V=${prot & 1} W=${(prot >> 2) & 1} R=${(prot >> 1) & 1}`,
+          );
+        }
         return this.fault(faultCause, vaddr);
       }
       const isLeaf = (pte & PTE_R) !== 0n || (pte & PTE_X) !== 0n;
@@ -331,11 +358,25 @@ export class Mmu {
       }
 
       // 叶子页表项：权限检查
-      if (!this.checkPerm(prot, effPriv, access)) return this.fault(faultCause, vaddr);
+      if (!this.checkPerm(prot, effPriv, access)) {
+        if (this.lastWalkTrace.length < 40) {
+          this.lastWalkTrace.push(
+            `  !! L${i} 权限不足：prot=0x${prot.toString(16)} U=${(prot >> 4) & 1} ` +
+              `R=${(prot >> 1) & 1} W=${(prot >> 2) & 1} X=${(prot >> 3) & 1} ` +
+              `effPriv=${effPriv} access=${access} mstatus=0x${this._mstatus.toString(16)}`,
+          );
+        }
+        return this.fault(faultCause, vaddr);
+      }
 
       const ppn = (pte >> 10n) & PTE_PPN_MASK;
       if (i > 0 && (ppn & ((1n << BigInt(9 * i)) - 1n)) !== 0n) {
         // 非对齐超级页
+        if (this.lastWalkTrace.length < 40) {
+          this.lastWalkTrace.push(
+            `  !! L${i} 非对齐超级页：ppn=0x${ppn.toString(16)} 需低 ${9 * i} 位为 0`,
+          );
+        }
         return this.fault(faultCause, vaddr);
       }
 
@@ -405,7 +446,9 @@ export class Mmu {
       const fp = this.fastCur.get(Number(vaddr >> PAGE_SHIFT));
       if (fp !== undefined) {
         const p = fp.prot;
-        if ((p & 8) !== 0 && ((p & 16) !== 0 ? this.fUokI : this.fSokI)) {
+        // 取指：X 位满足，或 MXR=1 且 R 位满足（规范 §4.3.1）
+        const okExec = (p & 8) !== 0 || (this.fMxrI && (p & 2) !== 0);
+        if (okExec && ((p & 16) !== 0 ? this.fUokI : this.fSokI)) {
           return fp.view.getUint16(fp.off + Number(vaddr & 0xfffn), true);
         }
         // 权限不满足 → 落慢路径产生正确的 page fault（不能静默放行）
