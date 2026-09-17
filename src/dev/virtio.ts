@@ -36,6 +36,19 @@ export interface ChainDesc {
 export type RingName = 'desc' | 'driver' | 'device';
 
 /**
+ * 设备逻辑侧能用的队列/内存操作 —— 由传输层提供。
+ *
+ * 具体设备（virtio-gpu 等）的逻辑写在「与传输无关的 core 类」里，两个传输
+ * （VirtioMmio / VirtioPci）各自把 core 接到 VirtioDevice 上；core 通过这个
+ * 窄接口做描述符链遍历与 used 环回写，不需要知道寄存器怎么排。
+ */
+export interface VirtioQueueOps {
+  readonly bus: Bus;
+  collectChain(q: VQueue, headId: number): ChainDesc[];
+  pushUsed(q: VQueue, id: number, len: number): void;
+}
+
+/**
  * VirtIO 传输层公共基类 —— 「与寄存器怎么排无关」的那一半：特性协商状态、
  * virtqueue 状态机、avail/used 环遍历、电平中断（PLIC 语义：置位后由 guest 应答撤线）。
  *
@@ -45,7 +58,8 @@ export type RingName = 'desc' | 'driver' | 'device';
  * 设备类型差异（DeviceID、特性集、config 空间、队列数量与请求语义）由子类提供。
  */
 export abstract class VirtioDevice {
-  protected readonly bus: Bus;
+  /** 物理总线：core 侧要按 GPA 直接读写 guest 内存（virtio 的像素/请求体不进队列） */
+  readonly bus: Bus;
   protected readonly irq: IrqLine | undefined;
 
   protected status = 0;
@@ -70,6 +84,10 @@ export abstract class VirtioDevice {
   protected abstract queueSizeMax(): number;
   /** 设备配置空间读（offset 相对设备配置区起点，与传输无关） */
   protected abstract readConfig(offset: number, size: MemSize): bigint;
+  /** 设备配置空间长度：PCI 传输要写进 device cfg 能力结构；MMIO 传输隐式占 0x100..0x200 */
+  protected configSize(): number {
+    return 0x100;
+  }
   /** 处理 avail 环上一个请求（headId = head 描述符下标），完成后必须 pushUsed */
   protected abstract handleRequest(q: VQueue, headId: number): void;
 
@@ -195,8 +213,8 @@ export abstract class VirtioDevice {
     }
   }
 
-  /** 收集描述符链（展开 indirect） */
-  protected collectChain(q: VQueue, headId: number): ChainDesc[] {
+  /** 收集描述符链（展开 indirect）；VirtioQueueOps 的一部分，供设备 core 调用 */
+  collectChain(q: VQueue, headId: number): ChainDesc[] {
     const out: ChainDesc[] = [];
     let id = headId;
     let guard = 0;
@@ -229,7 +247,7 @@ export abstract class VirtioDevice {
   }
 
   /** 把一个请求完成回写到 used 环（id=head 描述符下标，len=写入字节数） */
-  protected pushUsed(q: VQueue, id: number, len: number): void {
+  pushUsed(q: VQueue, id: number, len: number): void {
     const usedIdx = this.mem16(q.device + 2n);
     const slot = usedIdx % q.num;
     const elemAddr = q.device + BigInt(4 + slot * 8);
