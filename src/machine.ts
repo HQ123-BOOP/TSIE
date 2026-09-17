@@ -14,7 +14,8 @@ import { TestFinisher } from './dev/test.ts';
 import { VirtioBlk } from './dev/virtio-blk.ts';
 import { VirtioNet } from './dev/virtio-net.ts';
 import { Virtio9p } from './dev/virtio-9p.ts';
-import { VirtioGpu, type VirtioGpuOptions } from './dev/virtio-gpu.ts';
+import { VirtioGpu, VirtioGpuPci, type VirtioGpuOptions } from './dev/virtio-gpu.ts';
+import { PciHostBridge, type PciOptions } from './dev/pci/ecam.ts';
 import { GoldfishRtc } from './dev/rtc.ts';
 import { CfiFlash } from './dev/flash.ts';
 import type { NetBackend } from './dev/net.ts';
@@ -33,6 +34,18 @@ export const VIRT_VIRTIO_9P = 0x10003000n;
 export const VIRT_VIRTIO_GPU = 0x10004000n;
 export const VIRT_RTC = 0x101000n;
 /**
+ * PCIe（与 QEMU riscv `virt` 的内存映射逐项对齐）：
+ * PIO 64KiB、ECAM 256MiB（每功能 4KiB）、32 位 MMIO 1GiB。
+ * guest 侧 EDK2 的 PciHostBridgeLib / PciPcdProducerLib 都是 DTB 驱动，
+ * 所以这一组地址同时就是 DTB 里 `ranges` 的内容。
+ */
+export const VIRT_PCIE_PIO = 0x3000000n;
+export const VIRT_PCIE_PIO_SIZE = 0x10000n;
+export const VIRT_PCIE_ECAM = 0x30000000n;
+export const VIRT_PCIE_ECAM_SIZE = 0x10000000n;
+export const VIRT_PCIE_MMIO = 0x40000000n;
+export const VIRT_PCIE_MMIO_SIZE = 0x40000000n;
+/**
  * pflash（CFI NOR flash）区域。EDK II 的 RiscVVirtQemu 要求两块各 32MiB：
  * CODE（只读固件卷）与 VARS（UEFI 变量存储，需要真写）。
  * 这一对地址与 QEMU virt 的 VIRT_FLASH 布局一致。
@@ -50,6 +63,10 @@ const IRQ_VIRTIO_9P = 3;
 const IRQ_VIRTIO_GPU = 4;
 const IRQ_UART = 10;
 const IRQ_RTC = 11;
+/** PCIe INTA..INTD（设备 N 的 INTA = IRQ_PCIE + N，与 QEMU 同款 swizzle） */
+export const IRQ_PCIE = 32;
+/** PLIC 中断源数（QEMU virt = 96；PCIe 用到 32..35，必须放开） */
+const PLIC_SOURCES = 96;
 
 export interface MachineOptions {
   /** 内存大小（字节），默认 512 MiB */
@@ -60,6 +77,13 @@ export interface MachineOptions {
   net?: NetBackend;
   /** 显示设备（提供则挂载 virtio-gpu 显卡；guests 侧 win 由内核 virtio_gpu 驱动接管） */
   gpu?: VirtioGpuOptions;
+  /**
+   * PCIe 主机桥。给了就把显卡挂成 **PCI 显示设备**（默认），这样 UEFI 的
+   * `IsPciDisplay` 会在 `PlatformBootManagerBeforeConsole()` 里主动 connect 它，
+   * GOP 先于 `AddOutput()` 出现 —— 启动 logo 不需要任何平台补丁。
+   * 传 `false` 则维持 virtio-mmio。
+   */
+  pci?: PciOptions | boolean;
   /**
    * pflash 固件卷。给出即挂载一对 CFI NOR flash（各 32MiB）：
    * code 放固件（EDK2 的 RISCV_VIRT_CODE.fd），vars 是 UEFI 变量存储。
@@ -128,7 +152,11 @@ export class Machine {
   readonly plic: Plic;
   readonly virtio?: VirtioBlk;
   readonly netdev?: VirtioNet;
-  readonly gpu?: VirtioGpu;
+  readonly gpu?: VirtioGpu | VirtioGpuPci;
+  /** PCIe 主机桥（给了 pci 选项才有） */
+  readonly pci?: PciHostBridge;
+  /** 显卡挂在 PCI 上（true）还是 virtio-mmio 上（false） */
+  readonly gpuOnPci: boolean;
   readonly test: TestFinisher;
   readonly rtc: GoldfishRtc;
   readonly virtio9p?: Virtio9p;
@@ -168,7 +196,7 @@ export class Machine {
     this.ram = new RAM(this.ramSize);
     this.bus.addDevice(this.ramBase, this.ram);
     this.bus.addDevice(VIRT_CLINT, this.clint);
-    this.plic = new Plic(32, 2);
+    this.plic = new Plic(PLIC_SOURCES, 2);
     this.bus.addDevice(VIRT_PLIC, this.plic);
 
     this.uart = new Uart({
@@ -200,9 +228,32 @@ export class Machine {
       this.bus.addDevice(VIRT_VIRTIO_NET, this.netdev);
     }
 
+    // PCIe 主机桥：ECAM 是一段内存映射的配置空间；PIO / MMIO 两个窗口不预先占位 ——
+    // BAR 落定后由桥用 bus.addDevice() 按实际地址逐块注册（同一窗口内多个 BAR 不重叠）。
+    const pciOpts =
+      opts.pci === undefined || opts.pci === false ? undefined : opts.pci === true ? {} : opts.pci;
+    if (pciOpts) {
+      this.pci = new PciHostBridge(this.bus, {
+        ecam: VIRT_PCIE_ECAM,
+        busCount: Number(VIRT_PCIE_ECAM_SIZE / 0x100000n),
+        mmio: { base: VIRT_PCIE_MMIO, size: VIRT_PCIE_MMIO_SIZE },
+        io: { base: VIRT_PCIE_PIO, size: VIRT_PCIE_PIO_SIZE },
+      });
+      this.bus.addDevice(VIRT_PCIE_ECAM, this.pci);
+    }
+
+    const gpuWantsPci = pciOpts !== undefined && pciOpts.gpu !== false;
+    this.gpuOnPci = gpuWantsPci;
     if (opts.gpu) {
-      this.gpu = new VirtioGpu(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_GPU, level), opts.gpu);
-      this.bus.addDevice(VIRT_VIRTIO_GPU, this.gpu);
+      if (gpuWantsPci) {
+        // 设备 0 的 INTA = PLIC 源 32（见 DTB 的 interrupt-map）
+        const g = new VirtioGpuPci(this.bus, (level) => this.plic.setIrq(IRQ_PCIE, level), 0, 0, opts.gpu);
+        this.gpu = g;
+        this.pci!.addFunction(0, 0, g);
+      } else {
+        this.gpu = new VirtioGpu(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_GPU, level), opts.gpu);
+        this.bus.addDevice(VIRT_VIRTIO_GPU, this.gpu);
+      }
     }
 
     // CFI NOR flash：EDK II 要求 CODE/VARS 成对出现，各 32MiB，
@@ -385,7 +436,7 @@ export class Machine {
     plicNode.propU32('#interrupt-cells', [1]);
     plicNode.propEmpty('interrupt-controller');
     plicNode.propStr('compatible', 'riscv,plic0');
-    plicNode.propU32('riscv,ndev', [32]);
+    plicNode.propU32('riscv,ndev', [PLIC_SOURCES - 1]);
     // 顺序必须与 PLIC 的上下文编号一致：上下文 0 = hart0 M 模式，
     // 上下文 1 = hart0 S 模式（QEMU virt 的 "MS" 配置）。
     // 曾把 SExternal 写在前面，导致 Linux 把 S 模式上下文认成 index 0，
@@ -427,12 +478,46 @@ export class Machine {
       p9Node.propU32('interrupt-parent', [2]);
     }
 
-    if (this.gpu) {
+    if (this.gpu && !this.gpuOnPci) {
       const gpuNode = soc.addChild(`virtio_mmio@${VIRT_VIRTIO_GPU.toString(16)}`);
       gpuNode.propStr('compatible', 'virtio,mmio');
       gpuNode.propReg('reg', [[VIRT_VIRTIO_GPU, 0x1000n]]);
       gpuNode.propU32('interrupts', [IRQ_VIRTIO_GPU]);
       gpuNode.propU32('interrupt-parent', [2]);
+    }
+
+    // PCIe 主机桥节点。EDK2 的 FdtPciHostBridgeLib / FdtPciPcdProducerLib 都按
+    // compatible = "pci-host-ecam-generic" 找它，所以这个节点就是固件侧的全部契约：
+    //   * reg 必须恰好 16 字节（= 2×UINT64，前 8 字节是 ECAM 基址）；
+    //   * ranges 必须「先 I/O 后 32 位 MMIO」—— PcdProducerLib 只认第一条 I/O 记录来算
+    //     PcdPciIoTranslation；每条 7 个 cell（1 类型 + 2 子地址 + 2 父地址 + 2 长度），
+    //     正好等于 EDK2 那个 packed 的 DTB_PCI_HOST_RANGE_RECORD（28 字节）。
+    if (this.pci) {
+      const pciNode = soc.addChild(`pci@${VIRT_PCIE_ECAM.toString(16)}`);
+      pciNode.propU32('#address-cells', [3]);
+      pciNode.propU32('#size-cells', [2]);
+      pciNode.propU32('#interrupt-cells', [1]);
+      pciNode.propStr('compatible', 'pci-host-ecam-generic');
+      pciNode.propStr('device_type', 'pci');
+      pciNode.propU32('linux,pci-domain', [0]);
+      pciNode.propEmpty('dma-coherent');
+      pciNode.propReg('reg', [[VIRT_PCIE_ECAM, VIRT_PCIE_ECAM_SIZE]]);
+      pciNode.propU32('bus-range', [0, 0xff]);
+      pciNode.propU32('ranges', [
+        // 类型        子地址hi   子地址lo    父地址hi   父地址lo    长度hi     长度lo
+        0x01000000, 0x00000000, 0x00000000, 0x00000000, 0x03000000, 0x00000000, 0x00010000,
+        0x02000000, 0x00000000, 0x40000000, 0x00000000, 0x40000000, 0x00000000, 0x40000000,
+      ]);
+      // INTA..INTD 的 swizzle 与 QEMU 一致：设备 N 的 pin P → PLIC 源 32+((P+N)%4)。
+      // 表只列 4 个设备，靠 interrupt-map-mask 的 11..12 位把地址折叠回来。
+      pciNode.propU32('interrupt-map-mask', [0x1800, 0, 0, 0x7]);
+      const imap: number[] = [];
+      for (let dev = 0; dev < 4; dev++) {
+        for (let pin = 0; pin < 4; pin++) {
+          imap.push(dev * 0x800, 0, 0, pin + 1, 2 /* PLIC phandle */, IRQ_PCIE + ((pin + dev) % 4));
+        }
+      }
+      pciNode.propU32('interrupt-map', imap);
     }
 
     const testNode = soc.addChild(`test@${VIRT_TEST.toString(16)}`);

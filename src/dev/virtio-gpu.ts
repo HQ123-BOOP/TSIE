@@ -5,7 +5,9 @@
 import type { Bus } from '../mem/bus.ts';
 import type { MemSize } from '../mem/types.ts';
 import type { IrqLine } from './uart.ts';
-import { VirtioMmio, type ChainDesc, type VQueue, VIRTIO_F_VERSION_1 } from './virtio-mmio.ts';
+import type { ChainDesc, VQueue, VirtioQueueOps } from './virtio.ts';
+import { VirtioMmio, VIRTIO_F_VERSION_1 } from './virtio-mmio.ts';
+import { VirtioPci } from './pci/virtio-pci.ts';
 
 // --- 控制队列命令（virtio spec §5.7.6）---
 const CMD_GET_DISPLAY_INFO = 0x0100;
@@ -106,44 +108,51 @@ interface Scanout {
   height: number;
 }
 
+export type GpuStats = {
+  commands: number;
+  flushes: number;
+  resources: number;
+};
+
 /**
- * VirtIO-MMIO 显示设备（virtio-gpu，DeviceID=16，virtio spec §5.7）。
+ * virtio-gpu 的**设备逻辑**，与传输无关。
  *
- * 只实现 2D 命令子集 —— 目标是让 Linux 的 virtio_gpu (DRM/KMS) 驱动拿到一个可用的
- * connector/CRTC，在 DRM_FBDEV_EMULATION 下产出 /dev/fb0，再由 FRAMEBUFFER_CONSOLE
- * 把文本控制台上屏。3D（VIRGL / blob resource / capset）一律不宣告，驱动不会来问。
+ * 只实现 2D 命令子集 —— 目标是让 guest 侧 virtio_gpu (DRM/KMS) / UEFI 的
+ * VirtioGpuDxe 拿到一个可用的 connector/CRTC：在 DRM_FBDEV_EMULATION 下产出
+ * /dev/fb0，再由 FRAMEBUFFER_CONSOLE 把文本控制台上屏。3D（VIRGL / blob
+ * resource / capset）一律不宣告，驱动不会来问。
  *
- * 与块设备的本质差别：**像素不进 virtqueue**。guest 用 RESOURCE_ATTACH_BACKING 把像素
- * buffer 的物理地址（散射表）交给设备，TRANSFER_TO_HOST_2D 时设备按 GPA 直接读 guest RAM，
- * 队列里只走几十字节的命令结构体。因此画面前端拿到的是 host 侧副本的快照。
+ * 与块设备的本质差别：**像素不进 virtqueue**。guest 用 RESOURCE_ATTACH_BACKING 把
+ * 像素 buffer 的物理地址（散射表）交给设备，TRANSFER_TO_HOST_2D 时设备按 GPA
+ * 直接读 guest RAM，队列里只走几十字节的命令结构体。因此画面前端拿到的是
+ * host 侧副本的快照。
  *
- * 队列：0 = controlq（上述命令），1 = cursorq（光标，本实现只应答不绘制）。
+ * 传输侧（VirtioMmio / VirtioPci）只把寄存器访问映射到这个 core 上，
+ * 通过 VirtioQueueOps 提供描述符链遍历与 used 环回写。
  */
-export class VirtioGpu extends VirtioMmio {
-  readonly name = 'virtio-gpu';
+export class VirtioGpuCore {
+  /** 设备 config 空间长度（PCI 传输要写进 device cfg 能力结构） */
+  static readonly CONFIG_SIZE = CONFIG_SIZE;
+
+  private readonly resources = new Map<number, GpuResource>();
+  private readonly scanouts: Scanout[] = [];
 
   private readonly width: number;
   private readonly height: number;
   private readonly numScanouts: number;
   private readonly onFlush?: (fb: GpuFramebuffer) => void;
 
-  private readonly resources = new Map<number, GpuResource>();
-  private readonly scanouts: Scanout[] = [];
-
   private cmdCount = 0;
   private flushCount = 0;
 
-  /** 调试：记录控制队列命令（设备侧协议追踪，最多 200 条）。与基类的 MMIO trace 相互独立 */
+  /** 调试：记录控制队列命令（设备侧协议追踪，最多 200 条）。与传输层的 MMIO trace 相互独立 */
   cmdTrace = false;
   readonly cmdTraceLog: string[] = [];
-  private traceLine(s: string): void {
-    if (!this.cmdTrace || this.cmdTraceLog.length >= 200) return;
-    this.cmdTraceLog.push(s);
-  }
 
-  constructor(bus: Bus, irq: IrqLine | undefined, opts: VirtioGpuOptions = {}) {
-    // 两队列：controlq + cursorq（Linux virtio_gpu 固定申请 2 个，少一个 probe 就失败）
-    super(bus, irq, 2, QUEUE_SIZE);
+  constructor(
+    private readonly bus: Bus,
+    opts: VirtioGpuOptions = {},
+  ) {
     this.width = opts.width ?? 1024;
     this.height = opts.height ?? 768;
     this.numScanouts = opts.scanouts ?? 1;
@@ -153,21 +162,13 @@ export class VirtioGpu extends VirtioMmio {
     }
   }
 
-  protected deviceId(): number {
-    return 16; // VIRTIO_ID_GPU
+  private traceLine(s: string): void {
+    if (!this.cmdTrace || this.cmdTraceLog.length >= 200) return;
+    this.cmdTraceLog.push(s);
   }
 
-  protected hostFeatures(): bigint {
-    // 只宣告 VERSION_1：不给 VIRGL/EDID/RESOURCE_BLOB/CONTEXT_INIT，
-    // 驱动便不会走 3D/EDID/blob 那些我们没实现的路径。
-    return VIRTIO_F_VERSION_1;
-  }
-
-  protected queueSizeMax(): number {
-    return QUEUE_SIZE;
-  }
-
-  protected readConfig(o: number, size: MemSize): bigint {
+  /** 设备 config 空间读（offset 相对配置区起点） */
+  readConfig(o: number, size: MemSize): bigint {
     const cfg = new Uint8Array(CONFIG_SIZE);
     const dv = new DataView(cfg.buffer);
     dv.setUint32(0x00, 0, true); // events_read（无事件）
@@ -190,6 +191,15 @@ export class VirtioGpu extends VirtioMmio {
     const res = this.resources.get(s.resourceId);
     if (!res) return undefined;
     return { width: res.width, height: res.height, format: res.format, data: res.host };
+  }
+
+  stats(): GpuStats {
+    return { commands: this.cmdCount, flushes: this.flushCount, resources: this.resources.size };
+  }
+
+  /** 已上屏帧数（前端/测试用） */
+  get flushes(): number {
+    return this.flushCount;
   }
 
   // ------------------------------------------------------------------
@@ -248,11 +258,12 @@ export class VirtioGpu extends VirtioMmio {
   // 请求处理
   // ------------------------------------------------------------------
 
-  protected handleRequest(q: VQueue, headId: number): void {
+  /** 处理控制队列/光标队列上的一个请求；io 由传输层提供 */
+  handleRequest(io: VirtioQueueOps, q: VQueue, headId: number): void {
     this.cmdCount++;
-    const chain = this.collectChain(q, headId);
+    const chain = io.collectChain(q, headId);
     if (chain.length === 0) {
-      this.pushUsed(q, headId, 0);
+      io.pushUsed(q, headId, 0);
       return;
     }
 
@@ -260,11 +271,11 @@ export class VirtioGpu extends VirtioMmio {
     try {
       req = this.readChain(chain, false);
     } catch {
-      this.pushUsed(q, headId, 0);
+      io.pushUsed(q, headId, 0);
       return;
     }
     if (req.length < HDR_SIZE) {
-      this.pushUsed(q, headId, 0);
+      io.pushUsed(q, headId, 0);
       return;
     }
 
@@ -514,15 +525,127 @@ export class VirtioGpu extends VirtioMmio {
     rv.setUint32(20, 0, true);
 
     const written = this.writeChain(chain, resp.subarray(0, respLen));
-    this.pushUsed(q, headId, written);
+    io.pushUsed(q, headId, written);
+  }
+}
+
+/**
+ * virtio-gpu 在 **virtio-mmio** 传输上的形态（当前默认）。
+ * 队列：0 = controlq，1 = cursorq（Linux virtio_gpu 固定申请 2 个，少一个 probe 就失败）。
+ */
+export class VirtioGpu extends VirtioMmio {
+  readonly name = 'virtio-gpu';
+  readonly core: VirtioGpuCore;
+
+  constructor(bus: Bus, irq: IrqLine | undefined, opts: VirtioGpuOptions = {}) {
+    super(bus, irq, 2, QUEUE_SIZE);
+    this.core = new VirtioGpuCore(bus, opts);
   }
 
-  override stats(): { commands: number; flushes: number; notifications: number; resources: number } {
-    return {
-      commands: this.cmdCount,
-      flushes: this.flushCount,
-      notifications: this.notifyStats,
-      resources: this.resources.size,
-    };
+  protected deviceId(): number {
+    return 16; // VIRTIO_ID_GPU
+  }
+
+  protected hostFeatures(): bigint {
+    // 只宣告 VERSION_1：不给 VIRGL/EDID/RESOURCE_BLOB/CONTEXT_INIT，
+    // 驱动便不会走 3D/EDID/blob 那些我们没实现的路径。
+    return VIRTIO_F_VERSION_1;
+  }
+
+  protected queueSizeMax(): number {
+    return QUEUE_SIZE;
+  }
+
+  protected override configSize(): number {
+    return VirtioGpuCore.CONFIG_SIZE;
+  }
+
+  protected readConfig(o: number, size: MemSize): bigint {
+    return this.core.readConfig(o, size);
+  }
+
+  protected handleRequest(q: VQueue, headId: number): void {
+    this.core.handleRequest(this, q, headId);
+  }
+
+  getFramebuffer(): GpuFramebuffer | undefined {
+    return this.core.getFramebuffer();
+  }
+
+  override stats(): { commands: number; flushes: number; resources: number; notifications: number } {
+    return { ...this.core.stats(), notifications: this.notifyStats };
+  }
+
+  /** 兼容既有引用：命令追踪开关与日志都在 core 上 */
+  get cmdTrace(): boolean {
+    return this.core.cmdTrace;
+  }
+  set cmdTrace(v: boolean) {
+    this.core.cmdTrace = v;
+  }
+  get cmdTraceLog(): string[] {
+    return this.core.cmdTraceLog;
+  }
+}
+
+/**
+ * virtio-gpu 在 **virtio-pci** 传输上的形态。
+ *
+ * PCI 类码取 0x038000（Display / Other）—— UEFI 的 `IsPciDisplay` 只看基类
+ * 0x03，所以它会被 `PlatformBootManagerBeforeConsole()` 主动 connect，
+ * GOP 因此在 `AddOutput()` 之前就存在，启动 logo 不需要任何平台补丁。
+ */
+export class VirtioGpuPci extends VirtioPci {
+  readonly core: VirtioGpuCore;
+
+  constructor(bus: Bus, irq: IrqLine | undefined, dev = 0, fn = 0, opts: VirtioGpuOptions = {}) {
+    super(bus, irq, 2, QUEUE_SIZE, dev, fn);
+    this.core = new VirtioGpuCore(bus, opts);
+  }
+
+  protected deviceId(): number {
+    return 16; // VIRTIO_ID_GPU
+  }
+
+  protected pciClassCode(): number {
+    return 0x038000; // Display / Other
+  }
+
+  protected hostFeatures(): bigint {
+    return VIRTIO_F_VERSION_1;
+  }
+
+  protected queueSizeMax(): number {
+    return QUEUE_SIZE;
+  }
+
+  protected override configSize(): number {
+    return VirtioGpuCore.CONFIG_SIZE;
+  }
+
+  protected readConfig(o: number, size: MemSize): bigint {
+    return this.core.readConfig(o, size);
+  }
+
+  protected handleRequest(q: VQueue, headId: number): void {
+    this.core.handleRequest(this, q, headId);
+  }
+
+  getFramebuffer(): GpuFramebuffer | undefined {
+    return this.core.getFramebuffer();
+  }
+
+  override stats(): { commands: number; flushes: number; resources: number; notifications: number } {
+    return { ...this.core.stats(), notifications: this.notifyStats };
+  }
+
+  get cmdTrace(): boolean {
+    return this.core.cmdTrace;
+  }
+  set cmdTrace(v: boolean) {
+    this.core.cmdTrace = v;
+  }
+  get cmdTraceLog(): string[] {
+    return this.core.cmdTraceLog;
   }
 }
