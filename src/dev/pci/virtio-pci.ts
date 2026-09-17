@@ -80,7 +80,13 @@ export abstract class VirtioPci extends VirtioDevice implements PciFunction, Pci
   readonly classCode: number;
   readonly revision = 0x01;
   readonly subsystemVendorId = VIRTIO_PCI_VENDOR_ID;
-  readonly subsystemId: number;
+  /**
+   * 子系统 ID。QEMU 对**纯 modern** 设备不在 PCI_SUBSYSTEM_ID 上写 virtio id
+   * （那是 legacy 分支才做的事），沿用 PCI 核心的默认值 PCI_SUBDEVICE_ID_QEMU
+   * = 0x1100 —— 而 EDK2 的 Virtio10Dxe 恰好要求 `SubsystemID >= 0x40` 才绑定，
+   * 所以这里必须照抄 0x1100，不能填 virtio 设备类型 id。
+   */
+  readonly subsystemId = 0x1100;
   readonly bars: PciBarSpec[] = [{ io: false, size: BAR0_SIZE }];
   readonly extConfig: Uint8Array;
 
@@ -98,7 +104,6 @@ export abstract class VirtioPci extends VirtioDevice implements PciFunction, Pci
     const vdevId = this.deviceId();
     this.name = `virtio-pci(${vdevId})`;
     this.pciDeviceId = VIRTIO_PCI_MODERN_BASE + vdevId;
-    this.subsystemId = vdevId;
     this.classCode = this.pciClassCode();
     this.extConfig = this.buildCaps();
   }

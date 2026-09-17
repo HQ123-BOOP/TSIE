@@ -8,8 +8,6 @@
 // 不必等到跑一整个 UEFI。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Bus } from '../src/mem/bus.ts';
-import { RAM } from '../src/mem/ram.ts';
 import { Machine, VIRT_PCIE_ECAM, VIRT_PCIE_MMIO, VIRT_PCIE_PIO } from '../src/machine.ts';
 
 const RAM_BASE = 0x80000000n;
@@ -91,7 +89,7 @@ test('PCI：ECAM 枚举出 virtio-gpu 显示设备，空槽位读回全 1', () =
   assert.equal(cfgRead(m, 0, 0, CFG_CLASS + 1, 1), 0x80, 'sub class = Other');
   assert.equal(cfgRead(m, 0, 0, CFG_CLASS, 1), 0x00, 'progIf = 0');
   assert.equal(cfgRead(m, 0, 0, CFG_HEADER_TYPE, 1), 0x00, 'header type = 普通设备');
-  assert.equal(cfgRead(m, 0, 0, CFG_SUBSYS + 2, 2), 16, '子系统 ID = virtio device id');
+  assert.equal(cfgRead(m, 0, 0, CFG_SUBSYS + 2, 2), 0x1100, '子系统 ID = PCI_SUBDEVICE_ID_QEMU（EDK2 要求 >= 0x40）');
   assert.equal(cfgRead(m, 0, 0, CFG_CAP_PTR, 1), 0x40, '能力链从 0x40 开始');
   assert.equal(cfgRead(m, 0, 0, CFG_COMMAND, 2), 0, '命令寄存器初值为 0（等驱动打开）');
   assert.equal(cfgRead(m, 0, 0, CFG_REVISION, 1), 0x01, 'revision');
