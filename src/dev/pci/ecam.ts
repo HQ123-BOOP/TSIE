@@ -97,6 +97,9 @@ const MAX_BARS = 6;
 
 /** 把一个 BAR 窗口注册到总线上，转发给功能 */
 class PciBarWindow implements Device {
+  /** 前 60 条访问（读/写、偏移、值），供启动脚本打印 */
+  readonly accessLog: string[] = [];
+
   constructor(
     readonly name: string,
     readonly size: bigint,
@@ -104,10 +107,16 @@ class PciBarWindow implements Device {
   ) {}
 
   read(offset: bigint, size: MemSize): bigint {
+    if (this.accessLog.length < 60) {
+      this.accessLog.push(`R +0x${offset.toString(16)} s=${size}`);
+    }
     return this.target.read(offset, size);
   }
 
   write(offset: bigint, value: bigint, size: MemSize): void {
+    if (this.accessLog.length < 60) {
+      this.accessLog.push(`W +0x${offset.toString(16)} s=${size} = 0x${value.toString(16)}`);
+    }
     this.target.write(offset, value, size);
   }
 }
@@ -138,6 +147,29 @@ export class PciHostBridge implements Device {
   /** 设备侧 MMIO 访问计数（调试用） */
   barReads = 0;
   barWrites = 0;
+  /** 最近一次注册的 BAR 窗口（调试：看驱动的寄存器访问） */
+  barWindow?: PciBarWindow;
+  /** 配置空间访问计数（调试用：判断 guest 是否来枚举过） */
+  cfgReads = 0;
+  cfgWrites = 0;
+  /** 前 60 条配置空间读（dev/fn/reg），供启动脚本打印 */
+  readonly cfgLog: string[] = [];
+  /** 前 80 条配置空间写（含写入值）—— BAR 定容/分配都靠写，单独记录 */
+  readonly cfgWriteLog: string[] = [];
+
+  private logCfg(isWrite: boolean, dev: number, fn: number, reg: number, value: bigint, size: number): void {
+    if (isWrite) {
+      if (this.cfgWriteLog.length < 80) {
+        this.cfgWriteLog.push(
+          `W dev${dev}.fn${fn} +0x${reg.toString(16).padStart(2, '0')} s=${size} = 0x${value.toString(16)}`,
+        );
+      }
+      return;
+    }
+    if (this.cfgLog.length < 60) {
+      this.cfgLog.push(`R dev${dev}.fn${fn} +0x${reg.toString(16).padStart(2, '0')} s=${size}`);
+    }
+  }
 
   constructor(
     private readonly bus: Bus,
@@ -196,9 +228,13 @@ export class PciHostBridge implements Device {
 
   read(offset: bigint, size: MemSize): bigint {
     const o = Number(offset);
-    const slot = this.slotAt((o >> 15) & 0x1f, (o >> 12) & 0x7);
-    if (!slot) return mask(size); // 空槽位：惯例是读回全 1
+    const devNo = (o >> 15) & 0x1f;
+    const fnNo = (o >> 12) & 0x7;
     const reg = o & (CFG_SIZE - 1);
+    this.cfgReads++;
+    this.logCfg(false, devNo, fnNo, reg, 0n, size);
+    const slot = this.slotAt(devNo, fnNo);
+    if (!slot) return mask(size); // 空槽位：惯例是读回全 1
     if (size === 8) return mask(8); // 配置空间最多 4 字节访问
 
     let v = 0n;
@@ -217,6 +253,8 @@ export class PciHostBridge implements Device {
 
   write(offset: bigint, value: bigint, size: MemSize): void {
     const o = Number(offset);
+    this.cfgWrites++;
+    this.logCfg(true, (o >> 15) & 0x1f, (o >> 12) & 0x7, o & (CFG_SIZE - 1), value, size);
     const slot = this.slotAt((o >> 15) & 0x1f, (o >> 12) & 0x7);
     if (!slot || size === 8) return;
     const reg = o & (CFG_SIZE - 1);
@@ -226,7 +264,10 @@ export class PciHostBridge implements Device {
       const idx = (reg - 0x10) / 4;
       const spec = slot.impl.bars[idx];
       if (!spec) return;
-      if (value === 0xffffffffn) {
+      // 定容探测 = 写「全 1」。注意 guest 传上来的 value 是 64 位寄存器值，
+      // 高位可能是符号扩展（实测 EDK2 写 0xffffffff 时这里收到 0xffffffffffffffff），
+      // 所以必须只看低 size 字节是否全 1，不能拿整个 value 去比较。
+      if ((value & maskOf(size)) === maskOf(size)) {
         slot.barProbe[idx] = true;
         return;
       }
@@ -273,6 +314,7 @@ export class PciHostBridge implements Device {
       const w = new PciBarWindow(`${this.name}.bar${i}`, BigInt(spec.size), target);
       this.bus.addDevice(slot.barAddr[i], w);
       slot.windows[i] = w;
+      this.barWindow = w;
     }
   }
 
@@ -280,6 +322,10 @@ export class PciHostBridge implements Device {
   functions(): Array<{ dev: number; fn: number; impl: PciFunction; barAddr: bigint[] }> {
     return this.slots.map((s) => ({ dev: s.dev, fn: s.fn, impl: s.impl, barAddr: s.barAddr.slice() }));
   }
+}
+
+function maskOf(size: number): bigint {
+  return size >= 8 ? 0xffffffffffffffffn : (1n << BigInt(8 * size)) - 1n;
 }
 
 function mask(size: number): bigint {
