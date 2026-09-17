@@ -434,7 +434,13 @@ export class VirtioGpu extends VirtioMmio {
             ok = false;
             break;
           }
-          this.readBacking(res, offset + (r.y + row) * stride + r.x * BPP, res.host, dstOff, rowBytes);
+          // offset 已经指向矩形原点 —— EDK2 的 GopBlt() 传的就是
+          // `sizeof(UINT32) * (DestinationY * CurrentHorizontal + DestinationX)`。
+          // 所以源地址只需再按行推进一个 stride；早先这里又多加了一次
+          // `(r.y + row) * stride + r.x * BPP`，整块像素会从错位若干行的位置读出：
+          // 表现是画面上只有第一行文字（还在边缘上，裁掉顶边仍能认出）、
+          // 而居中的 logo 那块被读来的空白覆盖，永远不出现。
+          this.readBacking(res, offset + row * stride, res.host, dstOff, rowBytes);
         }
         if (!ok) respType = RESP_ERR_INVALID_PARAMETER;
         detail = `res=${res.id} off=${offset} ${r.x},${r.y} ${r.width}x${r.height} resSz=${res.width}x${res.height}`;
