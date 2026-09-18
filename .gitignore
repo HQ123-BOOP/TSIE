@@ -12,3 +12,6 @@ tmp/
 
 # 9p 共享目录：保留 host.txt 作为验证素材，guest 写入物不入库
 share/from-guest.txt
+
+# shell 重定向笔误（\dev\null 少了前导 /）会在仓库根生成 dev/null，忽略防碍眼
+dev/
