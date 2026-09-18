@@ -18,6 +18,7 @@ import { ProxyBackend } from './dev/net-proxy.ts';
 import { SlirpBackend } from './dev/net-slirp.ts';
 import { encodeBmp } from './dev/bmp.ts';
 import type { GpuFramebuffer } from './dev/virtio-gpu.ts';
+import { DisplayServer } from './display/web.ts';
 import { CSR } from './cpu/csr.ts';
 
 interface Args {
@@ -29,6 +30,10 @@ interface Args {
   gpu?: { width: number; height: number };
   /** 把 virtio-gpu 的画面写成 BMP 文件 */
   fbDump?: string;
+  /** 在浏览器实时显示 virtio-gpu 画面（HTTP+WS 端口） */
+  display?: number;
+  /** 挂载 PCIe 主机桥，virtio-gpu 改走 virtio-pci */
+  pci: boolean;
   /** pflash 固件卷（EDK2 的 RISCV_VIRT_CODE.fd），给出即挂载一对 CFI NOR flash */
   flashCode?: string;
   /** pflash 变量存储（EDK2 的 RISCV_VIRT_VARS.fd） */
@@ -78,12 +83,16 @@ FreeBSD® (not yet tested).
       --proxy-port <n>      proxy 后端的桥接守护 UDP 端口（默认 7777）
       --gpu <WxH>           挂载 virtio-gpu 显示设备（如 --gpu 1024x768）。
                             guest 侧由内核 virtio_gpu 驱动接管，经 fbdev 控制台输出画面
+      --pci                 挂载 PCIe 主机桥，virtio-gpu 改走 virtio-pci
+                            （EDK2/Linux 按 PCI 显示设备枚举，无需平台补丁）
       --flash-code <file>   挂载一对 CFI NOR flash（各 32MiB）并载入固件卷，
                             如 EDK2 的 RISCV_VIRT_CODE.fd（UEFI 固件）
       --flash-vars <file>   同上，载入 UEFI 变量存储（RISCV_VIRT_VARS.fd）。
                             EDK2 要求 CODE/VARS 成对提供，缺一会报错
       --fb-dump <file>      把 virtio-gpu 的画面写成 BMP（配合 --gpu）。
                             每次画面刷新写入同一个文件（限流 250ms），运行结束时再落最后一帧
+      --display <port>      在浏览器实时显示 virtio-gpu 画面（配合 --gpu）。
+                            启动后打开 http://127.0.0.1:<port>，帧经 WebSocket 推送
       --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare；
                             guest 侧 mount -t 9p -o trans=virtio,version=9p2000.L
                             hostshare /mnt）
@@ -125,6 +134,7 @@ function parseArgs(argv: string[]): Args {
     stats: false,
     misaligned: 'trap',
     interactive: false,
+    pci: false,
     help: false,
   };
   const rest: string[] = [];
@@ -178,6 +188,9 @@ function parseArgs(argv: string[]): Args {
       case '--fb-dump':
         args.fbDump = resolve(next());
         break;
+      case '--display':
+        args.display = Number(parseNumber(next()));
+        break;
       case '--flash-code':
         args.flashCode = resolve(next());
         break;
@@ -221,6 +234,9 @@ function parseArgs(argv: string[]): Args {
       case '--interactive':
         args.interactive = true;
         break;
+      case '--pci':
+        args.pci = true;
+        break;
       case 'moo':
       case '--moo':
         args.moo = true;
@@ -237,6 +253,7 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (!args.kernel && rest.length > 0) args.kernel = rest[0];
+  if (args.display !== undefined && !args.gpu) throw new Error('--display 需要配合 --gpu 使用');
   return args;
 }
 
@@ -306,6 +323,7 @@ async function main(): Promise<number> {
               vars: args.flashVars ? new Uint8Array(readFile(args.flashVars)) : undefined,
             }
           : undefined,
+      pci: args.pci ? {} : undefined,
       gpu: args.gpu
         ? {
             width: args.gpu.width,
@@ -346,6 +364,30 @@ async function main(): Promise<number> {
   if (args.dumpDtb) {
     writeFileSync(args.dumpDtb, machine.generateDtb(args.append));
     process.stderr.write(`设备树已写入 ${args.dumpDtb}（${machine.dtbAddress.toString(16)}）\n`);
+  }
+
+  let display: DisplayServer | undefined;
+  if (args.display !== undefined) {
+    const gpu = machine.gpu;
+    if (gpu) {
+      display = new DisplayServer({
+        port: args.display,
+        getFramebuffer: () => gpu.getFramebuffer(),
+        getFrameCount: () => gpu.stats().flushes,
+      });
+      try {
+        await display.ready;
+      } catch (e) {
+        process.stderr.write(`显示: 监听端口 ${args.display} 失败: ${(e as Error).message}\n`);
+        display.close();
+        return 2;
+      }
+      process.stderr.write(`显示: 浏览器打开 http://127.0.0.1:${args.display} 查看实时画面\n`);
+    } else {
+      // --gpu 校验在 parseArgs，这里只可能是构造机器时没挂上
+      process.stderr.write('显示: --display 需要 --gpu（机器上未挂载显示设备）\n');
+      return 2;
+    }
   }
 
   if (args.trace) {
@@ -430,6 +472,19 @@ async function main(): Promise<number> {
     // stdin 处于 raw+resume 状态会挂住事件循环，结束运行后停掉
     process.stdin.pause();
     process.stdin.removeAllListeners('data');
+  } else if (display) {
+    // 显示模式：同步 run() 会阻塞事件循环，浏览器连不上也收不到帧。
+    // 分块跑并在块间让出事件循环（同交互模式的机制）。
+    // 块取 5 万条 ≈ 本项目 1~3 MIPS 下的 20~50ms，即帧推送节拍。
+    stats = await machine.runInteractive({
+      maxInstructions: args.maxInstructions,
+      chunk: 50_000,
+      afterChunk: (count) => {
+        feedScript(count);
+        display!.pump();
+        return undefined;
+      },
+    });
   } else {
     stats = machine.run({
       maxInstructions: args.maxInstructions,
@@ -442,6 +497,7 @@ async function main(): Promise<number> {
 
   // 收尾：限流可能刚好跳过最后一帧，这里强制再落一张，保证磁盘上是最新画面
   if (lastFrame) dumpFrame(lastFrame, false);
+  display?.close();
 
   if (args.stats || !machine.cpu.halted) {
     const mips = stats.ips / 1e6;
