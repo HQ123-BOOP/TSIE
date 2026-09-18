@@ -48,7 +48,9 @@ const PAGE = `<!doctype html>
   html,body{margin:0;height:100%;background:#111;color:#bbb;
     font:13px/1.6 ui-monospace,Consolas,monospace}
   body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
-  canvas{max-width:100vw;max-height:calc(100vh - 2.4em);image-rendering:pixelated;object-fit:contain}
+  canvas{max-width:100vw;max-height:calc(100vh - 2.4em);image-rendering:pixelated;object-fit:contain;
+    outline:none} /* tabindex 只为收键，不留焦点框 */
+  canvas:focus,canvas:focus-visible{outline:none}
   #status{height:1.6em}
 </style>
 <div id="status">connecting...</div>
@@ -80,7 +82,7 @@ function draw(buf) {
     fpsMark = Math.round(frames * 1000 / (now - fpsAt));
     fpsAt = now; frames = 0;
   }
-  status.textContent = w + 'x' + h + '  fps ' + fpsMark + (sendKeys ? '   键盘已接通（点画面聚焦）' : '');
+  status.textContent = w + 'x' + h + '  fps ' + fpsMark;
 }
 
 // 键盘回传：需要 canvas 有焦点（点一下画面即可）。
