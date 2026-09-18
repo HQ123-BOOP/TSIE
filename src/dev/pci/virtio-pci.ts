@@ -171,7 +171,11 @@ export abstract class VirtioPci extends VirtioDevice implements PciFunction, Pci
       if (Number.isInteger(idx)) this.notifyQueue(idx);
       return;
     }
-    if (o >= OFF_DEVICE) return; // device cfg 只读
+    if (o >= OFF_DEVICE) {
+      // device cfg：多数设备只读（writeConfig 默认空实现），virtio-input 例外
+      this.writeConfig(o - OFF_DEVICE, value, size);
+      return;
+    }
     if (o >= OFF_ISR) return; // ISF 只读
     this.commonWrite(o, value, size);
   }

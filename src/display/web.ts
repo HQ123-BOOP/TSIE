@@ -33,6 +33,12 @@ export interface DisplayServerOptions {
   getFrameCount: () => number;
   /** 广播节流，默认 40ms（约 25fps） */
   minSendIntervalMs?: number;
+  /**
+   * 浏览器按键回传。给了才算双向：页面把 KeyboardEvent.code 发上来，
+   * 由调用方映射成 guest 的 input event（见 VirtioInput.sendBrowserKey）。
+   * 不给则页面不发键盘（避免做了无用功）。
+   */
+  onInput?: (ev: { code: string; down: boolean }) => void;
 }
 
 const PAGE = `<!doctype html>
@@ -46,7 +52,7 @@ const PAGE = `<!doctype html>
   #status{height:1.6em}
 </style>
 <div id="status">connecting...</div>
-<canvas id="screen" width="16" height="16"></canvas>
+<canvas id="screen" width="16" height="16" tabindex="0"></canvas>
 <script>
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
@@ -74,15 +80,36 @@ function draw(buf) {
     fpsMark = Math.round(frames * 1000 / (now - fpsAt));
     fpsAt = now; frames = 0;
   }
-  status.textContent = w + 'x' + h + '  fps ' + fpsMark;
+  status.textContent = w + 'x' + h + '  fps ' + fpsMark + (sendKeys ? '   键盘已接通（点画面聚焦）' : '');
 }
+
+// 键盘回传：需要 canvas 有焦点（点一下画面即可）。
+// 带 Ctrl/Meta 的组合键放行给浏览器（否则 Ctrl+W 之类会被吃掉）
+let sendKeys = false;
+function focusScreen() { canvas.focus(); }
+canvas.addEventListener('mousedown', focusScreen);
+canvas.addEventListener('keydown', (e) => { if (e.repeat) return; if (key(e.code, true, e)) e.preventDefault(); });
+canvas.addEventListener('keyup',   (e) => { if (key(e.code, false, e)) e.preventDefault(); });
+function key(code, down, e) {
+  if (!sendKeys || !wsRef || wsRef.readyState !== 1) return false;
+  if (e && (e.ctrlKey || e.metaKey || e.altKey)) return false; // 组合键放行给浏览器
+  wsRef.send(JSON.stringify({ t: 'key', code: code, down: down }));
+  return true;
+}
+let wsRef = null;
 
 function connect() {
   const ws = new WebSocket('ws://' + location.host + '/');
+  wsRef = ws;
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => (status.textContent = 'connected');
   ws.onmessage = (e) => {
-    if (typeof e.data !== 'string') draw(e.data);
+    if (typeof e.data === 'string') {
+      // hello：服务端告知是否支持键盘回传
+      try { sendKeys = !!JSON.parse(e.data).input; } catch (_) {}
+      return;
+    }
+    draw(e.data);
   };
   ws.onclose = () => {
     status.textContent = 'disconnected, retrying...';
@@ -130,6 +157,20 @@ export class DisplayServer {
         this.pending.delete(ws);
         if (this.open.size === 0) this.lastCount = -1; // 观众走空，下一位强制重同步
       });
+      // 反向通道：浏览器按键 → 调用方（映射成 guest 的 input event）。
+      // 只认 {t:'key', code:string, down:bool}；非法消息静默丢弃。
+      ws.on('message', (data: unknown) => {
+        const onInput = this.opts.onInput;
+        if (!onInput) return;
+        try {
+          const msg = JSON.parse(String(data)) as { t?: string; code?: unknown; down?: unknown };
+          if (msg.t === 'key' && typeof msg.code === 'string' && typeof msg.down === 'boolean') {
+            onInput({ code: msg.code, down: msg.down });
+          }
+        } catch {
+          /* 非法 JSON：忽略 */
+        }
+      });
     });
     // 兜底：机器停机或分块间隙较长时仍能出帧。unref 以免拖住进程退出
     const timer = setInterval(() => this.pump(), 100);
@@ -149,7 +190,12 @@ export class DisplayServer {
 
     if (this.pending.size > 0) {
       const cur = frame();
-      const head = JSON.stringify({ type: 'hello', width: cur?.width ?? 0, height: cur?.height ?? 0 });
+      const head = JSON.stringify({
+        type: 'hello',
+        width: cur?.width ?? 0,
+        height: cur?.height ?? 0,
+        input: this.opts.onInput !== undefined,
+      });
       for (const ws of this.pending) {
         if (ws.readyState !== ws.OPEN) {
           this.pending.delete(ws);

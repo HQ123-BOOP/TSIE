@@ -88,6 +88,13 @@ export abstract class VirtioDevice {
   protected configSize(): number {
     return 0x100;
   }
+
+  /**
+   * 设备配置空间写。**多数 virtio 设备的 config 是只读的** —— 默认空实现即忽略写入。
+   * virtio-input 是例外：它靠写 config 的 select/subsel 选择要读的子配置
+   * （ID_NAME / EV_BITS / ABS_INFO），所以那两个字节必须能写进去、且写完要重建内容。
+   */
+  protected writeConfig(_offset: number, _value: bigint, _size: MemSize): void {}
   /** 处理 avail 环上一个请求（headId = head 描述符下标），完成后必须 pushUsed */
   protected abstract handleRequest(q: VQueue, headId: number): void;
 

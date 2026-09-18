@@ -32,6 +32,8 @@ interface Args {
   fbDump?: string;
   /** 在浏览器实时显示 virtio-gpu 画面（HTTP+WS 端口） */
   display?: number;
+  /** 挂载 virtio-input 键盘（配合 --display 时把浏览器按键透传给 guest） */
+  input: boolean;
   /** 挂载 PCIe 主机桥，virtio-gpu 改走 virtio-pci */
   pci: boolean;
   /** pflash 固件卷（EDK2 的 RISCV_VIRT_CODE.fd），给出即挂载一对 CFI NOR flash */
@@ -93,6 +95,8 @@ FreeBSD® (not yet tested).
                             每次画面刷新写入同一个文件（限流 250ms），运行结束时再落最后一帧
       --display <port>      在浏览器实时显示 virtio-gpu 画面（配合 --gpu）。
                             启动后打开 http://127.0.0.1:<port>，帧经 WebSocket 推送
+      --input               挂载 virtio-input 键盘。与 --display 同用时，网页里点一下
+                            画面聚焦后敲键即可透传给 guest（UEFI 阶段无驱动，进 Linux 后可用）
       --9p, --shared9p <dir> 把目录经 virtio-9p 导出给 guest（tag: hostshare；
                             guest 侧 mount -t 9p -o trans=virtio,version=9p2000.L
                             hostshare /mnt）
@@ -134,6 +138,7 @@ function parseArgs(argv: string[]): Args {
     stats: false,
     misaligned: 'trap',
     interactive: false,
+    input: false,
     pci: false,
     help: false,
   };
@@ -237,6 +242,9 @@ function parseArgs(argv: string[]): Args {
       case '--pci':
         args.pci = true;
         break;
+      case '--input':
+        args.input = true;
+        break;
       case 'moo':
       case '--moo':
         args.moo = true;
@@ -324,6 +332,7 @@ async function main(): Promise<number> {
             }
           : undefined,
       pci: args.pci ? {} : undefined,
+      input: args.input ? {} : undefined,
       gpu: args.gpu
         ? {
             width: args.gpu.width,
@@ -374,6 +383,12 @@ async function main(): Promise<number> {
         port: args.display,
         getFramebuffer: () => gpu.getFramebuffer(),
         getFrameCount: () => gpu.stats().flushes,
+        // 只有挂了 virtio-input 才开反向通道：否则页面不必发键盘
+        onInput: machine.input
+          ? (ev) => {
+              machine.input!.sendBrowserKey(ev.code, ev.down);
+            }
+          : undefined,
       });
       try {
         await display.ready;

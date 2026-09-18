@@ -15,6 +15,7 @@ import { VirtioBlk } from './dev/virtio-blk.ts';
 import { VirtioNet } from './dev/virtio-net.ts';
 import { Virtio9p } from './dev/virtio-9p.ts';
 import { VirtioGpu, VirtioGpuPci, type VirtioGpuOptions } from './dev/virtio-gpu.ts';
+import { VirtioInput, type VirtioInputOptions } from './dev/virtio-input.ts';
 import { PciHostBridge, type PciOptions } from './dev/pci/ecam.ts';
 import { GoldfishRtc } from './dev/rtc.ts';
 import { CfiFlash } from './dev/flash.ts';
@@ -32,6 +33,7 @@ export const VIRT_VIRTIO = 0x10001000n;
 export const VIRT_VIRTIO_NET = 0x10002000n;
 export const VIRT_VIRTIO_9P = 0x10003000n;
 export const VIRT_VIRTIO_GPU = 0x10004000n;
+export const VIRT_VIRTIO_INPUT = 0x10005000n;
 export const VIRT_RTC = 0x101000n;
 /**
  * PCIe（与 QEMU riscv `virt` 的内存映射逐项对齐）：
@@ -61,6 +63,7 @@ const IRQ_VIRTIO = 1;
 const IRQ_VIRTIO_NET = 2;
 const IRQ_VIRTIO_9P = 3;
 const IRQ_VIRTIO_GPU = 4;
+const IRQ_VIRTIO_INPUT = 5;
 const IRQ_UART = 10;
 const IRQ_RTC = 11;
 /** PCIe INTA..INTD（设备 N 的 INTA = IRQ_PCIE + N，与 QEMU 同款 swizzle） */
@@ -77,6 +80,11 @@ export interface MachineOptions {
   net?: NetBackend;
   /** 显示设备（提供则挂载 virtio-gpu 显卡；guests 侧 win 由内核 virtio_gpu 驱动接管） */
   gpu?: VirtioGpuOptions;
+  /**
+   * virtio-input 键盘（给了就挂上）。配合网页实时显示时可把浏览器按键透传给 guest：
+   * UEFI 阶段无驱动（RiscVVirt 的 FDF 没包含 VirtioInputDxe），进 Linux 后即可用。
+   */
+  input?: VirtioInputOptions;
   /**
    * PCIe 主机桥。给了就把显卡挂成 **PCI 显示设备**（默认），这样 UEFI 的
    * `IsPciDisplay` 会在 `PlatformBootManagerBeforeConsole()` 里主动 connect 它，
@@ -153,6 +161,8 @@ export class Machine {
   readonly virtio?: VirtioBlk;
   readonly netdev?: VirtioNet;
   readonly gpu?: VirtioGpu | VirtioGpuPci;
+  /** virtio-input 键盘（给了 input 选项才有） */
+  readonly input?: VirtioInput;
   /** PCIe 主机桥（给了 pci 选项才有） */
   readonly pci?: PciHostBridge;
   /** 显卡挂在 PCI 上（true）还是 virtio-mmio 上（false） */
@@ -254,6 +264,11 @@ export class Machine {
         this.gpu = new VirtioGpu(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_GPU, level), opts.gpu);
         this.bus.addDevice(VIRT_VIRTIO_GPU, this.gpu);
       }
+    }
+
+    if (opts.input) {
+      this.input = new VirtioInput(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_INPUT, level), opts.input);
+      this.bus.addDevice(VIRT_VIRTIO_INPUT, this.input);
     }
 
     // CFI NOR flash：EDK II 要求 CODE/VARS 成对出现，各 32MiB，
@@ -518,6 +533,14 @@ export class Machine {
         }
       }
       pciNode.propU32('interrupt-map', imap);
+    }
+
+    if (this.input) {
+      const inNode = soc.addChild(`virtio_mmio@${VIRT_VIRTIO_INPUT.toString(16)}`);
+      inNode.propStr('compatible', 'virtio,mmio');
+      inNode.propReg('reg', [[VIRT_VIRTIO_INPUT, 0x1000n]]);
+      inNode.propU32('interrupts', [IRQ_VIRTIO_INPUT]);
+      inNode.propU32('interrupt-parent', [2]);
     }
 
     const testNode = soc.addChild(`test@${VIRT_TEST.toString(16)}`);

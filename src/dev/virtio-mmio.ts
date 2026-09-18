@@ -118,6 +118,10 @@ export abstract class VirtioMmio extends VirtioDevice implements Device {
     const o = Number(offset);
     this.traceOp('0x' + o.toString(16).padStart(2, '0'), true, value);
     const v = Number(value & 0xffffffffn);
+    if (o >= R_CONFIG) {
+      this.writeConfig(o - R_CONFIG, value, _size);
+      return;
+    }
     switch (o) {
       case R_DEVICE_FEATURES_SEL:
         this.hostFeaturesSel = v & 1;
