@@ -89,3 +89,23 @@ test('复位后默认开放 cycle/time/instret 给 S/U 态', () => {
   assert.equal(h.cpu.csr.read(CSR.MCAUSE), 0n);
   assert.equal(h.x(3), 3n);
 });
+
+test('计数器进位护栏：跨 2^52 阈值后低位回绕、总数精确（number+BigInt 高低位）', () => {
+  const FOLD = 2 ** 52;
+  const h = makeCpu([addi(4, 0, 1), addi(4, 0, 2), addi(4, 0, 3), addi(4, 0, 4), ...halt()]);
+  // 播种到阈值下 1：下一步的 ++ 会触顶，再下一步进位
+  h.cpu.mcycle = FOLD - 1;
+  h.cpu.instret = FOLD - 1;
+  const seed = BigInt(FOLD - 1);
+  const steps = 4;
+  h.run(steps);
+
+  // 低位必须已回绕到阈值以下（证明进位发生了，而不是 double 冻结在 2^52）
+  assert.ok(h.cpu.mcycle < FOLD, `mcycle 低位应已回绕，实际 ${h.cpu.mcycle}`);
+  assert.ok(h.cpu.instret < FOLD, `instret 低位应已回绕，实际 ${h.cpu.instret}`);
+  // 合并总数必须精确等于 seed + steps —— 进位不丢不重
+  assert.equal(h.cpu.mcycleTotal(), seed + BigInt(steps));
+  assert.equal(h.cpu.instretTotal(), seed + BigInt(steps));
+  // 对外 CSR 读数走同一合并路径，也应跨过 2^52
+  assert.ok(h.cpu.csr.read(CSR.CYCLE)! > seed, 'rdcycle 读数应含已进位的高位');
+});

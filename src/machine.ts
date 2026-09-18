@@ -766,7 +766,7 @@ export class Machine {
     const lines = [
       `pc       = 0x${c.pc.toString(16).padStart(16, '0')}`,
       `priv     = ${privName}`,
-      `instret  = ${c.instret}`,
+      `instret  = ${c.instretTotal()}`,
       `mstatus  = 0x${(c.csr.read(CSR.MSTATUS) ?? 0n).toString(16).padStart(16, '0')}`,
       `mcause   = 0x${(c.csr.read(CSR.MCAUSE) ?? 0n).toString(16)}`,
       `mepc     = 0x${(c.csr.read(CSR.MEPC) ?? 0n).toString(16)}`,

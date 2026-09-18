@@ -119,14 +119,33 @@ export class Cpu {
   readonly mmu: Mmu;
 
   /**
-   * 硬件计数器用 number：单次运行远不到 2^53（Debian 全程引导约 1.8e10 条指令，
-   * 上限 9e15），double 可精确表示；改成 number 后每条指令的 `++` 不再是 BigInt 分配。
-   * 对外的 CSR 读接口在闭包里转回 BigInt（见构造函数 setCounterSource）。
+   * 硬件计数器：number 低位 + BigInt 高位。
+   *
+   * 每条指令的 `++` 走 number（无 BigInt 分配，热路径关键）；但 double 到 2^53 会
+   * 静默冻结（x+1===x），而 maxInstructions 默认 Infinity，无法证明单次运行不超。
+   * 故每步在顶部检查低位是否触 2^52 阈值，触则把一个 2^52 块进位到 BigInt 高位。
+   * 低位恒 < 2^52 < 2^53，`++` 始终精确；对外读数用 mcycleTotal()/instretTotal()
+   * 合并高低位 —— 对任意长度运行都给出精确 64 位值，不再有"跑不满 2^53"的隐含假设。
    */
   instret = 0;
   mcycle = 0;
+  private instretHi = 0n;
+  private mcycleHi = 0n;
+  /** 进位阈值：2^52，留足 ++ 余量（低位到阈值即折进高位，全程精确） */
+  private static readonly CNT_FOLD = 2 ** 52;
+  private static readonly CNT_FOLD_BI = 1n << 52n;
+
+  /** 累计周期数（高低位合并，64 位掩码） */
+  mcycleTotal(): bigint {
+    return (this.mcycleHi + BigInt(this.mcycle)) & MASK64;
+  }
+  /** 累计退休指令数（高低位合并，64 位掩码） */
+  instretTotal(): bigint {
+    return (this.instretHi + BigInt(this.instret)) & MASK64;
+  }
+
   /** 外部时间源（CLINT 的 mtime） */
-  timeSource: () => bigint = () => BigInt(this.mcycle);
+  timeSource: () => bigint = () => this.mcycleTotal();
 
   halted = false;
   haltReason = '';
@@ -189,9 +208,9 @@ export class Cpu {
     this.misaligned = opts.misaligned ?? 'trap';
     this.hartId = opts.hartId ?? 0;
     this.csr.setCounterSource({
-      cycle: () => BigInt(this.mcycle) & MASK64,
+      cycle: () => this.mcycleTotal(),
       time: () => this.timeSource() & MASK64,
-      instret: () => BigInt(this.instret) & MASK64,
+      instret: () => this.instretTotal(),
     });
     this.csr.onSatpWrite = () => this.flushTrans();
     this.reset();
@@ -298,6 +317,16 @@ export class Cpu {
 
   /** 执行一条指令 */
   step(): void {
+    // 计数器进位护栏：低位触 2^52 就折进 BigInt 高位，保证低位 ++ 永远精确。
+    // 两条 number 比较，可预测分支，相对省下的 BigInt 分配可忽略。
+    if (this.mcycle >= Cpu.CNT_FOLD) {
+      this.mcycleHi += Cpu.CNT_FOLD_BI;
+      this.mcycle -= Cpu.CNT_FOLD;
+    }
+    if (this.instret >= Cpu.CNT_FOLD) {
+      this.instretHi += Cpu.CNT_FOLD_BI;
+      this.instret -= Cpu.CNT_FOLD;
+    }
     this.mcycle++;
     if (this.halted) return;
 
