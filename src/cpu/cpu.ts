@@ -118,10 +118,15 @@ export class Cpu {
   readonly csr = new CsrFile();
   readonly mmu: Mmu;
 
-  instret = 0n;
-  mcycle = 0n;
+  /**
+   * 硬件计数器用 number：单次运行远不到 2^53（Debian 全程引导约 1.8e10 条指令，
+   * 上限 9e15），double 可精确表示；改成 number 后每条指令的 `++` 不再是 BigInt 分配。
+   * 对外的 CSR 读接口在闭包里转回 BigInt（见构造函数 setCounterSource）。
+   */
+  instret = 0;
+  mcycle = 0;
   /** 外部时间源（CLINT 的 mtime） */
-  timeSource: () => bigint = () => this.mcycle;
+  timeSource: () => bigint = () => BigInt(this.mcycle);
 
   halted = false;
   haltReason = '';
@@ -184,9 +189,9 @@ export class Cpu {
     this.misaligned = opts.misaligned ?? 'trap';
     this.hartId = opts.hartId ?? 0;
     this.csr.setCounterSource({
-      cycle: () => this.mcycle & MASK64,
+      cycle: () => BigInt(this.mcycle) & MASK64,
       time: () => this.timeSource() & MASK64,
-      instret: () => this.instret & MASK64,
+      instret: () => BigInt(this.instret) & MASK64,
     });
     this.csr.onSatpWrite = () => this.flushTrans();
     this.reset();
@@ -208,6 +213,7 @@ export class Cpu {
     this.csr.writeRaw(CSR.MIMPID, 0x0000000000000001n);
     this.csr.writeRaw(CSR.SATP, 0n);
     this.flushTrans();
+    this.irqDirty = true; // 复位走的是 raw 路径，需手动重新武装中断门控
     this.syncMmu();
   }
 
@@ -242,6 +248,7 @@ export class Cpu {
   /** 供设备调用：设置中断挂起线 */
   setIrqLines(mask: bigint): void {
     this.irqLines = mask;
+    this.irqDirty = true;
   }
 
   /**
@@ -261,8 +268,15 @@ export class Cpu {
    * 返回 pending 供调用方决定是否陷入。
    */
   private irqPending: bigint = 0n;
+  /**
+   * irqPending 门控脏标记：只有喂给它的量变了才重算。
+   * 置脏来源：设备中断线变化（setIrqLines）、guest 写 MIP/MIE（execCsr）。
+   * 初值 true，让第一条指令完成首次计算。
+   */
+  private irqDirty = true;
 
-  private syncIrqState(): void {
+  /** 合并设备中断线到 mip 并重算 irqPending = mie & mip；仅在 irqDirty 时调用 */
+  private recomputeIrqPending(): void {
     const lines = this.irqLines;
     let mip = this.csr.raw(CSR.MIP); // mip 无 read 钩子，可直读
     const dm = Cpu.DEVICE_MIP_MASK;
@@ -288,7 +302,10 @@ export class Cpu {
     if (this.halted) return;
 
     this.syncMmu();
-    this.syncIrqState();
+    if (this.irqDirty) {
+      this.recomputeIrqPending();
+      this.irqDirty = false;
+    }
     if (this.irqPending !== 0n && this.checkInterrupts()) return;
     if (this.wfi) {
       // RISC-V 特权规范 §3.3.3：WFI 的唤醒**不受 mstatus.MIE/SIE 与 mideleg 影响**。
@@ -1002,6 +1019,9 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
       }
       this.csr.writeRaw(csrAddr, next & MASK64);
       if (csrAddr === CSR.SATP || csrAddr === CSR.MSTATUS) this.flushTrans();
+      // 任何 CSR 写都可能改到中断门控的输入：直接写 mie/mip，或经 SIE/SIP 别名
+      // 钩子转发到 mie/mip（csr.ts）。CSR 写相对热路径极稀，重算一次即可。
+      this.irqDirty = true;
     }
     this.setX(rd, old);
   }
