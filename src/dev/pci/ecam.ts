@@ -293,10 +293,19 @@ export class PciHostBridge implements Device {
   private barMask(slot: Slot, idx: number): bigint {
     const spec = slot.impl.bars[idx];
     if (!spec) return 0n;
-    // 内存 BAR：低 4 位可写（bit0=0 表示内存，bit1/2=类型，bit3=可预取）
-    // I/O BAR：低 2 位可写（bit0=1 表示 I/O）
-    const flags = spec.io ? 0x3n : 0xfn;
-    return (~(BigInt(spec.size) - 1n) & 0xffffffffn) | flags;
+    // 定容掩码 = 尺寸掩码 + 类型位。**类型位必须让 guest 能认出这是哪种 BAR**，
+    // 否则会踩到 EDK2 的硬门槛：PciBusDxe 的 PciParseBar() 按 `Value & 0x07` 分派——
+    //   case 0x00 → Mem32 / PMem32（再按 bit3 分预取）
+    //   case 0x04 → Mem64 / PMem64
+    // 落在其它值就跳到 default，BarType 保持 0 = PciBarTypeUnknown；随后
+    // PciIoGetBarAttributes() 见 Unknown 直接返回 EFI_UNSUPPORTED，于是
+    // Virtio10Dxe 的 GetBarType() 失败、ParseCapabilities() 返回 Unsupported、
+    // 驱动绑不上，最终一个 GOP 都没有（2026-09-18 实测就是这个链）。
+    // 内存 BAR 读回 bit0=0、bit2:1=00（32 位）、bit3=0（非预取，与我们 DTB 里
+    // 非预取的 32 位 MMIO 窗口 0x02000000 对应），即 `~（size-1) & 0xFFFFFFF0`。
+    // I/O BAR 读回 bit0=1、bit1=0，即 `~（size-1) & 0xFFFFFFFC | 0x01`。
+    const base = ~(BigInt(spec.size) - 1n) & 0xffffffffn;
+    return spec.io ? (base & ~0x3n) | 0x1n : base & ~0xfn;
   }
 
   /** 把已分配的 BAR 注册成总线窗口（先撤旧的） */

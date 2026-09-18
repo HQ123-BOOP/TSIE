@@ -59,8 +59,15 @@ function vendorCap(next: number, cfgType: number, offset: number, length: number
   c[3] = cfgType;
   c[4] = 0; // bar = BAR0
   c[5] = 0; // id（仅 PCI_CFG 类型使用）
-  dv.setUint32(6, offset, true);
-  dv.setUint32(10, length, true);
+  // 布局按 virtio spec，也与 EDK2 的 VIRTIO_PCI_CAP
+  // （OvmfPkg/Include/IndustryStandard/Virtio10.h）一致：
+  //   VendorHdr(Id/Next/Length = 3B) + ConfigType + Bar + Padding[3] + Offset(le32) + Length(le32)
+  // → Offset 在字节 8、Length 在字节 12。
+  // 曾把两者写到 6 / 10（只留 1 字节 padding），错位两字节：EDK2 于是把 Length 读成 0，
+  // 每次寄存器访问都撞上 `FieldOffset > Config->Length - FieldSize` 的边界检查
+  // 而返回 EFI_INVALID_PARAMETER，VirtioGpuInit() 失败，最终一个 GOP 都没有。
+  dv.setUint32(8, offset, true);
+  dv.setUint32(12, length, true);
   if (extra) c.set(extra, 16);
   return c;
 }

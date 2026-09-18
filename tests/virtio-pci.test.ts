@@ -105,7 +105,11 @@ test('PCI：BAR0 定容（写全 1 读回掩码）与地址分配后立即路由
 
   cfgWrite(m, 0, 0, CFG_BAR0, 0xffffffff, 4);
   const mask = cfgRead(m, 0, 0, CFG_BAR0, 4) >>> 0;
-  assert.equal(mask, 0xffffc00f, '16KiB BAR 的掩码 + 低 4 位内存 BAR 标志（bit0=0）');
+  // 16KiB 非预取 32 位内存 BAR：bit0=0、bit2:1=00（32 位）、bit3=0。
+  // 这三个位必须让 EDK2 的 PciParseBar 落到 `case 0x00`，否则 BarType 会停在
+  // PciBarTypeUnknown，导致 virtio-pci 驱动永远绑不上（见 ecam.ts 的注释）。
+  assert.equal(mask, 0xffffc000, '16KiB 内存 BAR 的定容掩码（类型位须为 Mem32）');
+  assert.equal((mask >>> 0) & 0x07, 0x00, 'PciParseBar 必须能认出这是 32 位内存 BAR');
 
   cfgWrite(m, 0, 0, CFG_BAR0, Number(BAR0_ADDR), 4);
   assert.equal(cfgRead(m, 0, 0, CFG_BAR0, 4) >>> 0, Number(BAR0_ADDR), '地址回读一致');
@@ -126,8 +130,9 @@ test('PCI：能力链给出 common/notify/ISR/device 四段结构', () => {
     const len = cfgRead(m, 0, 0, p + 2, 1);
     const type = cfgRead(m, 0, 0, p + 3, 1);
     const bar = cfgRead(m, 0, 0, p + 4, 1);
-    const off = cfgRead(m, 0, 0, p + 6, 4) >>> 0;
-    const length = cfgRead(m, 0, 0, p + 10, 4) >>> 0;
+    // Offset 在能力结构第 8 字节、Length 在第 12 字节（见 virtio-pci.ts 的说明）
+    const off = cfgRead(m, 0, 0, p + 8, 4) >>> 0;
+    const length = cfgRead(m, 0, 0, p + 12, 4) >>> 0;
     seen.push({ type, bar, off, len: length });
     assert.equal(len, type === 2 ? 20 : 16, 'notify 能力多带 4 字节乘数');
     p = next;

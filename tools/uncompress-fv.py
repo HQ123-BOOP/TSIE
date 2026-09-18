@@ -96,7 +96,15 @@ def try_lzma(data: bytearray, payload: int, end: int):
                       'dict_size': dict_size}],
         ).decompress(data[payload + 13:end])
     except lzma.LZMAError:
-        return None
+        blob = b''
+    if len(blob) != declared:
+        # 兜底：直接按 LZMA alone 头（5 字节 props + 8 字节解压后大小）解码。
+        # 手工拼 RAW 过滤器时会因为 props 解析/尾部对齐的细微差别而解不出（2026-09-18
+        # 在一份改动过字符串表的构建上遇到过：RAW 失败，FORMAT_ALONE 正常）。
+        try:
+            blob = lzma.LZMADecompressor(format=lzma.FORMAT_ALONE).decompress(data[payload:end])
+        except lzma.LZMAError:
+            return None
     return blob if len(blob) == declared else None
 
 
