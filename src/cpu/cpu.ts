@@ -84,6 +84,19 @@ function popcount64(v: bigint): number {
   return popcnt32(Number(v >> 32n)) + popcnt32(Number(v & 0xffffffffn));
 }
 
+/** 指令缓存项：一条已成功取指译码的指令（32 位存全字，压缩存 16 位半字） */
+interface ICacheEntry {
+  /** 完整虚拟 PC（用于校验，键只用低 32 位会有别名） */
+  pc: bigint;
+  /** 指令编码：len===2 时为半字，否则为 32 位字 */
+  inst: number;
+  len: number;
+  /** 取指时的特权级（取指有效特权级 = 当前 priv，trap 切换 priv 后须重建） */
+  priv: number;
+  /** 建立时的缓存代号；与 Cpu.icacheGen 不等即视为失效 */
+  gen: number;
+}
+
 /** RV64GC 处理器核心 */
 export class Cpu {
   /** 整数寄存器 x0-x31（x0 恒为 0） */
@@ -135,6 +148,37 @@ export class Cpu {
 
   stats = { loads: 0, stores: 0, amo: 0, traps: 0, fp: 0 };
 
+  /**
+   * 指令缓存：pc(低 32 位为键) → 已取指译码的指令，去掉热循环里重复的
+   * fetch16 + translate（profile 里约 20% 的自耗时）。
+   *
+   * 与"块缓存"不同，这里**每条指令仍走一次 step()**——中断投递、时间推进、
+   * trace 的逐指令语义完全不变，缓存只省取指。命中须校验 pc+priv+gen 三者：
+   *  - pc：键只用低 32 位，高位地址会别名，必须回验完整 pc；
+   *  - priv：取指有效特权级=当前 priv，陷入切到 M/S 后同一 VA 的翻译可能不同；
+   *  - gen：任何 mmu.flush/flushBy、fence.i 都 bump，覆盖 satp/mstatus/sfence/自改码。
+   *
+   * 自改码正确性依据 RISC-V 契约：guest 改完自己的代码必须执行 fence.i 才能取到
+   * 新指令，fence.i 触发 bump → 重建。QEMU 的 TCG 在 RISC-V 上同样依赖此契约。
+   */
+  readonly icache = new Map<number, ICacheEntry>();
+  private icacheGen = 0;
+  /** 关闭后退回逐条取指（调试/对照用） */
+  icacheEnabled = true;
+
+  /** 使整个指令缓存失效：bump 代号，旧项在查找时因 gen 不等自动作废 */
+  private bumpICache(): void {
+    this.icacheGen++;
+    // 代号回绕或积累过多时物理清空，释放内存（正常引导极少触发）
+    if (this.icacheGen === 0 || this.icache.size > (1 << 18)) this.icache.clear();
+  }
+
+  /** 翻译状态变更的统一入口：同时失效 TLB 与指令缓存，二者永不脱钩 */
+  private flushTrans(): void {
+    this.mmu.flush();
+    this.bumpICache();
+  }
+
   constructor(bus: Bus, opts: CpuOptions = {}) {
     this.mmu = new Mmu(bus);
     this.misaligned = opts.misaligned ?? 'trap';
@@ -144,7 +188,7 @@ export class Cpu {
       time: () => this.timeSource() & MASK64,
       instret: () => this.instret & MASK64,
     });
-    this.csr.onSatpWrite = () => this.mmu.flush();
+    this.csr.onSatpWrite = () => this.flushTrans();
     this.reset();
   }
 
@@ -163,7 +207,7 @@ export class Cpu {
     this.csr.writeRaw(CSR.MARCHID, 0x0000000000000000n);
     this.csr.writeRaw(CSR.MIMPID, 0x0000000000000001n);
     this.csr.writeRaw(CSR.SATP, 0n);
-    this.mmu.flush();
+    this.flushTrans();
     this.syncMmu();
   }
 
@@ -270,6 +314,21 @@ export class Cpu {
       return;
     }
 
+    // 指令缓存快路径：命中即跳过 fetch16 + translate（热循环的 ~20% 自耗时）。
+    // 键只用低 32 位，须回验完整 pc；priv 与 gen 任一不符都视为失效。
+    if (this.icacheEnabled) {
+      const e = this.icache.get(Number(pc & 0xffffffffn));
+      if (e !== undefined && e.pc === pc && e.priv === this.priv && e.gen === this.icacheGen) {
+        this.instret++;
+        if (this.traceEnabled) this.emitTrace(pc, e.inst, e.len);
+        this.nextPc = e.len === 2 ? pc + 2n : pc + 4n; // 常量 BigInt，避免每条 new
+        if (e.len === 2) this.execCompressed(e.inst);
+        else this.execute(e.inst);
+        if (!this.trapTaken) this.pc = this.nextPc;
+        return;
+      }
+    }
+
     const lo = this.mmu.fetch16(pc);
     if (lo === null) {
       this.takeException(this.mmu.faultCause, this.mmu.faultTval);
@@ -279,6 +338,7 @@ export class Cpu {
       this.instret++;
       if (this.traceEnabled) this.emitTrace(pc, lo, 2);
       this.nextPc = pc + 2n; // 压缩指令占 2 字节（跳转指令会覆盖它）
+      if (this.icacheEnabled) this.icacheSet(pc, lo, 2);
       this.execCompressed(lo);
       if (!this.trapTaken) this.pc = this.nextPc;
       return;
@@ -293,8 +353,20 @@ export class Cpu {
     this.instret++;
     if (this.traceEnabled) this.emitTrace(pc, inst, 4);
     this.nextPc = pc + 4n;
+    if (this.icacheEnabled) this.icacheSet(pc, inst, 4);
     this.execute(inst);
     if (!this.trapTaken) this.pc = this.nextPc;
+  }
+
+  /** 记录一条已成功取指的指令（miss 路径调用；热路径内联在 step 里） */
+  private icacheSet(pc: bigint, inst: number, len: number): void {
+    this.icache.set(Number(pc & 0xffffffffn), {
+      pc,
+      inst,
+      len,
+      priv: this.priv,
+      gen: this.icacheGen,
+    });
   }
 
   private emitTrace(pc: bigint, inst: number, len: number): void {
@@ -554,7 +626,10 @@ export class Cpu {
 
       // ---------------- MISC-MEM ----------------
       case 0x0f:
-        // FENCE / FENCE.I：无缓存，按 nop 处理
+        // FENCE（funct3=0）：无缓存一致性需求，按 nop 处理。
+        // FENCE.I（funct3=1）：guest 自改代码后的 I/D 同步契约 —— 冲刷指令缓存，
+        // 下一条取指必然重新 fetch，拿到新写入的指令。
+        if (funct3 === 1) this.bumpICache();
         return;
 
       // ---------------- SYSTEM ----------------
@@ -835,6 +910,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
       const vaddr = rs1 === 0 ? undefined : this.x[rs1];
       const asid = rs2 === 0 ? undefined : Number(this.x[rs2]! & 0xffffn);
       this.mmu.flushBy(vaddr, asid);
+      this.bumpICache();
       return;
     }
 
@@ -860,7 +936,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
         this.csr.writeRaw(CSR.MSTATUS, next);
         this.priv = spp;
         this.nextPc = this.csr.read(CSR.SEPC) ?? 0n;
-        this.mmu.flush();
+        this.flushTrans();
         return;
       }
       case 0x302: { // MRET
@@ -874,7 +950,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
         this.csr.writeRaw(CSR.MSTATUS, next);
         this.priv = mpp;
         this.nextPc = this.csr.read(CSR.MEPC) ?? 0n;
-        this.mmu.flush();
+        this.flushTrans();
         return;
       }
       case 0x105: { // WFI
@@ -925,7 +1001,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
           return this.illegal(inst);
       }
       this.csr.writeRaw(csrAddr, next & MASK64);
-      if (csrAddr === CSR.SATP || csrAddr === CSR.MSTATUS) this.mmu.flush();
+      if (csrAddr === CSR.SATP || csrAddr === CSR.MSTATUS) this.flushTrans();
     }
     this.setX(rd, old);
   }
@@ -1471,7 +1547,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
       this.pc = (this.csr.read(CSR.STVEC) ?? 0n) & ~0x3n;
     }
     this.wfi = false;
-    this.mmu.flush();
+    this.flushTrans();
   }
 
   /** 中断优先级：外部 > 软件 > 定时器，高特权级优先 */
