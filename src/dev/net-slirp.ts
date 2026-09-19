@@ -160,7 +160,11 @@ export class SlirpBackend implements NetBackend {
     return this.dnsPort === 53 ? this.dnsHost : `${this.dnsHost}:${this.dnsPort}`;
   }
 
-  private debug(...args: unknown[]): void {
+  /**
+   * 非 private：同文件的 TcpConn 等协作类要用它打日志（连接建立/数据/错误）。
+   * 仍属内部实现，不构成对外 API —— 外部请通过 `opts.debug` 开关控制。
+   */
+  debug(...args: unknown[]): void {
     if (this.opts.debug) console.error('[slirp]', ...args);
   }
 
@@ -469,7 +473,11 @@ class TcpConn {
     });
   }
 
-  private synAck(): void {
+  /**
+   * 非 private：连接管理者在把新连接注册进表之后需要立刻发 SYN-ACK
+   * （见 SlirpBackend 里的 TCP 新连接分支）。语义上仍属内部实现。
+   */
+  synAck(): void {
     // SYN-ACK 必须确认 guest 的 SYN（ack = guestIsn+1 = rcvNxt）——
     // 真内核会丢弃 ack=0 的 SYN-ACK（单测的假 guest 不校验，曾漏过）
     this.backend.tcpEmit(this, TCP_SYN | TCP_ACK, this.sndIsn, this.rcvNxt, undefined, true);

@@ -21,7 +21,6 @@ import {
   CsrFile,
   Exc,
   INTERRUPT_FLAG,
-  Irq,
   MISA_VALUE,
   Priv,
   SR_FS,

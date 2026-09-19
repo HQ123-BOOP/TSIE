@@ -285,7 +285,7 @@ export class Machine {
 
     if (opts.shared) {
       this.virtio9p = new Virtio9p(this.bus, (level) => this.plic.setIrq(IRQ_VIRTIO_9P, level), opts.shared, opts.sharedTag);
-      if (opts.sharedDebug) this.virtio9p.server.debug = true;
+      if (opts.sharedDebug) this.virtio9p.debug = true;
       this.bus.addDevice(VIRT_VIRTIO_9P, this.virtio9p);
     }
 

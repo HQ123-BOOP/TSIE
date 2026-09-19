@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Bus } from '../src/mem/bus.ts';
 import { RAM } from '../src/mem/ram.ts';
+import type { MemSize } from '../src/mem/types.ts';
 import { Virtio9p } from '../src/dev/virtio-9p.ts';
 
 const BASE = 0x10003000n;
@@ -57,7 +58,7 @@ async function makeDev(tag = 'hostshare') {
 test('virtio-9p：设备识别、特性与 config tag', async () => {
   const { dev, dir } = await makeDev();
   try {
-    const r = (off: number, size: number) => Number(dev.read(BigInt(off), size));
+    const r = (off: number, size: MemSize) => Number(dev.read(BigInt(off), size));
     assert.equal(r(0x00, 4), 0x74726976, "magic 应为 'virt'");
     assert.equal(r(0x04, 4), 2, 'MMIO 版本 = 2');
     assert.equal(r(0x08, 4), 9, 'DeviceID = 9（9p）');
@@ -79,7 +80,7 @@ test('virtio-9p：设备识别、特性与 config tag', async () => {
 test('virtio-9p：Tversion 经 virtqueue 往返（used 环 + 中断）', async () => {
   const { ram, dev, dir, irqs } = await makeDev();
   try {
-    const w = (off: number, v: number, size: number) => dev.write(BigInt(off), BigInt(v), size);
+    const w = (off: number, v: number, size: MemSize) => dev.write(BigInt(off), BigInt(v), size);
     // 特性协商 + 状态：ACK | DRIVER | FEATURES_OK
     w(0x20, 1, 4); // GuestFeatures 低页 = MOUNT_TAG
     w(0x24, 1, 4); // GuestFeaturesSel = 1

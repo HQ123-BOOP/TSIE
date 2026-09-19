@@ -9,7 +9,6 @@ import * as net from 'node:net';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SlirpBackend } from '../src/dev/net-slirp.ts';
-import type { EthFrame } from '../src/dev/net.ts';
 
 const GUEST_MAC = '52:54:00:12:34:56';
 const GW_MAC = '52:54:00:12:34:02';

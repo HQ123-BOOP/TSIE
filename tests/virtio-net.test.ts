@@ -41,7 +41,6 @@ function makeNet(backend: NetBackend = new SinkBackend()) {
 
 /** 按 guest 驱动初始化顺序配置一个队列（queueSel 参数化：RX=0 / TX=1） */
 function setupQueue(
-  ram: RAM,
   dev: VirtioNet,
   queueSel: number,
   layout: { desc: bigint; avail: bigint; used: bigint },
@@ -82,7 +81,7 @@ test('virtio-net：RX 注入——头 12B 全零 + 帧落 desc，used.len = 12+�
   const AVAIL = 0x80011000n;
   const USED = 0x80012000n;
   const BUF = 0x80020000n;
-  setupQueue(ram, dev, 0, { desc: DESC, avail: AVAIL, used: USED });
+  setupQueue(dev, 0, { desc: DESC, avail: AVAIL, used: USED });
 
   // 驱动挂 1 个空缓冲：desc[0] 可写 len=12+1522；avail ring[0]=0, idx=1
   ram.write(O(DESC), BUF, 8);
@@ -115,7 +114,7 @@ test('virtio-net：RX 无缓冲时排队，缓冲就位后泵出', () => {
   const AVAIL = 0x80011000n;
   const USED = 0x80012000n;
   const BUF = 0x80020000n;
-  setupQueue(ram, dev, 0, { desc: DESC, avail: AVAIL, used: USED });
+  setupQueue(dev, 0, { desc: DESC, avail: AVAIL, used: USED });
 
   // 队列 ready 但驱动还没挂缓冲 → 进设备 FIFO
   const frame = new Uint8Array([1, 2, 3, 4]);
@@ -143,7 +142,7 @@ test('virtio-net：驱动先挂缓冲+NOTIFY、后注入的帧必须能投递（
   const AVAIL = 0x80011000n;
   const USED = 0x80012000n;
   const BUF = 0x80020000n;
-  setupQueue(ram, dev, 0, { desc: DESC, avail: AVAIL, used: USED });
+  setupQueue(dev, 0, { desc: DESC, avail: AVAIL, used: USED });
 
   // guest 真实时序：先挂缓冲并 NOTIFY（此刻没有任何待注入帧）。
   // 回归背景：基类 processQueue 曾把 RX 的空缓冲条目当请求消费掉
@@ -172,7 +171,7 @@ test('virtio-net：TX——跳过 12B 头取帧，used.len=0，帧到后端', ()
   const USED = 0x80012000n;
   const HDR = 0x80020000n;
   const PAYLOAD = 0x80021000n;
-  setupQueue(ram, dev, 1, { desc: DESC, avail: AVAIL, used: USED }); // TX 队
+  setupQueue(dev, 1, { desc: DESC, avail: AVAIL, used: USED }); // TX 队
 
   // 驱动 can_push：头与帧可能同 desc——这里用二段式（头 desc + 帧 desc）验证
   ram.write(O(DESC), HDR, 8);
@@ -213,7 +212,7 @@ test('virtio-net：TX 头帧同 desc（can_push 布局）', () => {
   const AVAIL = 0x80011000n;
   const USED = 0x80012000n;
   const BUF = 0x80020000n;
-  setupQueue(ram, dev, 1, { desc: DESC, avail: AVAIL, used: USED });
+  setupQueue(dev, 1, { desc: DESC, avail: AVAIL, used: USED });
 
   // 单 desc：12B 头 + 帧连续
   const frame = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
@@ -236,12 +235,10 @@ test('virtio-net：Loopback 后端 TX 帧回注 RX', () => {
   const loop = new LoopbackBackend();
   const { ram, dev } = makeNet(loop);
   const DESC = 0x80010000n;
-  const AVAIL = 0x80011000n;
-  const USED = 0x80012000n;
   const BUF = 0x80020000n;
   // 配好两个队列
-  setupQueue(ram, dev, 0, { desc: DESC, avail: 0x80013000n, used: 0x80014000n });
-  setupQueue(ram, dev, 1, { desc: DESC + 0x100n, avail: 0x80015000n, used: 0x80016000n });
+  setupQueue(dev, 0, { desc: DESC, avail: 0x80013000n, used: 0x80014000n });
+  setupQueue(dev, 1, { desc: DESC + 0x100n, avail: 0x80015000n, used: 0x80016000n });
   const RX_AVAIL = 0x80013000n;
 
   // RX 空缓冲就位
@@ -279,8 +276,8 @@ test('virtio-net：Loopback 后端 TX 帧回注 RX', () => {
 });
 
 test('virtio-net：reset 后队列失效，注入帧进 FIFO 不投递', () => {
-  const { ram, dev } = makeNet();
-  setupQueue(ram, dev, 0, { desc: 0x80010000n, avail: 0x80011000n, used: 0x80012000n });
+  const { dev } = makeNet();
+  setupQueue(dev, 0, { desc: 0x80010000n, avail: 0x80011000n, used: 0x80012000n });
   dev.write(0x70n, 0n, 4); // Status = 0 → reset
   assert.equal(Number(dev.read(0x44n, 4)), 0, 'QueueReady 应清零');
   dev.injectRx(new Uint8Array([1]));
@@ -294,7 +291,7 @@ test('virtio-net：超大帧（> desc 容量）丢弃计 rx 后不入 used', () 
   const AVAIL = 0x80011000n;
   const USED = 0x80012000n;
   const BUF = 0x80020000n;
-  setupQueue(ram, dev, 0, { desc: DESC, avail: AVAIL, used: USED });
+  setupQueue(dev, 0, { desc: DESC, avail: AVAIL, used: USED });
   ram.write(O(DESC), BUF, 8);
   ram.write(O(DESC) + 8n, 100n, 4); // 缓冲只容 12+88
   ram.write(O(DESC) + 12n, 2n, 2);

@@ -9,11 +9,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Uart } from '../src/dev/uart.ts';
 
+/** LSR 寄存器偏移（与 NS16550 一致）；走真实 MMIO 读，不去碰 Uart 的私有状态 */
+const REG_LSR = 5n;
+function lsr(uart: Uart): bigint {
+  return uart.read(REG_LSR, 1);
+}
+
 /** 从串口读 n 个字节 */
 function readAll(uart: Uart, n: number): string {
   let s = '';
   for (let i = 0; i < n; i++) {
-    assert.notEqual(BigInt(uart.lsr) & 1n, 0n, `第 ${i} 字节前 LSR.DR 应置位`);
+    assert.notEqual(lsr(uart) & 1n, 0n, `第 ${i} 字节前 LSR.DR 应置位`);
     s += String.fromCharCode(Number(uart.read(0n, 1)));
   }
   return s;
@@ -26,7 +32,7 @@ test('uart：超 64 字节的输入完整保留（曾静默丢尾）', () => {
   uart.pushString(cmd);
   assert.equal(readAll(uart, cmd.length), cmd, '69 字节输入应一字不差读回');
   // 排空后 DR 应清零
-  assert.equal(BigInt(uart.lsr) & 1n, 0n, '排空后 LSR.DR 应清零');
+  assert.equal(lsr(uart) & 1n, 0n, '排空后 LSR.DR 应清零');
 });
 
 test('uart：300 字节长输入顺序保持', () => {
@@ -39,16 +45,16 @@ test('uart：300 字节长输入顺序保持', () => {
 test('uart：FCR FIFO 复位同时清空溢出队列', () => {
   const uart = new Uart();
   uart.pushString('x'.repeat(100)); // 64 进 FIFO + 36 进溢出队列
-  uart.write(2n, 0x07n); // FCR：使能并复位 FIFO
+  uart.write(2n, 0x07n, 1); // FCR：使能并复位 FIFO
   uart.pushString('ok\n');
   assert.equal(readAll(uart, 3), 'ok\n', '复位后应只收到复位之后的输入');
-  assert.equal(BigInt(uart.lsr) & 1n, 0n);
+  assert.equal(lsr(uart) & 1n, 0n);
 });
 
 test('uart：中断线在读空后撤销、回流期间保持', () => {
   let irq = false;
   const uart = new Uart({ irq: (l) => (irq = l) });
-  uart.write(1n, 0x01n); // IER：使能接收中断
+  uart.write(1n, 0x01n, 1); // IER：使能接收中断
   uart.pushString('y'.repeat(100));
   assert.equal(irq, true, '有数据时应挂中断');
   // 读若干字节（FIFO 回流，队列仍有积压）

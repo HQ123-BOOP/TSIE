@@ -7,7 +7,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { halt } from './harness.ts';
 import {
-  addi,
   andn,
   bclr,
   bext,
@@ -35,7 +34,6 @@ import {
   rolw,
   ror,
   rorw,
-  rori,
   roriw,
   slliuw,
   sexth,

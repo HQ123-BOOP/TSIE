@@ -37,7 +37,6 @@ const T_READDIR = 40, R_READDIR = 41;
 const T_MKDIR = 72, R_MKDIR = 73;
 const T_UNLINKAT = 76, R_UNLINKAT = 77;
 
-const NOFID = 0xffffffff;
 const QTDIR = 0x80;
 const MSIZE_MAX = 65536;
 
@@ -94,7 +93,21 @@ class Writer {
     this.u8(type); this.u32(version); this.u64(path);
     return this;
   }
-  bytes(b: Uint8Array): this { this.ensure(b.length); b.copy ? b.copy(this.buf, this.n) : this.buf.set(b, this.n); this.n += b.length; return this; }
+  /**
+   * 追加原始字节。
+   *
+   * 参数名义上是 Uint8Array，但调用方经常传 Buffer：Buffer 有
+   * `copy(target, offset)`，普通 Uint8Array 没有，所以两种都得支持。
+   * （早先写成一行 `b.copy ? b.copy(...) : this.buf.set(...)`，
+   * 既触发 TS2339 —— Uint8Array 类型上没有 copy —— 又难读。）
+   */
+  bytes(b: Uint8Array): this {
+    this.ensure(b.length);
+    if (typeof (b as Buffer).copy === 'function') (b as Buffer).copy(this.buf, this.n);
+    else this.buf.set(b, this.n);
+    this.n += b.length;
+    return this;
+  }
   /** 当前已写内容的裸字节（用于需要前缀长度的场景，如 readdir） */
   raw(): Buffer { return Buffer.from(this.buf.subarray(0, this.n)); }
   /** size[4] 头 + 已写内容 */
@@ -315,12 +328,6 @@ export class NinePServer {
     const q = await this.statQid(p);
     this.fids.set(dfid, { path: p, fh });
     return new Writer().qid(q.type, q.version, q.path).u32(this.msize - 24).finish(R_LCREATE, r.tag);
-  }
-
-  private fhOf(fid: number): fs.promises.FileHandle {
-    const f = this.fids.get(fid);
-    if (!f?.fh) throw new NinePError('EBADF', 9);
-    return f.fh;
   }
 
   private async tRead(r: Reader): Promise<Buffer> {

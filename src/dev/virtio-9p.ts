@@ -50,7 +50,7 @@ export class Virtio9p extends VirtioMmio {
     return 0n;
   }
 
-  stats(): { notifications: number; requests: number; replies: number } {
+  override stats(): { notifications: number; requests: number; replies: number } {
     return {
       ...super.stats(),
       requests: this.reqCount,
@@ -103,5 +103,19 @@ export class Virtio9p extends VirtioMmio {
       });
   }
 
-  debug = false;
+  /**
+   * 9P 调试开关：设备的错误日志与 NinePServer 的协议日志一起开。
+   *
+   * 做成 accessor 是为了让外部不必（也不能）直接碰私有的 `server` —— 此前
+   * machine.ts 是写 `virtio9p.server.debug = true` 的，既访问了私有成员，
+   * 又只开了服务端那一半。
+   */
+  get debug(): boolean {
+    return this._debug;
+  }
+  set debug(on: boolean) {
+    this._debug = on;
+    this.server.debug = on;
+  }
+  private _debug = false;
 }

@@ -9,7 +9,6 @@ import {
   csrs,
   csrc,
   csrw,
-  ecall,
   li,
   lw,
   mret,
@@ -39,19 +38,6 @@ function bytes(words: number[]): Uint8Array {
   const dv = new DataView(b.buffer);
   words.forEach((w, i) => dv.setUint32(i * 4, w >>> 0, true));
   return b;
-}
-
-/** M 模式启动 → 切到 S 模式执行 SBI 调用的样板代码 */
-function mModeStub(): number[] {
-  return [
-    ...li(5, S_ENTRY),
-    csrw(CSR.MEPC, 5),
-    ...li(6, 0x1800n), // MPP 掩码
-    csrc(CSR.MSTATUS, 6),
-    ...li(6, 0x800n), // MPP = S
-    csrs(CSR.MSTATUS, 6),
-    mret(),
-  ];
 }
 
 test('裸机程序：通过 Test Finisher 退出', () => {

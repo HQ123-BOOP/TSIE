@@ -12,7 +12,9 @@
  *  - 加载：ELF64 装载 + 扁平设备树（DTB）生成
  */
 
-export { Cpu, type CpuOptions, type SbiLayer, type MisalignedMode } from './cpu/cpu.ts';
+// 注意：这里曾导出 `type SbiLayer`，但内建 SBI 层已在 c4e9d6a 移除，该类型早已不存在
+// （是个引用了不存在类型的悬空导出，编译不过）。别再加回来。
+export { Cpu, type CpuOptions, type MisalignedMode } from './cpu/cpu.ts';
 export {
   CsrFile,
   CSR,
