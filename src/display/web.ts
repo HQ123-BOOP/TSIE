@@ -130,6 +130,15 @@ export class DisplayServer {
   private readonly pending = new Set<WebSocket>();
   private lastCount = -1;
   private lastSentAt = 0;
+  /**
+   * 上一帧内容的哈希：**guest 会重复 flush 相同画面**（实测某次引导里 311 次 flush
+   * 有 206 次与上一帧逐字节相同，即约 2/3 的推送是白费），光标闪烁、fbcon 重绘都会这样。
+   * 所以除了"有新 flush"这一层，再加一层"内容真的变了"。
+   */
+  private lastHash = 0;
+  /** 已广播帧数 / 因内容相同而跳过的帧数（供 stats() 观测去重效果） */
+  private sentFrames = 0;
+  private dedupedFrames = 0;
   private readonly minInterval: number;
   /** listen() 是异步的：address()/端口查询前必须先 await 它（含 EADDRINUSE 等错误） */
   readonly ready: Promise<void>;
@@ -215,11 +224,27 @@ export class DisplayServer {
     if (!force && now - this.lastSentAt < this.minInterval) return;
     const cur = frame();
     if (!cur) return;
+
+    // 内容判重：与上一帧逐字节相同就只记账、不推。
+    // 注意 lastCount 同样要推进 —— 否则下一次 pump 会为同一个 flush 再算一遍哈希。
+    const h = hashFramebuffer(cur.data);
+    if (h === this.lastHash) {
+      this.lastCount = count;
+      this.dedupedFrames++;
+      return;
+    }
     for (const ws of this.open) {
       if (ws.readyState === ws.OPEN) sendFrame(ws, cur);
     }
     this.lastCount = count;
+    this.lastHash = h;
     this.lastSentAt = now;
+    this.sentFrames++;
+  }
+
+  /** 观测用：已推帧数、因内容未变跳过的帧数、当前观众数 */
+  stats(): { sent: number; deduped: number; clients: number } {
+    return { sent: this.sentFrames, deduped: this.dedupedFrames, clients: this.open.size };
   }
 
   close(): void {
@@ -228,6 +253,25 @@ export class DisplayServer {
     this.wss.close();
     this.http.close();
   }
+}
+
+/**
+ * 帧缓冲的 32 位 FNV-1a。只用来判断"内容变了没有"，不追求密码学强度。
+ * 按 32 位字走（末尾不足 4 字节补按字节），比逐字节快数倍。
+ */
+function hashFramebuffer(data: Uint8Array): number {
+  const words = data.length >>> 2;
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < words; i++) {
+    h = (h ^ dv.getUint32(i << 2, true)) >>> 0;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  for (let i = words << 2; i < data.length; i++) {
+    h = (h ^ data[i]!) >>> 0;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
 }
 
 function sendFrame(ws: WebSocket, fb: GpuFramebuffer): void {

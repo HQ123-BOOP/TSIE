@@ -522,6 +522,14 @@ async function main(): Promise<number> {
         `耗时       : ${stats.seconds.toFixed(3)} s\n` +
         `速度       : ${mips.toFixed(2)} MIPS\n` +
         `TLB 命中   : ${machine.cpu.mmu.stats.tlbHit} / 未命中 ${machine.cpu.mmu.stats.tlbMiss}\n` +
+        // 显示推送的"内容去重"效果：guest 会重复 flush 相同画面，跳过它们省掉每帧 3MB 的拷贝与发送
+        (display
+          ? `显示推送   : 实发 ${display.stats().sent} / 内容未变跳过 ${display.stats().deduped}` +
+            `（去重 ${(
+              (100 * display.stats().deduped) /
+              Math.max(1, display.stats().sent + display.stats().deduped)
+            ).toFixed(1)}%）\n`
+          : '') +
         `退出原因   : ${machine.exitReason || '(未停机)'}\n` +
         `退出码     : ${machine.exitCode}\n`,
     );

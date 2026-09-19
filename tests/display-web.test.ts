@@ -231,3 +231,51 @@ test('display-web：hello + 二进制帧（头字段、像素、拷贝语义、�
     srv.close();
   }
 });
+
+test('显示：帧内容与上一帧完全相同时不推送（去重）', async () => {
+  // guest 会重复 flush 相同画面（实测某次引导 311 次 flush 里 206 次逐字节相同），
+  // 光标闪烁、fbcon 重绘都会这样；只按"有新 flush"推等于白推 2/3。
+  const env = makeEnv();
+  const srv = new DisplayServer({
+    port: 0,
+    getFramebuffer: () => env.dev.getFramebuffer(),
+    getFrameCount: () => env.dev.stats().flushes,
+  });
+  await srv.ready;
+  const port = (srv.address() as AddressInfo).port;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
+  ws.binaryType = 'arraybuffer';
+  try {
+    await new Promise((r, j) => {
+      ws.addEventListener('open', r, { once: true });
+      ws.addEventListener('error', j, { once: true });
+    });
+    await sleep(30);
+    srv.pump(true); // 只出 hello（此时还没上屏）
+
+    firstFrame(env);
+    const pix1 = drawPattern(env, 0);
+    srv.pump(true);
+    const f1 = await nextBinary(ws);
+    assert.deepEqual(new Uint8Array(f1, 16), pix1, '第一帧内容应与 guest 一致');
+    assert.equal(srv.stats().sent, 1);
+
+    // 同一个 seed 重画：像素逐字节相同，但 flush 计数确实涨了
+    const before = env.dev.stats().flushes;
+    drawPattern(env, 0);
+    assert.ok(env.dev.stats().flushes > before, 'flush 计数应增长（模拟 guest 重复 flush）');
+    srv.pump(true);
+    await assert.rejects(nextBinary(ws, 250), /超时/, '内容未变时不应推送');
+    assert.equal(srv.stats().deduped, 1, '应记一次去重');
+
+    // 换 seed：内容变了，必须推
+    const pix2 = drawPattern(env, 7);
+    srv.pump(true);
+    const f2 = await nextBinary(ws);
+    assert.deepEqual(new Uint8Array(f2, 16), pix2, '内容变化后必须推送');
+    assert.equal(srv.stats().sent, 2, '实发 2 帧');
+  } finally {
+    ws.close();
+    srv.close();
+  }
+});
