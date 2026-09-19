@@ -88,6 +88,14 @@ export interface GpuFramebuffer {
   data: Uint8Array;
 }
 
+/** 像素矩形（前端做增量推送用） */
+export interface GpuRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 interface GpuResource {
   id: number;
   format: number;
@@ -145,6 +153,18 @@ export class VirtioGpuCore {
   private cmdCount = 0;
   private flushCount = 0;
 
+  /**
+   * 自前端上次取走以来，**画面变化区域的并集**（bounding box）。
+   *
+   * 为什么要有它：一次 1024x768 引导实测往浏览器推了 3021 MB —— 因为每帧都搬整屏，
+   * 而多数变化只是几行文字（1024x19 才 78KB）。驱动每次更新都会发 TRANSFER_TO_HOST_2D
+   * 并带矩形，所以设备侧本来就知道变了哪里，把它累计起来给前端即可。
+   *
+   * dirtyAll：扫描输出被重新绑定（或第一次上屏）时必须整屏重发 —— 此前的增量对不上。
+   */
+  private dirty: GpuRect | null = null;
+  private dirtyAll = true;
+
   /** 调试：记录控制队列命令（设备侧协议追踪，最多 200 条）。与传输层的 MMIO trace 相互独立 */
   cmdTrace = false;
   readonly cmdTraceLog: string[] = [];
@@ -191,6 +211,35 @@ export class VirtioGpuCore {
     const res = this.resources.get(s.resourceId);
     if (!res) return undefined;
     return { width: res.width, height: res.height, format: res.format, data: res.host };
+  }
+
+  /** 把一次传输的矩形并入脏区（只关心当前上屏的那个资源） */
+  private markDirty(resourceId: number, r: { x: number; y: number; width: number; height: number }): void {
+    const s = this.scanouts[0];
+    if (!s || !s.enabled || s.resourceId !== resourceId) return; // 非上屏资源：不影响画面
+    if (this.dirtyAll) return; // 已经要整屏了，不必再算
+    const x0 = Math.max(0, Math.min(this.dirty ? this.dirty.x : r.x, r.x));
+    const y0 = Math.max(0, Math.min(this.dirty ? this.dirty.y : r.y, r.y));
+    const x1 = Math.max(this.dirty ? this.dirty.x + this.dirty.w : r.x + r.width, r.x + r.width);
+    const y1 = Math.max(this.dirty ? this.dirty.y + this.dirty.h : r.y + r.height, r.y + r.height);
+    this.dirty = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  /**
+   * 前端取用：自上次 clearDirty() 以来的变化矩形。
+   * 返回整屏尺寸的矩形表示"必须整屏重发"；返回 null 表示没有变化。
+   */
+  dirtyRect(): GpuRect | null {
+    const fb = this.getFramebuffer();
+    if (!fb) return null;
+    if (this.dirtyAll) return { x: 0, y: 0, w: fb.width, h: fb.height };
+    return this.dirty;
+  }
+
+  /** 前端推完这一帧后调用，重新开始累计 */
+  clearDirty(): void {
+    this.dirty = null;
+    this.dirtyAll = false;
   }
 
   stats(): GpuStats {
@@ -415,6 +464,7 @@ export class VirtioGpuCore {
         target.y = r.y;
         target.width = r.width;
         target.height = r.height;
+        this.dirtyAll = true; // 换了上屏资源：增量对不上，下次整屏发
         detail = `scr=${scanoutId} res=${resourceId} ${r.x},${r.y} ${r.width}x${r.height}`;
         break;
       }
@@ -453,7 +503,11 @@ export class VirtioGpuCore {
           // 而居中的 logo 那块被读来的空白覆盖，永远不出现。
           this.readBacking(res, offset + row * stride, res.host, dstOff, rowBytes);
         }
-        if (!ok) respType = RESP_ERR_INVALID_PARAMETER;
+        if (!ok) {
+          respType = RESP_ERR_INVALID_PARAMETER;
+        } else {
+          this.markDirty(res.id, r);
+        }
         detail = `res=${res.id} off=${offset} ${r.x},${r.y} ${r.width}x${r.height} resSz=${res.width}x${res.height}`;
         break;
       }
@@ -572,6 +626,15 @@ export class VirtioGpu extends VirtioMmio {
     return this.core.getFramebuffer();
   }
 
+  /** 变化矩形（自上次 clearDirty 起）；见 VirtioGpuCore.dirtyRect */
+  dirtyRect(): GpuRect | null {
+    return this.core.dirtyRect();
+  }
+
+  clearDirty(): void {
+    this.core.clearDirty();
+  }
+
   override stats(): { commands: number; flushes: number; resources: number; notifications: number } {
     return { ...this.core.stats(), notifications: this.notifyStats };
   }
@@ -633,6 +696,15 @@ export class VirtioGpuPci extends VirtioPci {
 
   getFramebuffer(): GpuFramebuffer | undefined {
     return this.core.getFramebuffer();
+  }
+
+  /** 变化矩形（自上次 clearDirty 起）；见 VirtioGpuCore.dirtyRect */
+  dirtyRect(): GpuRect | null {
+    return this.core.dirtyRect();
+  }
+
+  clearDirty(): void {
+    this.core.clearDirty();
   }
 
   override stats(): { commands: number; flushes: number; resources: number; notifications: number } {

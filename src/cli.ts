@@ -383,6 +383,9 @@ async function main(): Promise<number> {
         port: args.display,
         getFramebuffer: () => gpu.getFramebuffer(),
         getFrameCount: () => gpu.stats().flushes,
+        // 增量推送：设备侧知道每次 TRANSFER 的矩形，只推变化区域（整屏 3MB → 常见是一行 78KB）
+        getDirtyRect: () => gpu.dirtyRect(),
+        clearDirty: () => gpu.clearDirty(),
         // 只有挂了 virtio-input 才开反向通道：否则页面不必发键盘
         onInput: machine.input
           ? (ev) => {
@@ -522,13 +525,11 @@ async function main(): Promise<number> {
         `耗时       : ${stats.seconds.toFixed(3)} s\n` +
         `速度       : ${mips.toFixed(2)} MIPS\n` +
         `TLB 命中   : ${machine.cpu.mmu.stats.tlbHit} / 未命中 ${machine.cpu.mmu.stats.tlbMiss}\n` +
-        // 显示推送的"内容去重"效果：guest 会重复 flush 相同画面，跳过它们省掉每帧 3MB 的拷贝与发送
+        // 显示推送：按脏矩形推增量，实发帧数与累计字节数是"是否真的省下来"的直接凭据
         (display
-          ? `显示推送   : 实发 ${display.stats().sent} / 内容未变跳过 ${display.stats().deduped}` +
-            `（去重 ${(
-              (100 * display.stats().deduped) /
-              Math.max(1, display.stats().sent + display.stats().deduped)
-            ).toFixed(1)}%）\n`
+          ? `显示推送   : 实发 ${display.stats().sent} 帧 / ${(
+              display.stats().bytes / 1048576
+            ).toFixed(1)} MB` + `（内容未变跳过 ${display.stats().deduped} 帧）\n`
           : '') +
         `退出原因   : ${machine.exitReason || '(未停机)'}\n` +
         `退出码     : ${machine.exitCode}\n`,

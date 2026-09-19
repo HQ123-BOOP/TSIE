@@ -212,10 +212,14 @@ test('display-web：hello + 二进制帧（头字段、像素、拷贝语义、�
     const frame = await nextBinary(ws);
     const dv = new DataView(frame);
     assert.equal(dv.getUint32(0, true), 0x45495354, "magic 'TSIE'");
-    assert.equal(dv.getUint32(4, true), W);
-    assert.equal(dv.getUint32(8, true), H);
-    assert.equal(dv.getUint32(12, true), pix1.length);
-    assert.deepEqual(new Uint8Array(frame, 16), pix1, '像素应与 guest 侧完全一致');
+    assert.equal(dv.getUint32(4, true), 2, '协议版本 2（帧带矩形）');
+    assert.equal(dv.getUint32(8, true), W, 'canvasW');
+    assert.equal(dv.getUint32(12, true), H, 'canvasH');
+    assert.equal(dv.getUint32(16, true), 0, 'rectX');
+    assert.equal(dv.getUint32(20, true), 0, 'rectY');
+    assert.equal(dv.getUint32(24, true), W, 'rectW（未给 getDirtyRect 时退化整屏）');
+    assert.equal(dv.getUint32(28, true), H, 'rectH');
+    assert.deepEqual(new Uint8Array(frame, 32), pix1, '像素应与 guest 侧完全一致');
 
     // 没有新 flush → 不再推帧
     srv.pump(true);
@@ -225,7 +229,7 @@ test('display-web：hello + 二进制帧（头字段、像素、拷贝语义、�
     const pix2 = drawPattern(env, 7);
     srv.pump(true);
     const frame2 = await nextBinary(ws);
-    assert.deepEqual(new Uint8Array(frame2, 16), pix2, '第二帧应反映更新后的画面');
+    assert.deepEqual(new Uint8Array(frame2, 32), pix2, '第二帧应反映更新后的画面');
   } finally {
     ws.close();
     srv.close();
@@ -257,7 +261,7 @@ test('显示：帧内容与上一帧完全相同时不推送（去重）', async
     const pix1 = drawPattern(env, 0);
     srv.pump(true);
     const f1 = await nextBinary(ws);
-    assert.deepEqual(new Uint8Array(f1, 16), pix1, '第一帧内容应与 guest 一致');
+    assert.deepEqual(new Uint8Array(f1, 32), pix1, '第一帧内容应与 guest 一致');
     assert.equal(srv.stats().sent, 1);
 
     // 同一个 seed 重画：像素逐字节相同，但 flush 计数确实涨了
@@ -272,8 +276,77 @@ test('显示：帧内容与上一帧完全相同时不推送（去重）', async
     const pix2 = drawPattern(env, 7);
     srv.pump(true);
     const f2 = await nextBinary(ws);
-    assert.deepEqual(new Uint8Array(f2, 16), pix2, '内容变化后必须推送');
+    assert.deepEqual(new Uint8Array(f2, 32), pix2, '内容变化后必须推送');
     assert.equal(srv.stats().sent, 2, '实发 2 帧');
+  } finally {
+    ws.close();
+    srv.close();
+  }
+});
+
+test('显示：只推变化的那块矩形（增量推送）', async () => {
+  // 动机：早期每帧都发整屏 1024x768x4 = 3MB，一次引导实测推了 3021 MB，
+  // 而多数变化只是几行文字。设备侧知道每次 TRANSFER 的矩形，这里验证前端确实只发那块。
+  const env = makeEnv();
+  const srv = new DisplayServer({
+    port: 0,
+    getFramebuffer: () => env.dev.getFramebuffer(),
+    getFrameCount: () => env.dev.stats().flushes,
+    getDirtyRect: () => env.dev.dirtyRect(),
+    clearDirty: () => env.dev.clearDirty(),
+  });
+  await srv.ready;
+  const port = (srv.address() as AddressInfo).port;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
+  ws.binaryType = 'arraybuffer';
+  try {
+    await new Promise((r, j) => {
+      ws.addEventListener('open', r, { once: true });
+      ws.addEventListener('error', j, { once: true });
+    });
+    await sleep(30);
+    srv.pump(true);
+    firstFrame(env);
+    drawPattern(env, 0);
+    srv.pump(true);
+    const first = await nextBinary(ws);
+    assert.equal(new DataView(first).getUint32(24, true), W, '首帧应整屏（SET_SCANOUT 后必须整屏）');
+
+    // 只更新左上角 16x8 一小块。
+    // 注意源缓冲语义：设备按**资源行宽**逐行读（offset + row*stride），
+    // 所以源要是"整屏宽里的一段"，不是紧凑的 16x8 块。
+    const block = new Uint8Array(16 * 8 * 4);
+    const src = new Uint8Array(W * 8 * 4);
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 16; x++) {
+        const o = (y * W + x) * 4;
+        src[o] = 0x11;
+        src[o + 1] = 0x22;
+        src[o + 2] = 0x33;
+        src[o + 3] = 0xff;
+        const b = (y * 16 + x) * 4;
+        block[b] = 0x11;
+        block[b + 1] = 0x22;
+        block[b + 2] = 0x33;
+        block[b + 3] = 0xff;
+      }
+    }
+    env.ram.writeBytes(O(PIX), src);
+    env.submit(cat(hdr(CMD_TRANSFER), rect(0, 0, 16, 8), u64(0n), u32(1), u32(0)));
+    env.submit(cat(hdr(CMD_FLUSH), rect(0, 0, 16, 8), u32(1), u32(0)));
+    srv.pump(true);
+
+    const f = await nextBinary(ws);
+    const dv = new DataView(f);
+    assert.equal(dv.getUint32(8, true), W, 'canvasW 仍是整屏');
+    assert.equal(dv.getUint32(12, true), H, 'canvasH 仍是整屏');
+    assert.equal(dv.getUint32(16, true), 0, 'rectX');
+    assert.equal(dv.getUint32(20, true), 0, 'rectY');
+    assert.equal(dv.getUint32(24, true), 16, 'rectW = 只有这块');
+    assert.equal(dv.getUint32(28, true), 8, 'rectH = 只有这块');
+    assert.equal(f.byteLength, 32 + 16 * 8 * 4, '线上只传矩形像素，不是整屏');
+    assert.deepEqual(new Uint8Array(f, 32), block, '矩形像素应与 guest 写入的一致');
+    assert.ok(f.byteLength < (W * H * 4) / 10, '这一帧的字节数应远小于整屏一帧');
   } finally {
     ws.close();
     srv.close();
