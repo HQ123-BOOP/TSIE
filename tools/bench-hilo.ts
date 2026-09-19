@@ -59,7 +59,8 @@ function hSub(ah: number, al: number, bh: number, bl: number): [number, number] 
   const borrow = l < 0 ? 1 : 0;
   return [(ah - bh - borrow) >>> 0, l >>> 0];
 }
-function hSext32(ah: number, al: number): [number, number] {
+function hSext32(_ah: number, al: number): [number, number] {
+  // 只看低 32 位：符号取自 al 的 bit31，高位整体置 0 或全 1
   return [(al & 0x80000000) !== 0 ? 0xffffffff : 0, al >>> 0];
 }
 function hShl(ah: number, al: number, n: number): [number, number] {
