@@ -186,6 +186,8 @@ export class Cpu {
    * 新指令，fence.i 触发 bump → 重建。QEMU 的 TCG 在 RISC-V 上同样依赖此契约。
    */
   readonly icache = new Map<number, ICacheEntry>();
+  /** 回收的条目对象（icacheSet 复用；clear 前先把旧条目收进来） */
+  private readonly icachePool: ICacheEntry[] = [];
   private icacheGen = 0;
   /** 关闭后退回逐条取指（调试/对照用） */
   icacheEnabled = true;
@@ -194,7 +196,13 @@ export class Cpu {
   private bumpICache(): void {
     this.icacheGen++;
     // 代号回绕或积累过多时物理清空，释放内存（正常引导极少触发）
-    if (this.icacheGen === 0 || this.icache.size > (1 << 18)) this.icache.clear();
+    if (this.icacheGen === 0 || this.icache.size > (1 << 18)) {
+      // 先回收条目再清表：否则池子永远是空的，下一轮未命中又要重新分配
+      for (const e of this.icache.values()) {
+        if (this.icachePool.length < 4096) this.icachePool.push(e);
+      }
+      this.icache.clear();
+    }
   }
 
   /** 翻译状态变更的统一入口：同时失效 TLB 与指令缓存，二者永不脱钩 */
@@ -405,14 +413,22 @@ export class Cpu {
   }
 
   /** 记录一条已成功取指的指令（miss 路径调用；热路径内联在 step 里） */
+  /**
+   * 写一条缓存。**条目对象复用**：原先每次未命中都新建一个对象字面量，
+   * profile 显示 icacheSet 自身 4.5%、GC 5.7% —— 分配本身就是成本。
+   */
   private icacheSet(pc: bigint, inst: number, len: number): void {
-    this.icache.set(Number(pc & 0xffffffffn), {
-      pc,
-      inst,
-      len,
-      priv: this.priv,
-      gen: this.icacheGen,
-    });
+    const key = Number(pc & 0xffffffffn);
+    let e = this.icache.get(key);
+    if (e === undefined) {
+      e = this.icachePool.pop() ?? { pc: 0n, inst: 0, len: 0, priv: 0, gen: -1 };
+      this.icache.set(key, e);
+    }
+    e.pc = pc;
+    e.inst = inst;
+    e.len = len;
+    e.priv = this.priv;
+    e.gen = this.icacheGen;
   }
 
   private emitTrace(pc: bigint, inst: number, len: number): void {
@@ -1596,6 +1612,10 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
       this.pc = (this.csr.read(CSR.STVEC) ?? 0n) & ~0x3n;
     }
     this.wfi = false;
+    // 这里曾尝试"只失效 TLB、不清 icache"（理由是 icache 条目自带 priv 校验）。
+    // 语义上站得住，但**实测在真实客机负载上量不出收益**（1.88~2.01 vs 基线 1.96~2.01 MIPS，
+    // 在轮间噪声内）—— 因为 guest 还会频繁写 satp / 发 sfence.vma，那些失效是必须的，
+    // icache 本来就被它们反复清掉。收益不成立就不动保险，恢复原状。
     this.flushTrans();
   }
 
