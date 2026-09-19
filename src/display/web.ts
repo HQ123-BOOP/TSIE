@@ -29,6 +29,12 @@ const MAGIC = 0x45495354; // 'TSIE' 按小端 u32 读出
 /** 线协议版本（2 = 帧带矩形）。头 32B：magic|ver|canvasW|canvasH|rectX|rectY|rectW|rectH */
 const PROTO_VERSION = 2;
 const HEADER_SIZE = 32;
+/**
+ * 单个连接允许的最大待发积压。超过就**跳过本次发送**（丢帧优于把内存堆爆）。
+ * 没有这道闸，观众端一慢（网络差、标签页被挂起、断点调试）Node 会把待发帧无上限缓存 ——
+ * 每帧最大 3MB，几分钟就能吃掉几个 GB。
+ */
+const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 export interface DisplayServerOptions {
   /** 监听端口，0 = 随机（测试用），实际端口见 address() */
@@ -159,10 +165,11 @@ export class DisplayServer {
   private prev: Uint32Array | null = null;
   private prevW = 0;
   private prevH = 0;
-  /** 已广播帧数 / 因内容没变而跳过的帧数 / 累计推送字节数（供 stats() 观测） */
+  /** 已广播帧数 / 因内容没变而跳过的帧数 / 累计推送字节数 / 因观众积压而丢的帧数 */
   private sentFrames = 0;
   private dedupedFrames = 0;
   private sentBytes = 0;
+  private droppedBackpressure = 0;
   private readonly minInterval: number;
   /** listen() 是异步的：address()/端口查询前必须先 await 它（含 EADDRINUSE 等错误） */
   readonly ready: Promise<void>;
@@ -241,8 +248,12 @@ export class DisplayServer {
         if (cur) {
           const buf = buildFrame(cur, { x: 0, y: 0, w: cur.width, h: cur.height });
           if (ws.readyState === ws.OPEN) {
-            ws.send(buf);
-            this.sentBytes += buf.length;
+            if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+              this.droppedBackpressure++; // 新客户端还没追上进度，这帧先不给它
+            } else {
+              ws.send(buf);
+              this.sentBytes += buf.length;
+            }
           }
         }
         this.pending.delete(ws);
@@ -287,10 +298,15 @@ export class DisplayServer {
     const buf = buildFrame(cur, dr);
     let sent = 0;
     for (const ws of this.open) {
-      if (ws.readyState === ws.OPEN) {
-        ws.send(buf);
-        sent++;
+      if (ws.readyState !== ws.OPEN) continue;
+      // 背压闸：观众追不上就丢这一帧。它是增量的，下一帧只补新变化 ——
+      // 所以丢帧在观众端会表现为"这块暂时没更新"，而不是画面永久错位。
+      if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+        this.droppedBackpressure++;
+        continue;
       }
+      ws.send(buf);
+      sent++;
     }
     this.lastCount = count;
     this.lastSentAt = now;
@@ -300,12 +316,13 @@ export class DisplayServer {
   }
 
   /** 观测用：已推帧数、因内容未变跳过的帧数、当前观众数 */
-  stats(): { sent: number; deduped: number; clients: number; bytes: number } {
+  stats(): { sent: number; deduped: number; clients: number; bytes: number; dropped: number } {
     return {
       sent: this.sentFrames,
       deduped: this.dedupedFrames,
       clients: this.open.size,
       bytes: this.sentBytes,
+      dropped: this.droppedBackpressure,
     };
   }
 
