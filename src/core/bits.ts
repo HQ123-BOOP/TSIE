@@ -105,41 +105,50 @@ export function toNum(x: bigint): number {
   return Number(x);
 }
 
-/** 立即数拼接：I-type */
+// 立即数拼接。这些原先都走一次 sext()，而 **JS 的位运算本身就会符号扩展**：
+// `inst >> 20` 已经是 32 位有符号数，位宽不足 32 的字段用 `v << (32-n) >> (32-n)`
+// 即可原地完成符号扩展。于是每条立即数指令少一次 sext 调用（少两个 bigint 位运算 + 查表）。
+// 语义已用 tmp/verify-imm.ts 对随机指令字做过新旧逐位对照。
+
+/** 立即数拼接：I-type（12 位） */
 export function immI(inst: number): bigint {
-  return sext(BigInt(inst >> 20), 12);
+  return BigInt(inst >> 20);
 }
 
-/** 立即数拼接：S-type */
+/** 立即数拼接：S-type（12 位） */
 export function immS(inst: number): bigint {
   const hi = (inst >> 25) & 0x7f;
   const lo = (inst >> 7) & 0x1f;
-  return sext(BigInt((hi << 5) | lo), 12);
+  return BigInt(((hi << 5) | lo) << 20 >> 20);
 }
 
-/** 立即数拼接：B-type */
+/** 立即数拼接：B-type（13 位） */
 export function immB(inst: number): bigint {
   const b12 = (inst >> 31) & 1;
   const b10_5 = (inst >> 25) & 0x3f;
   const b4_1 = (inst >> 8) & 0xf;
   const b11 = (inst >> 7) & 1;
   const v = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1);
-  return sext(BigInt(v), 13);
+  return BigInt(v << 19 >> 19);
 }
 
-/** 立即数拼接：U-type */
+/** 立即数拼接：U-type（32 位；`inst & 0xfffff000` 在 JS 里已是有符号 32 位） */
 export function immU(inst: number): bigint {
-  return sext(BigInt(inst & 0xfffff000) >> 0n, 32) & MASK64;
+  // 末尾的 & MASK64 不能省：旧实现经 sext() 后本身就是"已归一化的非负 64 位"
+  // 表示（inst=0xffffffff 给 0xFFFFFFFFFFFFF000 而不是 -4096n）。差分验证
+  // （tmp/verify-imm.ts）正是靠这条把它们区分出来的 —— 直接返回 BigInt(负数)
+  // 会改变寄存器里的表示，虽然数值相等但语义约定不同。
+  return BigInt(inst & 0xfffff000) & MASK64;
 }
 
-/** 立即数拼接：J-type */
+/** 立即数拼接：J-type（21 位） */
 export function immJ(inst: number): bigint {
   const b20 = (inst >> 31) & 1;
   const b10_1 = (inst >> 21) & 0x3ff;
   const b11 = (inst >> 20) & 1;
   const b19_12 = (inst >> 12) & 0xff;
   const v = (b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1);
-  return sext(BigInt(v), 21);
+  return BigInt(v << 11 >> 11);
 }
 
 /** 循环左移（用于 CRC 之类，暂未使用，保留工具） */
