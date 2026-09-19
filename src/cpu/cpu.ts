@@ -213,7 +213,17 @@ export class Cpu {
 
   constructor(bus: Bus, opts: CpuOptions = {}) {
     this.mmu = new Mmu(bus);
-    this.misaligned = opts.misaligned ?? 'trap';
+    // 默认按真实 virt 硬件的行为：透明处理非对齐访存（逐字节模拟），而不是抛异常。
+    //
+    // 规范确实允许实现「不支持非对齐访存就抛 misaligned 异常」，但真实世界的
+    // RISC-V 硬件（以及 QEMU 的 riscv virt 机器）普遍是透明处理的 —— 我们的定位是
+    // 一台能跑真实软件栈的 virt 机器，不是规范最小实现。要命的是：Linux 内核模块
+    // 重定位（apply_r_riscv_64_rela）就会做非对齐 8 字节存储，默认 trap 会直接
+    // Oops，跑 Linux 必须显式加 --misaligned slow。
+    //
+    // 规范精确的行为并未丢弃：`--misaligned trap` 仍然可用，且单元测试的
+    // harness（tests/harness.ts）显式传 'trap' 来测规范语义 —— 改这里不影响测试。
+    this.misaligned = opts.misaligned ?? 'slow';
     this.hartId = opts.hartId ?? 0;
     this.csr.setCounterSource({
       cycle: () => this.mcycleTotal(),

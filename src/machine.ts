@@ -116,7 +116,10 @@ export interface MachineOptions {
   timebaseFrequency?: number;
   /** 每多少条指令推进一次 mtime */
   cyclesPerTick?: number;
-  /** 非对齐访存策略 */
+  /**
+   * 非对齐访存策略。默认 `'slow'`（逐字节模拟，与真实 virt 硬件一致，是跑 Linux 的
+   * 必要条件）；传 `'trap'` 则严格按规范抛 misaligned 异常。
+   */
   misaligned?: 'trap' | 'slow';
   /** 串口输出回调（逐字节） */
   stdout?: (byte: number) => void;
@@ -286,7 +289,9 @@ export class Machine {
       this.bus.addDevice(VIRT_VIRTIO_9P, this.virtio9p);
     }
 
-    this.cpu = new Cpu(this.bus, { misaligned: opts.misaligned ?? 'trap' });
+    // 默认与 Cpu 一致：按真实 virt 硬件透明处理非对齐访存（跑 Linux 的必要条件，
+    // 内核模块重定位会做非对齐 8 字节存储）。要规范精确请显式传 'trap'。
+    this.cpu = new Cpu(this.bus, { misaligned: opts.misaligned ?? 'slow' });
     // MMU 直读快路径：指令/数据访问命中 RAM 时绕过 bus 分发与 BigInt 装箱
     this.cpu.mmu.fastRam = {
       base: Number(this.ramBase),

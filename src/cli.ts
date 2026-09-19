@@ -101,7 +101,8 @@ FreeBSD® (not yet tested).
                             guest 侧 mount -t 9p -o trans=virtio,version=9p2000.L
                             hostshare /mnt）
       --load-at <addr>      内核加载地址（默认 0x80200000）
-      --misaligned <mode>   非对齐访存策略：trap（默认，语义精确）或 slow（慢但宽容）
+      --misaligned <mode>   非对齐访存策略：slow（默认，逐字节模拟，与真实 virt 硬件一致）
+                            或 trap（语义精确：抛 misaligned 异常，用于规范一致性测试）
       --script <file>       把文件中的每一行作为控制台输入逐条喂入（无人值守验证）
       --interactive         交互模式：键盘直连串口（登录 shell 后可直接敲命令；
                             退出请在 guest 里执行 poweroff/reboot，Ctrl+C 会交给 guest）
@@ -136,7 +137,7 @@ function parseArgs(argv: string[]): Args {
     trace: false,
     traceFrom: 0n,
     stats: false,
-    misaligned: 'trap',
+    misaligned: 'slow',
     interactive: false,
     input: false,
     pci: false,
