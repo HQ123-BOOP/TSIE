@@ -174,10 +174,18 @@ export class Mmu {
   private tlbKey(vaddr: bigint, asid: number): bigint {
     return (vaddr >> PAGE_SHIFT) * 65536n + BigInt(asid);
   }
-  /** TLB 容量（超出后整体清空，简单有效） */
+  /**
+   * TLB 容量。超出后**整体清空**（不是逐出）—— 看着粗暴，但实测这个分支
+   * 在真实 Linux 引导里**从未触发**：600M 条指令跑下来 `tlbFullFlush` = 0，
+   * 表里长期只有几百项，离 4096 很远。所以"一满就全清"不是瓶颈，别为此改逐出策略。
+   *
+   * 那为什么翻译命中率只有 0.7%（命中 2 万 / 未命中 288 万）？因为 guest 频繁
+   * 写 satp、发 sfence.vma（上下文切换、flush_tlb_*）——那些失效是语义必需的。
+   * 陷入时的失效只占其中约 6%（实测：去掉后 walk 2886k → 2722k，MIPS 无变化，已回滚）。
+   */
   maxEntries = 4096;
 
-  stats = { tlbHit: 0, tlbMiss: 0, walks: 0 };
+  stats = { tlbHit: 0, tlbMiss: 0, walks: 0, tlbFullFlush: 0 };
 
   /** 调试：页错误时打印遍历细节 */
   debug = false;
@@ -386,6 +394,7 @@ export class Mmu {
       const paddr = (ppn << PAGE_SHIFT) | (vaddr & ((1n << BigInt(shift)) - 1n));
 
       if (this.tlb.size >= this.maxEntries) {
+        this.stats.tlbFullFlush++;
         this.tlb.clear();
         for (const m of this.fastBy.values()) m.clear();
       }

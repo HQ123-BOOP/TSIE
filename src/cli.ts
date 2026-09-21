@@ -525,7 +525,9 @@ async function main(): Promise<number> {
         `指令数     : ${stats.instructions}\n` +
         `耗时       : ${stats.seconds.toFixed(3)} s\n` +
         `速度       : ${mips.toFixed(2)} MIPS\n` +
-        `TLB 命中   : ${machine.cpu.mmu.stats.tlbHit} / 未命中 ${machine.cpu.mmu.stats.tlbMiss}\n` +
+        `TLB 命中   : ${machine.cpu.mmu.stats.tlbHit} / 未命中 ${machine.cpu.mmu.stats.tlbMiss}` +
+        ` / 遍历 ${machine.cpu.mmu.stats.walks}` +
+        `（容量满导致整体清空 ${machine.cpu.mmu.stats.tlbFullFlush} 次）\n` +
         // 显示推送：按脏矩形推增量，实发帧数与累计字节数是"是否真的省下来"的直接凭据
         (display
           ? `显示推送   : 实发 ${display.stats().sent} 帧 / ${(
