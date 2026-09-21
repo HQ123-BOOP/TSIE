@@ -10,27 +10,30 @@
 
 </div>
 
-零运行时依赖（仅 Node.js 标准库），从指令译码、特权架构、虚拟内存到外设全部手写实现，
-可用于学习 RISC-V 体系结构、运行裸机程序，或作为构建 RISC-V 工具链/操作系统的试验平台。
+除 `ws`（浏览器实时显示用的 WebSocket 库）之外没有运行时依赖，从指令译码、特权架构、
+虚拟内存到外设全部手写实现，可用于学习 RISC-V 体系结构、运行裸机程序，
+或作为构建 RISC-V 工具链/操作系统的试验平台。
 
 ## 特性一览
 
 | 模块 | 能力 |
 | --- | --- |
-| **指令集** | RV64I / M（乘除）/ A（原子）/ F+D（单双精度浮点）/ C（压缩）/ Zicsr / Zifencei，即 **RV64GC** |
+| **指令集** | RV64I / M（乘除）/ A（原子）/ F+D（单双精度浮点）/ C（压缩）/ Zicsr / Zifencei，即 **RV64GC**；另有 Zba / Zbb / Zbs 位操作与 Zicntr 计数器（`misa` 上报 B 位） |
 | **特权架构** | M / S / U 三种特权级，全套 m/s CSR、mret/sret、异常委派（medeleg/mideleg）、中断（CLINT+PLIC）、WFI |
 | **虚拟内存** | Sv39 / Sv48 多级页表遍历、TLB（支持超级页）、sfence.vma、A/D 位硬件更新、SUM/MXR/MPRV 语义 |
-| **外设** | NS16550 UART（中断+FIFO+回环）、CLINT（mtime/msip）、PLIC（claim/complete）、VirtIO-MMIO 块设备、SiFive Test |
-| **固件** | **内建 SBI v0.2**（console/timer/rfence/HSM/SRST/BASE），无需外部 OpenSBI 即可启动 Linux；实测 OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) 完整引导到 login:** |
+| **外设** | NS16550 UART（中断+FIFO+回环）、CLINT（mtime/msip）、PLIC（claim/complete）、Goldfish RTC、SiFive Test |
+| **VirtIO** | 块设备 / 网卡（slirp 与宿主代理两种后端）/ 9P（共享宿主目录）/ GPU / 键盘输入。**MMIO 与 PCIe 两种挂载方式**（GPU 走 PCI，对齐 EDK II 的 `IsPciDisplay`） |
+| **显示** | virtio-gpu 画面可经 WebSocket 实时推到浏览器（脏矩形增量推送），浏览器键盘回传到 guest |
+| **固件** | 直接运行真实固件：实测 OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) 完整引导到 `login:`**，以及 EDK II (UEFI) 启动链（含 TianoCore logo 上屏）。**SBI 调用需外部 OpenSBI —— 内建 SBI 固件已移除** |
 | **加载** | ELF64 装载（自动处理 vaddr/paddr 偏移）、裸二进制、扁平设备树（DTB）生成器（含 `rng-seed` 熵注入） |
 | **工具** | 指令编码器（`tools/encoder.ts`）、指令级单元测试、CLI |
 
 ## 快速开始
 
 ```bash
-npm install        # 仅安装 typescript / tsx / @types/node 开发依赖
-npm test           # 运行 119 项单元测试
-npm run demo       # 裸机 "Hello, RISC-V 64!"（经内建 SBI 输出）
+npm install        # 运行时依赖只有 ws；另有 typescript / tsx / @types/node 开发依赖
+npm test           # 运行 222 项单元测试
+npm run demo       # 裸机 "Hello, RISC-V 64!"（直接驱动 UART，不依赖固件）
 npm run bench      # 性能基准
 ```
 
@@ -88,7 +91,7 @@ U-Boot 下载：Debian 包 `u-boot-qemu`（`ftp.debian.org/debian/pool/main/u/u-
 源码：<https://github.com/u-boot/u-boot>（GPL-2.0，产物勿提交入 Apache-2.0 仓库）。
 
 
-### 启动 Linux（Alpine，已验证 initramfs 解包 ✅）
+### 启动 Linux（Alpine，已验证引导到 shell ✅）
 
 配套工具：`tools/make-initramfs.py`（Windows 上自制 cpio-newc initramfs）、
 `tools/verify-cpio.py`（校验归档结构）。
@@ -104,7 +107,7 @@ mkdir rootfs && tar -xzf alpine-minirootfs-*.tar.gz -C rootfs/
 python tools/make-initramfs.py rootfs initramfs.cpio.gz
 python tools/verify-cpio.py initramfs.cpio.gz        # 结构校验
 
-# 3) 启动（约 0.5 MIPS，完整引导需数亿条指令、十几分钟）
+# 3) 启动（实测吞吐约 2–4 MIPS，随宿主负载浮动；完整引导需数亿条指令，约数分钟）
 tsx src/cli.ts --bios .../fw_jump.bin \
   --kernel tmp/alpine/Image-lts --initrd tmp/alpine/initramfs.cpio.gz \
   --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 300000000 --stats
@@ -113,6 +116,11 @@ tsx src/cli.ts --bios .../fw_jump.bin \
 实测进度（Linux 6.18.44，rv64gc）：内核启动 → 内存管理（DMA32 512MB /
 131072 页）→ SBI TIME/IPI/RFENCE/DBCN/HSM 全部识别 → 定时器与时钟源 →
 VFS / TCP-IP / PCI / USB 子系统 → **initramfs 解包成功**。
+
+另有更完整的一条链路已跑通：Alpine 3.24.2 的 ext4 rootfs 配精简内核
+（`Image-min-7.2.3`），经 OpenSBI 直接引导，**挂载根文件系统后进入
+`alpine-tsie:~#`**；`init=/bin/sh` 可跳过 OpenRC，把一轮验证压到数分钟。
+virtio-gpu 也在同一条链上完成 mode-set 并出图（见下节）。
 
 排障要点（踩过的坑，避免重复）：
 - `head.S` 的 `relocate_enable_mmu` 用指令页错误当"传送门"（stvec 指向虚拟地址，
@@ -138,7 +146,7 @@ VFS / TCP-IP / PCI / USB 子系统 → **initramfs 解包成功**。
 2. **熵**：模拟器时序确定，jitter entropy 采不出熵，内核 RNG 初始化会无限
    自旋（udev 起不来）。本模拟器在 DTB `/chosen/rng-seed` 注入 4096 字节
    `crypto.getRandomValues()` 真随机——内核极早期即 `random: crng init done`。
-3. **虚拟时钟**：`timebaseFrequency` 设 100 MHz（模拟器仅 ~1 MIPS，真机 ~100 倍，
+3. **虚拟时钟**：`timebaseFrequency` 设 100 MHz（模拟器约 2–4 MIPS，真机 ~100 倍，
    默认 10 MHz 下 10M 指令 = 1 虚拟秒，内核 soft lockup 与 systemd 各服务超时
    会按虚拟时间冤杀慢任务）。WFI 快进已随 timebase 折算，睡眠收敛不受影响。
 
@@ -161,16 +169,33 @@ tsx src/cli.ts \
   --append "console=ttyS0 root=/dev/vda" \
   --memory 1G
 
-# 可选：外接 OpenSBI（缺省用内建 SBI）
+# 挂载 OpenSBI 固件。启动 Linux 必需 —— 内建 SBI 固件已移除，
+# 不带 --bios 时只能跑不依赖 SBI 调用的裸机程序
 tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux
 
 # 交互模式：键盘输入接到串口接收（登录 Linux shell 后可直接敲命令）
 tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --initrd initramfs.cpio \
   --append "console=ttyS0 rdinit=/init" --interactive
 
+# 图形：挂 virtio-gpu，画面实时推到浏览器；在网页里点一下画面聚焦后
+# 敲键即可回传给 guest（走 virtio-input）。--pci 让 GPU 改挂 PCIe，
+# 这样 EDK II 会按 PCI 显示设备自行枚举，不需要给固件打补丁
+tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --disk rootfs.ext4 \
+  --append "console=ttyS0 root=/dev/vda rw" --gpu 1024x768 --pci \
+  --display 8094 --input
+
+# 跑 UEFI 固件（EDK II）：CFI flash 必须 CODE / VARS 成对提供
+tsx src/cli.ts --flash-code RISCV_VIRT_CODE.fd --flash-vars RISCV_VIRT_VARS.fd
+
+# 把宿主目录共享给 guest（virtio-9p，guest 侧 mount -t 9p ... hostshare /mnt）
+tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --disk rootfs.ext4 \
+  --append "console=ttyS0 root=/dev/vda rw" --9p /path/to/share
+
 # 导出设备树、指令跟踪
 tsx src/cli.ts --kernel hello.bin --dump-dtb virt.dtb --trace --trace-from 0x80200000
 ```
+
+完整选项见 `tsx src/cli.ts --help`。
 
 ## 内存映射（QEMU virt 兼容）
 
@@ -178,15 +203,24 @@ tsx src/cli.ts --kernel hello.bin --dump-dtb virt.dtb --trace --trace-from 0x802
 | --- | --- |
 | `0x0000_1000` | （保留） |
 | `0x0010_0000` | SiFive Test（写 `0x5555` 退出 0 / `0x3333` 退出 1） |
+| `0x0010_1000` | Goldfish RTC |
 | `0x0200_0000` | CLINT（msip / mtimecmp / mtime） |
 | `0x0C00_0000` | PLIC |
 | `0x1000_0000` | NS16550 UART0 |
 | `0x1000_1000` | VirtIO-MMIO 块设备 |
+| `0x1000_2000` | VirtIO-MMIO 网卡 |
+| `0x1000_3000` | VirtIO-MMIO 9P |
+| `0x1000_4000` | VirtIO-MMIO GPU（加 `--pci` 时改挂 PCIe） |
+| `0x1000_5000` | VirtIO-MMIO 键盘输入 |
+| `0x2000_0000` | CFI NOR flash（各 32 MiB，EDK II 的 CODE / VARS） |
+| `0x3000_0000` | PCIe ECAM（256 MiB） |
+| `0x4000_0000` | PCIe MMIO32（1 GiB） |
 | `0x8000_0000` | RAM（默认 512 MiB，`-m` 可调） |
 | `0x8020_0000` | 默认内核加载地址 |
 | 镜像尾端 | DTB 实际动态放置（2MB 对齐，紧跟内核/initrd 之后——固定地址会被大 initrd 覆盖） |
 
-PLIC 中断源：1 = VirtIO 块设备，10 = UART0（与 QEMU virt 相同）。
+PLIC 中断源：1 = VirtIO 块设备、2 = 网卡、3 = 9P、4 = GPU、5 = 键盘输入、
+10 = UART0、11 = RTC、32–35 = PCIe INTx（与 QEMU virt 一致）。
 
 ## 编程接口
 
@@ -210,15 +244,20 @@ console.log(machine.dumpState()); // PC / mstatus / satp 等现场
 或用 `tools/encoder.ts` 的指令编码器手写机器码：
 
 ```ts
-import { addi, li, sd, ecall, halt } from './tools/encoder.ts';
+import { li, sd, sw } from './tools/encoder.ts';
+import { VIRT_TEST } from './src/index.ts';
 
 const program = [
   ...li(1, 0x80200000n),
   ...li(2, 0x1234n),
   sd(1, 2, 0),
-  ...halt(),
+  ...li(3, VIRT_TEST),
+  ...li(4, 0x5555n),
+  sw(3, 4, 0),      // 写 SiFive Test，正常退出
 ];
 ```
+
+（`halt()` 是 `tests/harness.ts` 里的测试辅助，不在 `tools/encoder.ts` 中。）
 
 ## 目录结构
 
@@ -231,25 +270,37 @@ src/
 │   ├── csr.ts            CSR 寄存器文件（WARL / 只读 / 别名）
 │   ├── mmu.ts            Sv39/Sv48 页表遍历 + TLB
 │   └── fpu.ts            IEEE754 浮点（NaN 装箱、舍入模式、异常标志）
-├── dev/                  UART / CLINT / PLIC / VirtIO / Test
-├── firmware/sbi.ts       内建 SBI v0.2 固件
+├── dev/                  设备模型
+│   ├── uart.ts / clint.ts / plic.ts / rtc.ts / test.ts
+│   ├── virtio.ts         VirtIO 传输无关的基类
+│   ├── virtio-mmio.ts    VirtIO MMIO 传输
+│   ├── pci/ecam.ts       PCIe 主机桥（ECAM）
+│   ├── pci/virtio-pci.ts VirtIO PCI 传输
+│   ├── virtio-blk.ts / net.ts / net-slirp.ts / net-proxy.ts
+│   ├── ninep.ts / virtio-9p.ts
+│   └── virtio-gpu.ts / virtio-input.ts / flash.ts / disk.ts / bmp.ts
+├── display/web.ts        virtio-gpu 画面推送到浏览器（WebSocket + 脏矩形增量）
 ├── loader/               ELF64 装载 + DTB 生成
 ├── machine.ts            virt 机器组装与主循环
+├── index.ts              公共 API 导出
 └── cli.ts                命令行入口
 tools/encoder.ts          RISC-V 指令编码器（测试与示例用）
-tests/                    119 项单元测试（node:test）
+tests/                    222 项单元测试（node:test）
 ```
 
 ## 测试
 
 ```bash
-npm test            # 全部 119 项
+npm test                              # 全部 222 项（25 个文件）
 npx tsx --test tests/mmu.test.ts      # 单个模块
+npm run typecheck                     # 类型检查（当前 0 错误）
 ```
 
 覆盖范围：RV64I 全部整数指令与访存、M 扩展（含除零/溢出）、A 扩展（LR/SC/AMO）、
-F/D 扩展（舍入模式、NaN 装箱、FCLASS）、RVC 压缩指令、CSR/陷阱/中断委派、
-Sv39/Sv48 翻译与权限、全部外设协议、以及整机端到端（SBI、定时器中断、WFI）。
+F/D 扩展（舍入模式、NaN 装箱、FCLASS）、RVC 压缩指令、Zba/Zbb/Zbs/Zicntr、
+CSR/陷阱/中断委派、Sv39/Sv48 翻译与权限、严格 NX（X=0 页取指必须 fault）、
+全部外设协议（UART / virtio-blk / net / 9p / gpu / input / PCI）、
+以及整机端到端（定时器中断、WFI、计数器进位护栏）。
 
 ## 性能与设计取舍
 
