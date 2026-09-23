@@ -1028,7 +1028,8 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
         this.csr.writeRaw(CSR.MSTATUS, next);
         this.priv = spp;
         this.nextPc = this.csr.read(CSR.SEPC) ?? 0n;
-        this.flushTrans();
+        // 只失效 TLB，不动指令缓存：返回时页表没变，指令编码也不会变。
+        this.mmu.flush();
         return;
       }
       case 0x302: { // MRET
@@ -1042,7 +1043,8 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
         this.csr.writeRaw(CSR.MSTATUS, next);
         this.priv = mpp;
         this.nextPc = this.csr.read(CSR.MEPC) ?? 0n;
-        this.flushTrans();
+        // 同 SRET：只失效 TLB。
+        this.mmu.flush();
         return;
       }
       case 0x105: { // WFI
@@ -1650,11 +1652,14 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
       this.pc = (this.csr.read(CSR.STVEC) ?? 0n) & ~0x3n;
     }
     this.wfi = false;
-    // 这里曾尝试"只失效 TLB、不清 icache"（理由是 icache 条目自带 priv 校验）。
-    // 语义上站得住，但**实测在真实客机负载上量不出收益**（1.88~2.01 vs 基线 1.96~2.01 MIPS，
-    // 在轮间噪声内）—— 因为 guest 还会频繁写 satp / 发 sfence.vma，那些失效是必须的，
-    // icache 本来就被它们反复清掉。收益不成立就不动保险，恢复原状。
-    this.flushTrans();
+    // 只失效 TLB，不动指令缓存：陷入并不改变页表，也不改变已经取到的指令编码
+    // （改代码要靠 fence.i，那是软件的责任；真实硬件的 I-cache 同理）。
+    //
+    // 早先试过同样的改法但量不出收益，于是撤回了 —— 当时那条注释写的原因是
+    // "guest 还频繁写 satp / 发 sfence.vma，icache 本来就被它们反复清掉"。
+    // 那个前提现在已经不成立：sfence.vma 和写 mstatus 时清 icache 这两处都已经
+    // 去掉（见本文件对应位置的说明），于是陷入留下的失效占比变得可观。
+    this.mmu.flush();
   }
 
   /** 中断优先级：外部 > 软件 > 定时器，高特权级优先 */
