@@ -169,7 +169,7 @@ export class Cpu {
   /** 本条指令是否发生陷阱（陷阱入口地址已写入 pc） */
   private trapTaken = false;
 
-  stats = { loads: 0, stores: 0, amo: 0, traps: 0, fp: 0 };
+  stats = { loads: 0, stores: 0, amo: 0, traps: 0, fp: 0, icacheHit: 0, icacheMiss: 0, icacheFlush: 0, icacheHardClear: 0 };
 
   /**
    * 指令缓存：pc(低 32 位为键) → 已取指译码的指令，去掉热循环里重复的
@@ -194,8 +194,10 @@ export class Cpu {
   /** 使整个指令缓存失效：bump 代号，旧项在查找时因 gen 不等自动作废 */
   private bumpICache(): void {
     this.icacheGen++;
+    this.stats.icacheFlush++;
     // 代号回绕或积累过多时物理清空，释放内存（正常引导极少触发）
     if (this.icacheGen === 0 || this.icache.size > (1 << 18)) {
+      this.stats.icacheHardClear++;
       // 先回收条目再清表：否则池子永远是空的，下一轮未命中又要重新分配
       for (const e of this.icache.values()) {
         if (this.icachePool.length < 4096) this.icachePool.push(e);
@@ -383,6 +385,7 @@ export class Cpu {
       const e = this.icache.get(Number(pc & 0xffffffffn));
       if (e !== undefined && e.pc === pc && e.priv === this.priv && e.gen === this.icacheGen) {
         this.instret++;
+        this.stats.icacheHit++;
         if (this.traceEnabled) this.emitTrace(pc, e.inst, e.len);
         this.nextPc = e.len === 2 ? pc + 2n : pc + 4n; // 常量 BigInt，避免每条 new
         if (e.len === 2) this.execCompressed(e.inst);
@@ -392,6 +395,7 @@ export class Cpu {
       }
     }
 
+    if (this.icacheEnabled) this.stats.icacheMiss++;
     const lo = this.mmu.fetch16(pc);
     if (lo === null) {
       this.takeException(this.mmu.faultCause, this.mmu.faultTval);
@@ -843,9 +847,19 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
   // 访存
   // ------------------------------------------------------------------
 
+  /**
+   * 按 MemSize 索引的对齐掩码（即 `size - 1`）。
+   *
+   * 原先写 `BigInt(size - 1)`：每次访存现造一个 BigInt，只为做一次 AND。
+   * V8 并**不**缓存 0n/1n/3n/7n 这类小 BigInt —— 微基准 `tmp/bench-align.ts`
+   * 实测每次约 24ns，查表只要约 3ns，相差 7.5 倍。
+   * MemSize ∈ {1,2,4,8}，其余槽位填 0n（不会被索引到）。
+   */
+  private static readonly ALIGN_M1: readonly bigint[] = [0n, 0n, 1n, 0n, 3n, 0n, 0n, 0n, 7n];
+
   private loadMem(addr: bigint, size: MemSize): bigint | null {
     this.stats.loads++;
-    if ((addr & BigInt(size - 1)) !== 0n) {
+    if ((addr & Cpu.ALIGN_M1[size]!) !== 0n) {
       if (this.misaligned === 'trap') {
         this.takeException(Exc.LoadAddrMisaligned, addr);
         return null;
@@ -871,7 +885,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
 
   private storeMem(addr: bigint, value: bigint, size: MemSize): void {
     this.stats.stores++;
-    if ((addr & BigInt(size - 1)) !== 0n) {
+    if ((addr & Cpu.ALIGN_M1[size]!) !== 0n) {
       if (this.misaligned === 'trap') {
         this.takeException(Exc.StoreAddrMisaligned, addr);
         return;
@@ -903,7 +917,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
       // LR.W / LR.D
       if (rs2 !== 0) return this.illegal(inst);
       const size: MemSize = isDouble ? 8 : 4;
-      if ((addr & BigInt(size - 1)) !== 0n) {
+      if ((addr & Cpu.ALIGN_M1[size]!) !== 0n) {
         this.takeException(Exc.LoadAddrMisaligned, addr);
         return;
       }
@@ -918,7 +932,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
     if (funct5 === 0x03) {
       // SC.W / SC.D
       const size: MemSize = isDouble ? 8 : 4;
-      if ((addr & BigInt(size - 1)) !== 0n) {
+      if ((addr & Cpu.ALIGN_M1[size]!) !== 0n) {
         this.takeException(Exc.StoreAddrMisaligned, addr);
         return;
       }
@@ -934,7 +948,7 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
     }
 
     const size: MemSize = isDouble ? 8 : 4;
-    if ((addr & BigInt(size - 1)) !== 0n) {
+    if ((addr & Cpu.ALIGN_M1[size]!) !== 0n) {
       this.takeException(Exc.StoreAddrMisaligned, addr);
       return;
     }
@@ -981,7 +995,14 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
       const vaddr = rs1 === 0 ? undefined : this.x[rs1];
       const asid = rs2 === 0 ? undefined : Number(this.x[rs2]! & 0xffffn);
       this.mmu.flushBy(vaddr, asid);
-      this.bumpICache();
+      // 早先这里还调了 bumpICache()，那是多余的：
+      //  - 规范上 sfence.vma 只失效地址翻译缓存；失效指令缓存是 fence.i 的活
+      //    （本函数里 funct3===1 那条分支已单独处理）。
+      //  - 我们的 icache 条目只缓存**指令编码**（pc/inst/len/priv/gen），
+      //    不缓存物理地址，所以 TLB 失效并不影响它的正确性。
+      // 真实硬件同理：改了代码要靠 fence.i，sfence.vma 不清 I-cache。
+      // 而 Linux 上下文切换频繁发 sfence.vma，每次都把整个 icache 判为失效，
+      // 实测命中率被压到 74%。
       return;
     }
 
@@ -1072,7 +1093,15 @@ private execBext(is32: boolean, funct7: number, funct3: number, rd: number, rs1:
           return this.illegal(inst);
       }
       this.csr.writeRaw(csrAddr, next & MASK64);
-      if (csrAddr === CSR.SATP || csrAddr === CSR.MSTATUS) this.flushTrans();
+      // satp：页表换了，TLB 与 icache 都必须失效（后者的条目是为旧页表取的）。
+      // mstatus：只影响**数据访问**的权限语义（MXR / SUM / MPRV），取指一条都不看 ——
+      //   effectivePriv() 对 Instruction 直接返回 this.priv（MPRV 只作用于 load/store），
+      //   checkPerm() 对 Instruction 只判 X 位（MXR 只放宽 load，SUM 只管 U 页）。
+      //   而 icache 条目本身带 priv 校验，特权级变化也会由 syncMmu 反映到命中判定。
+      // 早先二者都走 flushTrans()，于是 Linux 每次开关中断（写 mstatus）都把整个
+      // icache 判为失效 —— 实测 3 亿条指令里失效 13 万次，命中率被压到 74%。
+      if (csrAddr === CSR.SATP) this.flushTrans();
+      else if (csrAddr === CSR.MSTATUS) this.mmu.flush();
       // 任何 CSR 写都可能改到中断门控的输入：直接写 mie/mip，或经 SIE/SIP 别名
       // 钩子转发到 mie/mip（csr.ts）。CSR 写相对热路径极稀，重算一次即可。
       this.irqDirty = true;

@@ -520,11 +520,19 @@ async function main(): Promise<number> {
 
   if (args.stats || !machine.cpu.halted) {
     const mips = stats.ips / 1e6;
+    const ih = machine.cpu.stats.icacheHit;
+    const im = machine.cpu.stats.icacheMiss;
+    const iTotal = ih + im;
     process.stderr.write(
       `\n--- 统计 ---\n` +
         `指令数     : ${stats.instructions}\n` +
         `耗时       : ${stats.seconds.toFixed(3)} s\n` +
         `速度       : ${mips.toFixed(2)} MIPS\n` +
+        (iTotal > 0
+          ? `icache 命中: ${ih} / ${iTotal}（命中率 ${((100 * ih) / iTotal).toFixed(2)}%）` +
+            `，失效 ${machine.cpu.stats.icacheFlush} 次` +
+            `（其中物理清空 ${machine.cpu.stats.icacheHardClear} 次）\n`
+          : '') +
         `TLB 命中   : ${machine.cpu.mmu.stats.tlbHit} / 未命中 ${machine.cpu.mmu.stats.tlbMiss}` +
         ` / 遍历 ${machine.cpu.mmu.stats.walks}` +
         `（容量满导致整体清空 ${machine.cpu.mmu.stats.tlbFullFlush} 次）\n` +
