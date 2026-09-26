@@ -29,7 +29,11 @@
 #                                  建不了符号链接、也不保留执行位，直接 tar 解出来的 rootfs
 #                                  产出的 initramfs 会因 EACCES 起不到 init。
 #                                  需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
-#   可选  7-Zip                    只有 EDK II 需要（.deb 是 ar 归档）。找不到就跳过 EDK II。
+#   可选  bsdtar / 7-Zip           只有 EDK II 需要：.deb 是 **ar 归档**，而 Git Bash 的
+#                                  GNU tar **不支持 ar**。Windows 自带的
+#                                  C:\Windows\System32\tar.exe 就是 bsdtar（libarchive），
+#                                  能解 ar 且能穿透内层 data.tar.xz —— 优先用它；
+#                                  7-Zip 作兜底。两者都没有时自动跳过 EDK II。
 #   不需要 xz                      OpenSBI 是 .tar.xz，但 tar 自己经 liblzma 解压。
 
 set -euo pipefail
@@ -70,13 +74,54 @@ need() { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1"; }
 for c in curl tar sha256sum python; do need "$c"; done
 # python 是硬依赖（ps1 侧同样）：解压必须走 extract_archive.py —— Windows 的 tar 建不了
 # 符号链接、也不保留执行位，缺了它产出的 initramfs 无法引导。提前检查，别等 20 分钟后才报。
-if [ "$DO_EDK2" = 1 ] && [ ! -x "$SEVENZIP" ] && ! command -v 7z >/dev/null 2>&1; then
-  warn "找不到 7-Zip，将跳过 EDK II 解包（.deb 是 ar 归档，本环境没有 ar/dpkg-deb）"
-  DO_EDK2=0
-fi
-[ -x "$SEVENZIP" ] || SEVENZIP="$(command -v 7z || true)"
+
+# ------------------------------------------------- EDK II 的 ar 拆包工具选择
+#
+# .deb 是 **ar 归档**（魔数 `!<arch>`），不是 tar 也不是 zip。本机没有 ar/dpkg-deb。
+# 关键事实（实测，别再凭印象）：
+#   * Git Bash 的 `tar` 是 **GNU tar 1.35 → 不支持 ar**，用它解 .deb 必报错。
+#   * **Windows 自带的 bsdtar（libarchive 3.8.8）支持 ar**，且能一路穿透内层 data.tar.xz。
+#     它在 PATH 里被 Git 的 tar 遮蔽（同名 tar.exe），必须按绝对路径调用。
+#     实测产物与 7-Zip 逐字节一致（两个 .fd 的 sha256 相同）。
+#   * 7-Zip 也能做，作为兜底。
+#
+# 候选按优先级排列；真正判定在 deb 下载后用 probe_deb_tool 实读一次。
+AR_CANDIDATES=()
+build_ar_candidates() {
+  local sysroot="${SYSTEMROOT:-C:\\Windows}"
+  AR_CANDIDATES=(
+    "/c/Windows/System32/tar.exe"       # Windows 自带 bsdtar（64 位进程）
+    "${sysroot}/System32/tar.exe"
+    "/c/Windows/sysnative/tar.exe"      # 32 位进程下的 64 位视图
+    "$SEVENZIP"
+  )
+  local z; z="$(command -v 7z 2>/dev/null || true)"
+  [ -n "$z" ] && AR_CANDIDATES+=("$z")
+}
+
+# 用真实的 .deb 试读：每个候选都要能列出 ar 成员才算数。
+#
+# ⚠️ 语法不同，不能用同一套旗标探测：GNU tar 与 bsdtar 是 `-tf`，**7-Zip 是 `l`**。
+# 早先用 `-tf` 去测 7z 会把它误判为"读不了 ar"（实测踩过）。
+AR_TOOL=""
+is_7zip() { case "$(basename "$1")" in 7z|7z.exe|7za|7za.exe) return 0 ;; *) return 1 ;; esac; }
+
+probe_deb_tool() {  # probe_deb_tool <某个 .deb>
+  local deb="$1"
+  local bin
+  for bin in "${AR_CANDIDATES[@]}"; do
+    [ -x "$bin" ] || continue
+    if is_7zip "$bin"; then
+      "$bin" l "$deb" >/dev/null 2>&1 && { AR_TOOL="$bin"; log "  EDK II 拆包工具: 7-Zip ($bin)"; return 0; }
+    else
+      "$bin" -tf "$deb" >/dev/null 2>&1 && { AR_TOOL="$bin"; log "  EDK II 拆包工具: bsdtar ($bin)"; return 0; }
+    fi
+  done
+  return 1
+}
 
 mkdir -p "$OUT_DIR" "$FW_DIR"
+build_ar_candidates
 
 # ---------------------------------------------------------------- 下载（重试 + 续传 + 多源）
 
@@ -309,14 +354,38 @@ bootstrap_edk2() {
   local deb="$OUT_DIR/$deb_name"
   fetch "$deb" "" "$pool$deb_name" || { warn "  下载失败，跳过 EDK II"; return 0; }
 
-  log "  解包（.deb 是 ar 归档，用 7-Zip）..."
+  # 拆 ar 容器。工具在下载后**实读一次**判定（GNU tar 会在此失败，bsdtar/7-Zip 通过）。
+  if ! probe_deb_tool "$deb"; then
+    warn "  没有能解 ar 的工具（bsdtar 或 7-Zip），跳过 EDK II"
+    warn "  .deb 是 ar 归档；Git Bash 的 GNU tar 不支持它"
+    return 0
+  fi
+
   local x="$OUT_DIR/.deb-x"
   rm -rf "$x"; mkdir -p "$x"
-  "$SEVENZIP" x -y -o"$x" "$deb" >/dev/null 2>&1 || die "7-Zip 解 .deb 失败"
+  # bsdtar 与 7z 的调用语法不同：bsdtar 是 -xf ... -C，7z 是 x -y -o<dir>
+  if is_7zip "$AR_TOOL"; then
+    log "  拆包（7-Zip）..."
+    "$AR_TOOL" x -y -o"$x" "$deb" >/dev/null 2>&1 || die "7-Zip 解 .deb 失败"
+  else
+    log "  拆包（bsdtar）..."
+    "$AR_TOOL" -xf "$deb" -C "$x" 2>/dev/null || die "bsdtar 解 .deb 失败"
+  fi
+
+  # 内层可能是 data.tar 或 data.tar.xz（Debian 上游用 xz，bsdtar 能直接穿透）
   local data; data="$(ls "$x"/data.tar* 2>/dev/null | head -1)"
-  [ -n "$data" ] || die "未在 .deb 里找到 data.tar"
-  verify_archive "$data" || die ".deb 内的 data.tar 不完整，重新下载 $deb_name"
-  tar -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null || true
+  [ -n "$data" ] || die "未在 .deb 里找到 data.tar*"
+  case "$data" in
+    *.xz|*.gz|*.zst)
+      log "  解内层 $(basename "$data")..."
+      "$AR_TOOL" -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null \
+        || die "解内层 $(basename "$data") 失败"
+      ;;
+    *)
+      verify_archive "$data" || die ".deb 内的 data.tar 不完整，重新下载 $deb_name"
+      tar -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null || true
+      ;;
+  esac
 
   local src="$x/usr/share/qemu-efi-riscv64"
   local f

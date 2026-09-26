@@ -27,14 +27,21 @@
 
 .NOTES
   依赖（缺失时的后果已注明）：
-    必需  curl.exe / tar.exe   Windows 10 1803+ 自带，或装 Git for Windows
-    必需  python              解压与打 cpio 都靠它。**不是可选项**：Windows 的 tar
-                              建不了符号链接、也不保留执行位，直接 tar 解出来的 rootfs
-                              产出的 initramfs 会因 EACCES 起不到 init。
-                              需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
-    可选  7-Zip               只有 EDK II 需要（.deb 是 ar 归档，本机没有 ar/dpkg-deb）。
-                              找不到就自动跳过 EDK II 并警告，其余照常。
-    不需要 xz                 OpenSBI 是 .tar.xz，但 tar 自己经 liblzma 解压。
+    必需  curl.exe              Windows 10 1803+ 自带，或装 Git for Windows
+    必需  tar.exe               **必须是 Windows 自带的那个 bsdtar**，不是 Git 的 GNU tar。
+                                两者同名但能力不同：本脚本显式取 System32\tar.exe，
+                                因为 PATH 里 Git 的 tar.exe 排在前面且**不支持 ar**。
+    必需  python                解压与打 cpio 都靠它。**不是可选项**：Windows 的 tar
+                                建不了符号链接、也不保留执行位，直接 tar 解出来的 rootfs
+                                产出的 initramfs 会因 EACCES 起不到 init。
+                                需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
+    可选  7-Zip                 只有 EDK II 拆 ar 会用到，且**仅在 bsdtar 不可用时**兜底。
+                                两者都没有就自动跳过 EDK II 并警告。
+    不需要 xz                   OpenSBI 是 .tar.xz，但 tar/bsdtar 自己经 liblzma 解压。
+
+  ⚠️ .deb 是 **ar 归档**（魔数 `!<arch>`），不是 tar 也不是 zip。
+  Windows 自带的 bsdtar（libarchive）能解 ar 且能穿透内层 data.tar.xz；
+  Git 的 GNU tar 不能。EDK II 那一步的拆包工具由**实读一次 .deb**判定，不靠猜。
 
   传 -Dir 时**用正斜杠或相对路径**：PowerShell 会把双引号里的 `\t`、`\n` 当转义序列，
   写 `-Dir G:\tmp\ps-test` 会静默变成 `G:tmpps-test`（`\t` = 制表符）。
@@ -72,7 +79,16 @@ $Curl = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
 if (-not $Curl) { $Curl = (Get-Command curl -ErrorAction SilentlyContinue).Source }
 if (-not $Curl) { Write-Die '缺少 curl（Windows 10 1803+ 自带；或装 Git for Windows）' }
 
-$Tar = (Get-Command tar.exe -ErrorAction SilentlyContinue).Source
+# tar 有两个可能来源，**能力不同**，必须分清：
+#   * Windows 自带的 C:\Windows\System32\tar.exe = bsdtar（libarchive）→ 支持 ar
+#   * Git 的 C:\Git\usr\bin\tar.exe = GNU tar → **不支持 ar**（实测）
+# PATH 里通常是 Git 的那个在前，所以只按名字取会拿到不能解 .deb 的那一个。
+$Tar = $null
+foreach ($p in @("$env:SystemRoot\System32\tar.exe", 'C:\Windows\System32\tar.exe')) {
+  if (Test-Path $p) { $Tar = $p; break }
+}
+if (-not $Tar) { $Tar = (Get-Command tar.exe -ErrorAction SilentlyContinue).Source }
+if (-not $Tar) { $Tar = (Get-Command tar -ErrorAction SilentlyContinue).Source }
 if (-not $Tar) { Write-Die '缺少 tar（Windows 10 1803+ 自带 bsdtar）' }
 
 $SevenZip = $null
@@ -81,14 +97,20 @@ foreach ($p in @('C:\Program Files\7-Zip\7z.exe', 'C:\Program Files (x86)\7-Zip\
 }
 if (-not $SevenZip) { $SevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source }
 
+# 谁能解 ar 由**实读一次 .deb** 判定（见 Select-DebTool），这里只列候选。
+$DebToolCandidates = @($Tar) + @($SevenZip | Where-Object { $_ })
+
 $Python = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $Python) { $Python = (Get-Command py -ErrorAction SilentlyContinue).Source }
 
 $DoEdk2 = -not $NoEdk2
-if ($DoEdk2 -and -not $SevenZip) {
-  Write-Warn '找不到 7-Zip，跳过 EDK II（.deb 是 ar 归档，本机没有 ar/dpkg-deb）'
+# 注意：这里**不再**因为"没有 7-Zip"就跳过 EDK II —— bsdtar 同样能解 ar，
+# 真正的判定在下载后用实读完成（见 Install-Edk2）。这里只检查候选是否全空。
+if ($DoEdk2 -and $DebToolCandidates.Count -eq 0) {
+  Write-Warn '找不到任何 tar/7-Zip，跳过 EDK II'
   $DoEdk2 = $false
 }
+$debToolIs7z = $false
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 New-Item -ItemType Directory -Force -Path $FwDir  | Out-Null
@@ -245,7 +267,7 @@ function Install-OpenSbi {
 
 function Install-Edk2 {
   Write-Log '② EDK II (UEFI) 固件'
-  if (-not $DoEdk2) { Write-Log '  已跳过（-NoEdk2 或缺少 7-Zip）'; return }
+  if (-not $DoEdk2) { Write-Log '  已跳过（-NoEdk2）'; return }
 
   # Debian 的 qemu-efi-riscv64 包里就是 32 MiB 的 CODE + VARS，尺寸天然合规。
   $pool = 'https://deb.debian.org/debian/pool/main/e/edk2/'
@@ -258,16 +280,43 @@ function Install-Edk2 {
   $deb = Join-Path $OutDir $debName
   try { Invoke-Fetch -Url "$pool$debName" -OutFile $deb } catch { Write-Warn '  下载失败，跳过 EDK II'; return }
 
-  Write-Log '  解包（.deb 是 ar 归档，用 7-Zip）...'
+  # 拆 ar 容器：由**实读一次 .deb** 判定谁能做（GNU tar 会在此失败，bsdtar/7-Zip 通过）。
+  $debTool = $null
+  foreach ($cand in $DebToolCandidates) {
+    if (-not $cand -or -not (Test-Path $cand)) { continue }
+    $is7z = (Split-Path -Leaf $cand) -match '^7z(a)?(\.exe)?$'
+    # 语法不同：tar/bsdtar 用 -tf，7-Zip 用 l。不能用同一套旗标探测。
+    if ($is7z) { & $cand l $deb *> $null } else { & $cand -tf $deb *> $null }
+    if ($LASTEXITCODE -eq 0) { $debTool = $cand; $debToolIs7z = $is7z; break }
+  }
+  if (-not $debTool) {
+    Write-Warn '  没有能解 ar 的工具（bsdtar 或 7-Zip），跳过 EDK II'
+    Write-Warn '  .deb 是 ar 归档；Git 自带的 GNU tar 不支持它'
+    return
+  }
+  Write-Log "  拆包工具: $(Split-Path -Leaf $debTool)"
+
   $x = Join-Path $OutDir '.deb-x'
   if (Test-Path $x) { Remove-Item -Recurse -Force $x }
   New-Item -ItemType Directory -Force -Path $x | Out-Null
-  & $SevenZip x -y "-o$x" $deb | Out-Null
-  if ($LASTEXITCODE -ne 0) { Write-Die '7-Zip 解 .deb 失败' }
+  if ($debToolIs7z) {
+    & $debTool x -y "-o$x" $deb | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Die '7-Zip 解 .deb 失败' }
+  } else {
+    & $debTool -xf $deb -C $x 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Die 'bsdtar 解 .deb 失败' }
+  }
 
+  # 内层可能是 data.tar 或 data.tar.xz（Debian 上游用 xz，bsdtar 能直接穿透）
   $data = Get-ChildItem -Path $x -Filter 'data.tar*' | Select-Object -First 1
-  if (-not $data) { Write-Die '未在 .deb 里找到 data.tar' }
-  & $Tar -xf $data.FullName -C $x './usr/share/qemu-efi-riscv64/' 2>$null
+  if (-not $data) { Write-Die '未在 .deb 里找到 data.tar*' }
+  if ($data.Name -match '\.(xz|gz|zst)$') {
+    Write-Log "  解内层 $($data.Name)..."
+    & $debTool -xf $data.FullName -C $x './usr/share/qemu-efi-riscv64/' 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Die "解内层 $($data.Name) 失败" }
+  } else {
+    & $Tar -xf $data.FullName -C $x './usr/share/qemu-efi-riscv64/' 2>$null
+  }
 
   $src = Join-Path $x 'usr\share\qemu-efi-riscv64'
   foreach ($f in @('RISCV_VIRT_CODE.fd', 'RISCV_VIRT_VARS.fd')) {
