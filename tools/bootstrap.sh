@@ -23,6 +23,9 @@
 #   tools/bootstrap.sh --alpine v3.24  # 固定 Alpine 分支（默认 latest-stable）
 #   tools/bootstrap.sh --dir DIR       # 换输出目录（默认 tmp/boot）
 #
+# EDK II 需要解 .deb（ar 归档）：系统自带的 bsdtar / 7-Zip 优先；都没有时会提示
+# 「将从第三方仓库下载静态 bsdtar，按原样提供、无任何担保」，同意才下，拒绝即退出。
+#
 # 依赖（缺失时的后果已注明）：
 #   必需  curl / tar / sha256sum   Git Bash 自带
 #   必需  python                   解压与打 cpio 都靠它。**不是可选项**：Windows 的 tar
@@ -30,10 +33,10 @@
 #                                  产出的 initramfs 会因 EACCES 起不到 init。
 #                                  需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
 #   可选  bsdtar / 7-Zip           只有 EDK II 需要：.deb 是 **ar 归档**，而 Git Bash 的
-#                                  GNU tar **不支持 ar**。Windows 自带的
-#                                  C:\Windows\System32\tar.exe 就是 bsdtar（libarchive），
-#                                  能解 ar 且能穿透内层 data.tar.xz —— 优先用它；
-#                                  7-Zip 作兜底。两者都没有时自动跳过 EDK II。
+#                                  GNU tar **不支持 ar**。系统里已有就免下载（Windows
+#                                  自带的 C:\Windows\System32\tar.exe 就是 bsdtar）；
+#                                  都没有时会征求同意，从第三方仓库拉一份静态 bsdtar
+#                                  到临时目录，**用完即删**。
 #   不需要 xz                      OpenSBI 是 .tar.xz，但 tar 自己经 liblzma 解压。
 
 set -euo pipefail
@@ -49,8 +52,6 @@ ALPINE_BRANCH="latest-stable"
 MIRROR_MODE="ask"    # ask | yes | no
 DO_EDK2=1
 
-SEVENZIP="/c/Program Files/7-Zip/7z.exe"
-
 log()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m警告:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -62,7 +63,7 @@ while [ $# -gt 0 ]; do
     --no-edk2)   DO_EDK2=0 ;;
     --alpine)    ALPINE_BRANCH="$2"; shift ;;
     --dir)       OUT_DIR="$2"; shift ;;
-    -h|--help)   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
+    -h|--help)   sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
     *) die "未知参数: $1（--help 看用法）" ;;
   esac
   shift
@@ -83,42 +84,155 @@ for c in curl tar sha256sum python; do need "$c"; done
 #   * **Windows 自带的 bsdtar（libarchive 3.8.8）支持 ar**，且能一路穿透内层 data.tar.xz。
 #     它在 PATH 里被 Git 的 tar 遮蔽（同名 tar.exe），必须按绝对路径调用。
 #     实测产物与 7-Zip 逐字节一致（两个 .fd 的 sha256 相同）。
-#   * 7-Zip 也能做，作为兜底。
+#   * 7-Zip 也能做；macOS / FreeBSD 的 /usr/bin/tar 本身就是 bsdtar。
 #
-# 候选按优先级排列；真正判定在 deb 下载后用 probe_deb_tool 实读一次。
-AR_CANDIDATES=()
-build_ar_candidates() {
-  local sysroot="${SYSTEMROOT:-C:\\Windows}"
-  AR_CANDIDATES=(
-    "/c/Windows/System32/tar.exe"       # Windows 自带 bsdtar（64 位进程）
-    "${sysroot}/System32/tar.exe"
-    "/c/Windows/sysnative/tar.exe"      # 32 位进程下的 64 位视图
-    "$SEVENZIP"
-  )
-  local z; z="$(command -v 7z 2>/dev/null || true)"
-  [ -n "$z" ] && AR_CANDIDATES+=("$z")
-}
-
-# 用真实的 .deb 试读：每个候选都要能列出 ar 成员才算数。
+# 三档策略，越靠前代价越小：
+#   ① 系统已有 bsdtar  → 直接用，不下载（本机命中 Windows 自带那个）
+#   ② 系统已有 7-Zip   → 直接用，不下载
+#   ③ 都没有           → 征求同意后从第三方仓库下静态 bsdtar 到临时目录，用完即删
 #
-# ⚠️ 语法不同，不能用同一套旗标探测：GNU tar 与 bsdtar 是 `-tf`，**7-Zip 是 `l`**。
-# 早先用 `-tf` 去测 7z 会把它误判为"读不了 ar"（实测踩过）。
+# 谁能用一律由**实读一次 .deb** 判定，不看名字（PATH 里有两个同名 tar.exe）。
 AR_TOOL=""
+AR_TOOL_IS_7ZIP=0
+BORROWED_DIR=""          # 下载来的 bsdtar 所在临时目录，退出时删除
+MIRROR_OK=""             # 本轮是否已就"用镜像"取得同意（问过一次就不再问）
+
 is_7zip() { case "$(basename "$1")" in 7z|7z.exe|7za|7za.exe) return 0 ;; *) return 1 ;; esac; }
 
-probe_deb_tool() {  # probe_deb_tool <某个 .deb>
-  local deb="$1"
+build_ar_candidates() {
+  local sysroot="${SYSTEMROOT:-C:\\Windows}" p
+  # SYSTEMROOT 在 MSYS 下是 Windows 形式（C:\Windows），转成 MSYS 路径再拼
+  command -v cygpath >/dev/null 2>&1 && sysroot="$(cygpath -u "$sysroot" 2>/dev/null || echo "$sysroot")"
+  AR_CANDIDATES=(
+    "${sysroot}/System32/tar.exe"      # Windows 自带 bsdtar（libarchive）
+    "/c/Windows/sysnative/tar.exe"     # 32 位进程下的 64 位视图
+  )
+  # PATH 里的 bsdtar / tar（macOS 与 FreeBSD 的 /usr/bin/tar 本身就是 bsdtar；
+  # Git Bash 的 tar 是 GNU tar，会在探测里被淘汰）
+  for p in "$(command -v bsdtar 2>/dev/null || true)" \
+           "$(command -v tar 2>/dev/null || true)" \
+           "/c/Program Files/7-Zip/7z.exe" \
+           "/c/Program Files (x86)/7-Zip/7z.exe" \
+           "$(command -v 7z 2>/dev/null || true)" \
+           "$(command -v 7za 2>/dev/null || true)"; do
+    [ -n "$p" ] && AR_CANDIDATES+=("$p")
+  done
+  return 0
+}
+
+# 用真实的 .deb 试读，并且要求**列出 data.tar 成员** —— 这才证明它真懂 ar。
+# GNU tar 会在这里失败（".deb 不像 tar 归档"），正是我们要区分掉的。
+#
+# ⚠️ 语法不同，不能用同一套旗标探测：tar/bsdtar 是 `-tf`，**7-Zip 是 `l`**。
+# 早先用 `-tf` 去测 7z，把它误判成"读不了 ar"（实测踩过）。
+probe_ar_tool() {  # probe_ar_tool <候选> <deb>；成功则设好 AR_TOOL / AR_TOOL_IS_7ZIP
+  local bin="$1" deb="$2"
+  [ -n "$bin" ] || return 1
+  [ -x "$bin" ] || command -v "$bin" >/dev/null 2>&1 || return 1
+  if is_7zip "$bin"; then
+    "$bin" l "$deb" 2>/dev/null | grep -q 'data\.tar' || return 1
+    AR_TOOL_IS_7ZIP=1
+  else
+    "$bin" -tf "$deb" 2>/dev/null | grep -q 'data\.tar' || return 1
+    AR_TOOL_IS_7ZIP=0
+  fi
+  AR_TOOL="$bin"
+  return 0
+}
+
+find_local_ar_tool() {  # ①②档：系统里已有的工具
   local bin
   for bin in "${AR_CANDIDATES[@]}"; do
-    [ -x "$bin" ] || continue
-    if is_7zip "$bin"; then
-      "$bin" l "$deb" >/dev/null 2>&1 && { AR_TOOL="$bin"; log "  EDK II 拆包工具: 7-Zip ($bin)"; return 0; }
-    else
-      "$bin" -tf "$deb" >/dev/null 2>&1 && { AR_TOOL="$bin"; log "  EDK II 拆包工具: bsdtar ($bin)"; return 0; }
+    if probe_ar_tool "$bin" "$1"; then
+      log "  拆包工具: $(basename "$AR_TOOL")（系统已有，无需下载）"
+      return 0
     fi
   done
   return 1
 }
+
+# ------------------------------------------------- ③ 第三方静态 bsdtar（兜底）
+#
+# 仓库：https://github.com/probonopd/static-tools（continuous 连续构建，Linux 静态二进制）
+# 资产名按架构选。注意 i686 的是 **bsdtar-i686** —— 同一个 release 里还有个
+# desktop-file-install-i686，那是另一个工具，别拿错。
+BSDTAR_BASE="https://github.com/probonopd/static-tools/releases/download/continuous"
+
+bsdtar_asset() {
+  case "$(uname -m)" in
+    x86_64|amd64)        echo bsdtar-x86_64 ;;
+    aarch64|arm64)       echo bsdtar-aarch64 ;;
+    armv7l|armv6l|armhf) echo bsdtar-armhf ;;
+    i386|i486|i586|i686) echo bsdtar-i686 ;;
+    *) return 1 ;;
+  esac
+}
+
+acquire_bsdtar() {  # acquire_bsdtar <deb>；成功则设好 AR_TOOL / BORROWED_DIR
+  # MSYS / Cygwin 执行不了 Linux ELF：与其白下 6.6 MB，不如直接说清楚
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      warn "  系统里没有能解 ar 的工具，而该 release 提供的是 **Linux 静态二进制**，"
+      warn "  在 MSYS/Cygwin 下无法执行。Windows 10 1803+ 自带"
+      warn "  C:\\Windows\\System32\\tar.exe（bsdtar），请确认它还在。"
+      return 1 ;;
+  esac
+
+  local asset
+  asset="$(bsdtar_asset)" || { warn "  未知架构 $(uname -m)，不知道该取哪个 bsdtar 资产"; return 1; }
+
+  echo
+  warn "缺少能解 ar 的拆包工具（.deb 是 ar 归档，GNU tar 不支持它）。"
+  warn "打算从**第三方仓库**下载一份静态编译的 bsdtar："
+  warn "    https://github.com/probonopd/static-tools   →   $asset"
+  warn "该二进制由第三方构建，**按原样（AS IS）提供，不附带任何担保**，"
+  warn "本项目未审计也不为其背书；若 GitHub 直连不通，会经镜像站（gh-proxy.org）"
+  warn "转发，同样属于第三方。它只用于解 EDK II 的 .deb，用完立即删除。"
+  printf '是否继续下载？[y/N] '
+  local ans=""; read -r ans || true
+  case "$ans" in
+    y|Y|yes|YES) ;;
+    *) die "已取消：没有拆包工具，EDK II 无法获取（想去掉这一步请用 --no-edk2）" ;;
+  esac
+  MIRROR_OK=yes   # 上面的提示已说明镜像用途，不再重复询问
+
+  BORROWED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tsie-bsdtar.XXXXXX")" || return 1
+  local bin="$BORROWED_DIR/bsdtar" url="$BSDTAR_BASE/$asset" ok=0
+  # 先探一次直连再决定：直接 hard 试 fetch 的话，不通时要磨完 10 轮重试才轮到镜像
+  if probe_url_bytes "$url"; then
+    log "  直连可用，下载 $asset（约 6.6 MB）..."
+    fetch "$bin" "" "$url" && ok=1 || true
+  else
+    warn "  GitHub 直连不通"
+  fi
+  if [ "$ok" = 0 ] && pick_mirror "$url"; then
+    log "  改走镜像下载 $asset..."
+    fetch "$bin" "" "${GITHUB_PROXY}${url}" && ok=1 || true
+  fi
+  [ "$ok" = 1 ] || { warn "  bsdtar 下载失败"; return 1; }
+
+  chmod +x "$bin" 2>/dev/null || true
+  if ! probe_ar_tool "$bin" "$1"; then
+    warn "  下载到的 bsdtar 无法使用（架构不符？）"
+    return 1
+  fi
+  log "  拆包工具: 临时 bsdtar ($bin)"
+  return 0
+}
+
+cleanup_borrowed() {
+  if [ -n "$BORROWED_DIR" ] && [ -d "$BORROWED_DIR" ]; then
+    rm -rf "$BORROWED_DIR"
+    log "已删除临时 bsdtar"
+  fi
+  return 0
+}
+# ⚠️ 只写 EXIT 不够：Ctrl-C（SIGINT）与 SIGTERM 默认**不触发** EXIT trap，
+# 临时目录会留在 /tmp 里。所以三个信号都要接，再接回 EXIT 做真正的清理。
+trap cleanup_borrowed EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 mkdir -p "$OUT_DIR" "$FW_DIR"
 build_ar_candidates
@@ -261,24 +375,27 @@ ALPINE_MIRROR="https://mirrors.ustc.edu.cn/alpine"
 # ---------------------------------------------------- GitHub 直连探测 / 镜像选择
 
 GITHUB_PROXY=""
+OPENSBI_PROBE_URL="https://github.com/riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz"
 
-probe_github_release() {
-  # release 资产直连：只看能否真取到字节。302 之后的下载域名经常不通。
-  local u="https://github.com/riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz"
-  curl -fsSL -o /dev/null --max-time 25 -4 --noproxy '*' -r 0-1023 "$u" 2>/dev/null
+# 直连探测：只看能否**真取到字节**。
+# ⚠️ HEAD 能通不代表能下载：本机 github.com 一直答得好好的，302 之后的
+# objects.githubusercontent.com 才是真正超时的那个。所以这里取前 1 KiB 试读。
+probe_url_bytes() {  # probe_url_bytes <url>
+  curl -fsSL -o /dev/null --max-time 25 -4 --noproxy '*' -r 0-1023 "$1" 2>/dev/null
 }
 
-pick_mirror() {
+probe_github_release() { probe_url_bytes "$OPENSBI_PROBE_URL"; }
+
+pick_mirror() {  # pick_mirror [用于测速的 URL，默认 OpenSBI 资产]
   [ "$MIRROR_MODE" = "no" ] && return 1
-  local base u best="" best_speed=0 name speed
-  u="https://github.com/riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz"
-  if [ "$MIRROR_MODE" = "ask" ]; then
+  local u="${1:-$OPENSBI_PROBE_URL}" best="" best_speed=0 name speed
+  if [ "$MIRROR_MODE" = "ask" ] && [ -z "$MIRROR_OK" ]; then
     echo
     warn "GitHub release 资产直连不通。"
     warn "镜像站（gh-proxy.org）会转发 GitHub 内容，理论上可被中间方替换 —— 属于信任边界变更。"
     printf '是否允许使用镜像站？[y/N] '
     local ans=""; read -r ans || true
-    case "$ans" in y|Y|yes|YES) ;; *) return 1 ;; esac
+    case "$ans" in y|Y|yes|YES) MIRROR_OK=yes ;; *) return 1 ;; esac
   fi
   log "探测镜像站速度（各取前 1 MiB）..."
   for name in v4 v6; do
@@ -354,17 +471,15 @@ bootstrap_edk2() {
   local deb="$OUT_DIR/$deb_name"
   fetch "$deb" "" "$pool$deb_name" || { warn "  下载失败，跳过 EDK II"; return 0; }
 
-  # 拆 ar 容器。工具在下载后**实读一次**判定（GNU tar 会在此失败，bsdtar/7-Zip 通过）。
-  if ! probe_deb_tool "$deb"; then
-    warn "  没有能解 ar 的工具（bsdtar 或 7-Zip），跳过 EDK II"
-    warn "  .deb 是 ar 归档；Git Bash 的 GNU tar 不支持它"
-    return 0
+  # 拆 ar 容器：先看系统里已有的（①bsdtar ②7-Zip），都没有才谈下载（③）。
+  if ! find_local_ar_tool "$deb"; then
+    acquire_bsdtar "$deb" || { warn "  没有可用的拆包工具，跳过 EDK II"; return 0; }
   fi
 
   local x="$OUT_DIR/.deb-x"
   rm -rf "$x"; mkdir -p "$x"
   # bsdtar 与 7z 的调用语法不同：bsdtar 是 -xf ... -C，7z 是 x -y -o<dir>
-  if is_7zip "$AR_TOOL"; then
+  if [ "$AR_TOOL_IS_7ZIP" = 1 ]; then
     log "  拆包（7-Zip）..."
     "$AR_TOOL" x -y -o"$x" "$deb" >/dev/null 2>&1 || die "7-Zip 解 .deb 失败"
   else
@@ -372,16 +487,21 @@ bootstrap_edk2() {
     "$AR_TOOL" -xf "$deb" -C "$x" 2>/dev/null || die "bsdtar 解 .deb 失败"
   fi
 
-  # 内层可能是 data.tar 或 data.tar.xz（Debian 上游用 xz，bsdtar 能直接穿透）
+  # 内层可能是 data.tar / data.tar.xz（Debian 上游用 xz）
   local data; data="$(ls "$x"/data.tar* 2>/dev/null | head -1)"
   [ -n "$data" ] || die "未在 .deb 里找到 data.tar*"
   case "$data" in
-    *.xz|*.gz|*.zst)
-      log "  解内层 $(basename "$data")..."
+    *.zst)
+      # GNU tar 未必编了 zstd，这一步交给 bsdtar（libarchive 带 zstd）
+      [ "$AR_TOOL_IS_7ZIP" = 0 ] || die "内层是 zstd，7-Zip 主路径处理不了，请装 bsdtar"
+      log "  解内层 $(basename "$data")（bsdtar）..."
       "$AR_TOOL" -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null \
         || die "解内层 $(basename "$data") 失败"
       ;;
     *)
+      # .tar / .tar.gz / .tar.xz：**GNU tar 自己能解**（经 liblzma / zlib），
+      # 不需要 ar 工具 —— 它只是读不了外层的 ar 而已。
+      log "  解内层 $(basename "$data")..."
       verify_archive "$data" || die ".deb 内的 data.tar 不完整，重新下载 $deb_name"
       tar -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null || true
       ;;
