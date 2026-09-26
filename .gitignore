@@ -17,3 +17,6 @@ share/from-guest.txt
 # 必须根锚定成 /dev/ —— 写成 `dev/` 会连 src/dev/ 一起忽略，
 # 那样新增的设备源码根本提交不进去（2026-09-19 踩到）。
 /dev/
+
+# MCP SSH 会话锁：运行时产物（内容只有 pid / instanceId / 时间戳，随会话重写），不入库。
+.mcp-ssh.lock
