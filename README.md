@@ -349,4 +349,4 @@ Apache-2.0
 
 # Disclaimer
 
-本程序的主体(除firmware目录以外的部分)以 **Apache-2.0** 授权，请参阅LICENSE以了解许可证下的具体权利和限制。firmware内包含有OpenSBI、U-Boot、系统镜像 等，TSIE 模拟器所附带的firmware均为自由软件；具体分发条款请参见内含的/firmware/*/copyright。**在适用法律允许的范围内，TSIE 本体以及附带的软件均为 按原样(AS IS) 提供，不附带任何明示和暗示的担保。**
+本程序以 **Apache-2.0** 授权，请参阅LICENSE以了解许可证下的具体权利和限制。**在适用法律允许的范围内，本程序按原样(AS IS) 提供，不附带任何明示和暗示的担保。**
