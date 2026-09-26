@@ -22,6 +22,15 @@
 #   tools/bootstrap.sh --no-edk2       # 跳过 EDK II（省约 70 MB）
 #   tools/bootstrap.sh --alpine v3.24  # 固定 Alpine 分支（默认 latest-stable）
 #   tools/bootstrap.sh --dir DIR       # 换输出目录（默认 tmp/boot）
+#
+# 依赖（缺失时的后果已注明）：
+#   必需  curl / tar / sha256sum   Git Bash 自带
+#   必需  python                   解压与打 cpio 都靠它。**不是可选项**：Windows 的 tar
+#                                  建不了符号链接、也不保留执行位，直接 tar 解出来的 rootfs
+#                                  产出的 initramfs 会因 EACCES 起不到 init。
+#                                  需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
+#   可选  7-Zip                    只有 EDK II 需要（.deb 是 ar 归档）。找不到就跳过 EDK II。
+#   不需要 xz                      OpenSBI 是 .tar.xz，但 tar 自己经 liblzma 解压。
 
 set -euo pipefail
 
@@ -56,7 +65,11 @@ while [ $# -gt 0 ]; do
 done
 
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1"; }
-for c in curl tar xz sha256sum; do need "$c"; done
+# 注意：**不检查 xz**。OpenSBI 是 .tar.xz，但 `tar -xf` 自己会经 liblzma 解压，
+# 不需要独立的 xz 命令（实测 GNU tar 1.35 直接解开）。ps1 侧同理，从未依赖它。
+for c in curl tar sha256sum python; do need "$c"; done
+# python 是硬依赖（ps1 侧同样）：解压必须走 extract_archive.py —— Windows 的 tar 建不了
+# 符号链接、也不保留执行位，缺了它产出的 initramfs 无法引导。提前检查，别等 20 分钟后才报。
 if [ "$DO_EDK2" = 1 ] && [ ! -x "$SEVENZIP" ] && ! command -v 7z >/dev/null 2>&1; then
   warn "找不到 7-Zip，将跳过 EDK II 解包（.deb 是 ar 归档，本环境没有 ar/dpkg-deb）"
   DO_EDK2=0

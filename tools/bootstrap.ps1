@@ -26,6 +26,16 @@
   pwsh tools/bootstrap.ps1 -Alpine v3.24 -Dir tmp/boot-pinned
 
 .NOTES
+  依赖（缺失时的后果已注明）：
+    必需  curl.exe / tar.exe   Windows 10 1803+ 自带，或装 Git for Windows
+    必需  python              解压与打 cpio 都靠它。**不是可选项**：Windows 的 tar
+                              建不了符号链接、也不保留执行位，直接 tar 解出来的 rootfs
+                              产出的 initramfs 会因 EACCES 起不到 init。
+                              需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
+    可选  7-Zip               只有 EDK II 需要（.deb 是 ar 归档，本机没有 ar/dpkg-deb）。
+                              找不到就自动跳过 EDK II 并警告，其余照常。
+    不需要 xz                 OpenSBI 是 .tar.xz，但 tar 自己经 liblzma 解压。
+
   传 -Dir 时**用正斜杠或相对路径**：PowerShell 会把双引号里的 `\t`、`\n` 当转义序列，
   写 `-Dir G:\tmp\ps-test` 会静默变成 `G:tmpps-test`（`\t` = 制表符）。
   已知坑：本机 dl-cdn 会重定向且速度在 45 KB/s~5 KB/s 间摆动，故下载走 -C - 断点续传
