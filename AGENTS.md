@@ -33,7 +33,10 @@ npx tsx src/cli.ts \
   --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin
 ```
 
-Expected: the OpenSBI banner and a platform report identifying the machine as `tsie,virt`.
+Expected: the OpenSBI banner, then a platform report reading `Platform Name : tsie,virt` and
+`Platform Timer Device : aclint-mtimer @ 10000000Hz`. OpenSBI derives the ISA line from `misa`
+(it prints `Boot HART Base ISA : rv64imafdcb` and `Boot HART ISA Extensions : zicntr`), which is
+independent of the longer `riscv,isa` string the device tree advertises.
 `tsx src/cli.ts --help` lists every option.
 
 ## Hard rules
