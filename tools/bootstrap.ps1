@@ -343,7 +343,10 @@ function Install-Alpine {
 
   Write-Log '  解出 rootfs 树并打成 cpio-newc initramfs...'
   $root = Join-Path $OutDir 'rootfs'
+  # 权限表是 rootfs 的**同级**文件（extract_archive.py 写出），清理时要一起删。
+  $rootModes = "$root.modes.json"
   if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+  if (Test-Path $rootModes) { Remove-Item -Force $rootModes }
   New-Item -ItemType Directory -Force -Path $root | Out-Null
 
   # ⚠️ 必须用 extract_archive.py，不能用 tar：
@@ -358,6 +361,7 @@ function Install-Alpine {
   & $Python (Join-Path $RepoRoot 'tools\make-initramfs.py') $root $cpio
   if ($LASTEXITCODE -ne 0) { Write-Die 'make-initramfs.py 失败' }
   Remove-Item -Recurse -Force $root
+  if (Test-Path $rootModes) { Remove-Item -Force $rootModes }
 
   $csz = (Get-Item $cpio).Length
   if ($csz -lt 500000) { Write-Die "initramfs 太小（$csz B），大概率缺符号链接" }

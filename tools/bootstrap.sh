@@ -381,7 +381,9 @@ bootstrap_alpine() {
     || die "minirootfs 下载/校验失败"
 
   log "  解出 rootfs 树并打成 cpio-newc initramfs（复用 tools/make-initramfs.py）..."
-  local root="$OUT_DIR/rootfs"; rm -rf "$root"; mkdir -p "$root"
+  local root="$OUT_DIR/rootfs"
+  # 权限表是 rootfs 的**同级**文件（extract_archive.py 写出），清理时要一起删，否则残留干扰下次运行。
+  rm -rf "$root" "$root.modes.json"; mkdir -p "$root"
   verify_archive "$rfs" -z \
     || die "minirootfs 下载不完整（完整解压校验失败）—— 删掉重跑"
 
@@ -395,7 +397,7 @@ bootstrap_alpine() {
 
   python "$REPO_ROOT/tools/make-initramfs.py" "$root" "$OUT_DIR/initramfs.cpio.gz" \
     || die "make-initramfs.py 失败"
-  rm -rf "$root"
+  rm -rf "$root" "$root.modes.json"
   local csz; csz=$(stat -c %s "$OUT_DIR/initramfs.cpio.gz")
   [ "$csz" -gt 500000 ] || die "initramfs 太小（$csz B），大概率缺符号链接"
   log "  ✅ initramfs.cpio.gz  ($csz B)"

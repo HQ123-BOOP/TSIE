@@ -39,6 +39,28 @@ def entry(ino: int, mode: int, uid: int, gid: int, nlink: int, mtime: int,
     return h + name_bytes + b'\x00' * name_pad + data + b'\x00' * data_pad
 
 
+def load_modes(root: str) -> dict:
+    """读 extract_archive.py 写出的权限表（<root>.modes.json）。
+
+    ⚠️ 为什么必须用它：Windows 文件系统不保存 Unix 权限位，os.lstat() 对任何普通
+    文件都返回 0666 —— 执行位全丢。直接从磁盘读 mode 会让 cpio 里的 /bin/busybox
+    变成 0666，内核 execve 返回 EACCES(-13)，表现为
+        Failed to execute /init (error -13)
+        Kernel panic - not syncing: No working init found.
+    所以优先用归档记录的真实 mode；没有权限表（例如在真 POSIX 上解压）才回退到 lstat。
+    """
+    path = root.rstrip('\\/') + '.modes.json'
+    if not os.path.isfile(path):
+        return {}
+    try:
+        import json
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f'警告: 权限表读取失败（{e}），回退到磁盘 mode', file=sys.stderr)
+        return {}
+
+
 def cpio_newc(root: str, out: str) -> None:
     items: list[tuple[str, str]] = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -49,6 +71,9 @@ def cpio_newc(root: str, out: str) -> None:
             items.append((rel, dirpath))
         for f in filenames:
             items.append((os.path.relpath(os.path.join(dirpath, f), root), os.path.join(dirpath, f)))
+
+    modes = load_modes(root)
+    exec_count = 0
 
     blob = bytearray()
     ino = 0
@@ -77,9 +102,17 @@ def cpio_newc(root: str, out: str) -> None:
             continue
         if not stat.S_ISREG(mode):
             continue
+        # 权限位优先取归档真值（Windows 磁盘上的 0666 会丢掉执行位）
+        perm = modes.get(name)
+        if perm is None:
+            perm = mode & 0o7777
+        else:
+            perm &= 0o7777
+        if perm & 0o111:
+            exec_count += 1
         with open(full, 'rb') as f:
             data = f.read()
-        blob += entry(ino, (mode & 0o7777) | 0o100000, 0, 0, 1, int(st.st_mtime),
+        blob += entry(ino, perm | 0o100000, 0, 0, 1, int(st.st_mtime),
                       0, 0, 0, 0, name, data)
 
     # /init：mount 必要文件系统后起 shell
@@ -114,6 +147,16 @@ def cpio_newc(root: str, out: str) -> None:
     with open(out, 'wb') as f:
         f.write(raw)
     print(f'wrote {out}: {len(raw)} bytes ({len(items)} files + . + init + dev nodes)')
+    print(f'可执行文件: {exec_count} 个（源自{"归档权限表" if modes else "磁盘 mode"}）')
+
+    # ⚠️ 自检：一个可执行文件都没有 = 内核必然 execve 失败（EACCES），
+    # 表现为 "Failed to execute /init (error -13)" + "No working init found" panic。
+    # 这正是 Windows 上丢掉执行位时的症状，所以在这里拦下而不是等内核报。
+    if exec_count == 0:
+        print('错误: 产物里没有任何可执行文件，内核无法启动 init。\n'
+              '      多半是解压时丢了权限位 —— 请用 tools/extract_archive.py 解压（它会写权限表），\n'
+              '      而不是 tar/7-Zip。', file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

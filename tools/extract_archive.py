@@ -22,12 +22,31 @@ tools/make-initramfs.py 靠 `os.readlink()` 把它们编码成 cpio 的 S_IFLNK 
 Python 的 tarfile 走的是另一条路：它用重解析点（reparse point）写符号链接，
 普通用户即可，不需要提权。所以解压这一步交给它。
 
+⚠️ 还有第二个**同样致命**的差异：Windows 文件系统不保存 Unix 权限位，
+`os.lstat()` 对任何普通文件一律返回 0666 —— **执行位全丢**。
+于是 make-initramfs.py 从磁盘读 mode 打出来的 cpio 里，/bin/busybox 变成 0666，
+内核 execve 返回 EACCES(-13)，症状是：
+
+    Run /init as init process
+    Failed to execute /init (error -13)
+    Starting init: /bin/sh exists but couldn't execute it (error -13)
+    Kernel panic - not syncing: No working init found.
+
+所以本工具额外把**归档里记录的真实 mode** 写成 sidecar `<目标目录>.modes.json`，
+由 make-initramfs.py 还原权限位。
+
 用法: python extract_archive.py <归档> <目标目录>
 支持 .tar / .tar.gz / .tar.xz / .tgz（tarfile 的 r:* 模式自动识别压缩格式）。
 """
+import json
 import os
 import sys
 import tarfile
+
+
+def sidecar_path(dst: str) -> str:
+    """权限表路径：<目标目录>.modes.json"""
+    return dst.rstrip('\\/') + '.modes.json'
 
 
 def main() -> int:
@@ -45,9 +64,17 @@ def main() -> int:
     symlinks = 0
     files = 0
     dirs = 0
+    execs = 0
+    modes: dict[str, int] = {}
 
     with tarfile.open(src, 'r:*') as tf:
         for m in tf:
+            # 归档内的相对名（去掉 ./ 前缀）作为权限表的键
+            key = m.name.lstrip('./').replace('\\', '/')
+            if key:
+                modes[key] = m.mode
+                if m.isfile() and (m.mode & 0o111):
+                    execs += 1
             try:
                 # filter='fully_trusted' 是必需的：Python 3.12+ 默认（3.14 起强制）会拒绝
                 # 指向目标目录之外的符号链接，而 Alpine 的链接恰恰都是绝对路径
@@ -68,11 +95,17 @@ def main() -> int:
             elif m.isfile():
                 files += 1
 
+    with open(sidecar_path(dst), 'w', encoding='utf-8') as f:
+        json.dump(modes, f, separators=(',', ':'))
+
     print(f'解压完成: {files} 文件 / {dirs} 目录 / {symlinks} 符号链接 -> {dst}')
+    print(f'权限表: {sidecar_path(dst)}（{len(modes)} 条，其中可执行 {execs} 个）')
     if symlinks == 0:
         # 不是致命错误，但对 Alpine rootfs 是强信号：正常应有成百上千个指向 /bin/busybox 的链接。
         print('警告: 一个符号链接都没建出来。若这是 Alpine minirootfs，'
               '产物很可能是废的（/bin/sh 会缺失）。', file=sys.stderr)
+    if execs == 0:
+        print('警告: 归档里没有任何带执行位的文件，这不像可引导的 rootfs。', file=sys.stderr)
     return 0
 
 
