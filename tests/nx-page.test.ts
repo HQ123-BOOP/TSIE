@@ -1,4 +1,8 @@
 /**
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 TSIE
+ */
+/**
  * NX（X=0）页取指拦截回归测试。
  *
  * 覆盖三件事：
