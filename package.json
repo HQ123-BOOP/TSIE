@@ -1,6 +1,6 @@
 {
   "name": "tsie",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "TSIE (TSIE Is an Emulator) - a RISC-V 64-bit (RV64GC) full-system emulator written in TypeScript",
   "type": "module",
   "main": "dist/index.js",
