@@ -23,6 +23,7 @@
 .EXAMPLE
   pwsh tools/bootstrap.ps1
   pwsh tools/bootstrap.ps1 -Mirror -NoEdk2
+  pwsh tools/bootstrap.ps1 -Decompress            # 无人值守时预先同意解压 initramfs
   pwsh tools/bootstrap.ps1 -Alpine v3.24 -Dir tmp/boot-pinned
 
 .NOTES
@@ -56,6 +57,8 @@ param(
   [switch]$Mirror,      # 预先授权镜像（无人值守）
   [switch]$NoMirror,    # 禁止镜像；OpenSBI 只从本地已有文件取
   [switch]$NoEdk2,      # 跳过 EDK II（省约 70 MB）
+  [switch]$Decompress,  # 预先同意解压 initramfs（无人值守）
+  [switch]$NoDecompress,# 不要解压，只留 .cpio.gz
   [string]$Alpine = 'latest-stable',  # Alpine 分支（默认 latest-stable 别名）
   [string]$Dir          # 换输出目录（默认 tmp/boot）
 )
@@ -68,6 +71,8 @@ $FwDir    = Join-Path $RepoRoot 'firmware'
 # Alpine 分支：默认 latest-stable 别名 —— 语义正确且不随发行版推进失效。
 # （曾想自己算"最高版本号"，既多余又有 bug：v4.0 编码成 4000 会小于 v3.24 的 3024。）
 $Arch = 'riscv64'
+# 最终推荐用哪一份 initramfs 引导（解压成功则换成 .cpio）；末尾打印的引导命令据此变。
+$InitrdFile = 'initramfs.cpio.gz'
 
 function Write-Log  { param($m) Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Warn { param($m) Write-Host "警告: $m" -ForegroundColor Yellow }
@@ -413,6 +418,32 @@ function Install-Alpine {
   $csz = (Get-Item $cpio).Length
   if ($csz -lt 500000) { Write-Die "initramfs 太小（$csz B），大概率缺符号链接" }
   Write-Ok ("initramfs.cpio.gz  ({0} B)" -f $csz)
+
+  # 再出一份**未压缩**的。内核解 initramfs 前先认压缩格式，认不出就按裸 cpio 直接用 ——
+  # 于是"在模拟器里跑一遍 inflate"这段指令整个省掉（实测数字见末尾的引导命令）。
+  # 代价只是文件大一倍，而 tmp/ 本来就不入库。
+  #
+  # 是"推荐但可选"，所以问一句。无人值守时 Read-Host 拿到 EOF 会返回空串（等同 no），
+  # 不会挂住；想预先表态用 -Decompress / -NoDecompress。
+  $wantCpio = $false
+  if ($Decompress) { $wantCpio = $true }
+  elseif ($NoDecompress) { $wantCpio = $false }
+  else {
+    Write-Host ''
+    Write-Log '  解压 initramfs 可省 38.9% 的引导指令（实测 12.7 亿 → 7.76 亿条，两条路都到 shell）'
+    $ans = Read-Host '强烈建议解压缩initramfs，节省CPU指令从而减少启动时间 (y/N)'
+    if ($ans -match '^(y|Y|yes|YES)$') { $wantCpio = $true }
+  }
+
+  if ($wantCpio) {
+    $cpioRaw = Join-Path $OutDir 'initramfs.cpio'
+    & $Tsx (Join-Path $RepoRoot 'tools\initramfs.ts') decompress $cpio $cpioRaw
+    if ($LASTEXITCODE -ne 0) { Write-Die 'initramfs 解压失败（tools/initramfs.ts decompress）' }
+    Write-Ok ("initramfs.cpio     ({0} B，未压缩；引导更快)" -f (Get-Item $cpioRaw).Length)
+    $script:InitrdFile = 'initramfs.cpio'
+  } else {
+    Write-Log '  跳过了，只留 initramfs.cpio.gz（随时可补做：tools/initramfs.ts decompress）'
+  }
 }
 
 # ----------------------------------------------------------------------- 主流程
@@ -432,6 +463,25 @@ Get-ChildItem $OutDir -File | Where-Object { $_.Length -gt 0 } |
   Sort-Object Name | ForEach-Object { Write-Host ("  {0,12} B  {1}" -f $_.Length, $_.Name) }
 
 $relOut = $OutDir.Replace("$RepoRoot\", '').Replace('\', '/')
+
+# 解释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
+$initrdNote = if ($InitrdFile -eq 'initramfs.cpio') {
+@"
+  # ⚠️ 用的是**未压缩**的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，
+  #    省掉在模拟器里跑 inflate。同机同核实测（instret，两条路都到 ~ #）：
+  #      initramfs.cpio.gz   1,270,638,213 条   到 /init 用 t=120.26s
+  #      initramfs.cpio        776,011,912 条   到 /init 用 t=64.67s
+  #    ⇒ 省 4.95 亿条（38.9%）。差别不是能不能起来，是快多少。
+  #    （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）
+"@
+} else {
+@"
+  # 这次用的是压缩态 initramfs.cpio.gz。想快 38.9% 就补一步（实测省 4.95 亿条指令）：
+  #      npx tsx tools/initramfs.ts decompress $relOut/initramfs.cpio.gz $relOut/initramfs.cpio
+  #    然后把下面 --initrd 换成 $relOut/initramfs.cpio。
+"@
+}
+
 Write-Host @"
 
 引导命令（在仓库根执行）：
@@ -440,10 +490,10 @@ Write-Host @"
   # ⚠️ 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内
   #    就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台
   #    注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。
-  # ⚠️ 指令预算给足 1.5e9：完整引导需约 1.2e9 条（含 initramfs 解包）。
+$initrdNote
   npx tsx src/cli.ts ``
     --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin ``
-    --kernel $relOut/Image --initrd $relOut/initramfs.cpio.gz ``
+    --kernel $relOut/Image --initrd $relOut/$InitrdFile ``
     --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 1500000000 --stats
 
   # EDK II (UEFI)：需要成对提供 CODE / VARS
