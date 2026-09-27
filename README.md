@@ -47,6 +47,11 @@ npm run bench      # 性能基准
 tools/bootstrap.sh                 # 交互：GitHub 不通时询问是否用镜像站
 tools/bootstrap.sh --no-edk2       # 跳过 EDK II（省约 70 MB）
 tools/bootstrap.sh --decompress    # 预先同意解压 initramfs（无人值守；引导快 38.9%）
+tools/bootstrap.sh --help          # 完整用法（内容就是脚本头部那段注释）
+
+# PowerShell 侧参数同义，写法不同：-Help / --help / -h 都能出帮助
+pwsh tools/bootstrap.ps1 -NoEdk2
+pwsh tools/bootstrap.ps1 -Help
 ```
 
 产物落在 gitignored 的 `tmp/boot/` 与 `firmware/` —— 这些是 GPL-2.0 / 第三方二进制，

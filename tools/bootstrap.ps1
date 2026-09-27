@@ -25,6 +25,7 @@
 
 .EXAMPLE
   pwsh tools/bootstrap.ps1
+  pwsh tools/bootstrap.ps1 -Help                  # 也可以 --help / -h / -?
   pwsh tools/bootstrap.ps1 -Mirror -NoEdk2
   pwsh tools/bootstrap.ps1 -Decompress            # 无人值守时预先同意解压 initramfs
   pwsh tools/bootstrap.ps1 -Alpine v3.24 -Dir tmp/boot-pinned
@@ -60,8 +61,13 @@
   并按**最终**响应的 Content-Length 判完成；`.part` 还记录来源 URL，换源即重下。
 #>
 
-[CmdletBinding()]
+# ⚠️ PositionalBinding = $false 是**故意的**，别去掉。
+# 默认情况下没人认领的参数会被当成"第一个位置参数"静默绑给 $Alpine ——
+# 实测 `./bootstrap.ps1 --help` 在加上 -Help 之前会变成"Alpine 分支: --help"，
+# 然后一路跑到下载失败。拼错的参数应当**当场报错**，而不是悄悄变成别的意思。
+[CmdletBinding(PositionalBinding = $false)]
 param(
+  [switch]$Help,        # 显示帮助。`-Help` / `-h` / `--help` 三种写法都行
   [switch]$Mirror,      # 预先授权镜像（无人值守）
   [switch]$NoMirror,    # 禁止镜像；OpenSBI 只从本地已有文件取
   [switch]$NoEdk2,      # 跳过 EDK II（省约 70 MB）
@@ -82,6 +88,14 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
   Write-Host '本工具不支持PowerShell 5，请参阅https://learn.microsoft.com/zh-cn/powershell/scripting/install/install-powershell-on-windows 获取PowerShell 7+。然后重试'
   Start-Sleep -Seconds 5
   exit 1
+}
+
+# 帮助入口。PowerShell 的绑定规则让三种写法都落到这个开关上：
+#   -Help（标准）、--help（--name 等价 -name）、-h（-Help 的唯一前缀）。
+# 与 .sh 侧的 `-h|--help` 对齐 —— 注释式帮助本身是给 Get-Help 读的，用户未必知道。
+if ($Help) {
+  Get-Help $PSCommandPath -Full
+  exit 0
 }
 
 $ErrorActionPreference = 'Stop'
