@@ -87,6 +87,19 @@ jobs:
           fi
           echo "OK：没有 GPL / 二进制产物入库"
 
+      # 编辑器与语言的产物缓存：__pycache__、编译出的 .o/.class、DLL 之类。
+      # 这条是有来历的：曾在删掉最后一个 .py 的那次提交里，把一个 .pyc 一起提了进去
+      # （调试时 import 过它），而上面那条检查只看固件/镜像类扩展名，拦不住。
+      - name: 不得提交构建/缓存产物
+        run: |
+          bad=$(git ls-files | grep -E '(__pycache__|\.py[co]$|\.o$|\.obj$|\.class$|\.dll$|\.dylib$|\.exe$|\.tsbuildinfo$)' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::以下构建/缓存产物不得入库："
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          echo "OK：没有构建/缓存产物入库"
+
       # GitHub 网页编辑器（Add file / 铅笔按钮）**绕过本地的 .gitattributes**，
       # 提交进来的 blob 直接带 CRLF。而 git 的归一是逐个文件"自愈"的：谁下次编辑到它，
       # 谁就得到一份整文件重写的 diff（实测：只加一个换行 → 70 insertions / 69 deletions），

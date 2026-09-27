@@ -20,3 +20,9 @@ share/from-guest.txt
 
 # MCP SSH 会话锁：运行时产物（内容只有 pid / instanceId / 时间戳，随会话重写），不入库。
 .mcp-ssh.lock
+
+# Python 缓存：仓库里已经没有任何 .py，但本地临时跑个脚本就会生成 __pycache__，
+# 曾经因此把一个 .pyc 提交进仓库（2026-09-27 自己踩到）。
+__pycache__/
+*.pyc
+
