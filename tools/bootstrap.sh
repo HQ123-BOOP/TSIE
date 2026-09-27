@@ -20,6 +20,8 @@
 #   tools/bootstrap.sh --mirror        # 预先授权镜像（无人值守）
 #   tools/bootstrap.sh --no-mirror     # 禁止镜像；OpenSBI 只从本地已有文件取
 #   tools/bootstrap.sh --no-edk2       # 跳过 EDK II（省约 70 MB）
+#   tools/bootstrap.sh --decompress    # 预先同意解压 initramfs（无人值守）
+#   tools/bootstrap.sh --no-decompress # 不要解压，只留 .cpio.gz
 #   tools/bootstrap.sh --alpine v3.24  # 固定 Alpine 分支（默认 latest-stable）
 #   tools/bootstrap.sh --dir DIR       # 换输出目录（默认 tmp/boot）
 #
@@ -50,8 +52,10 @@ FW_DIR="$REPO_ROOT/firmware"
 # 需要固定分支时用 --alpine v3.24。
 ALPINE_BRANCH="latest-stable"
 
-MIRROR_MODE="ask"    # ask | yes | no
+MIRROR_MODE="ask"     # ask | yes | no
+DECOMPRESS="ask"      # ask | yes | no：是否额外产出一份未压缩 initramfs
 DO_EDK2=1
+INITRD_FILE="initramfs.cpio.gz"   # 最终推荐用哪一份引导（解压成功则换成 .cpio）
 
 log()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m警告:\033[0m %s\n' "$*" >&2; }
@@ -62,6 +66,8 @@ while [ $# -gt 0 ]; do
     --mirror)    MIRROR_MODE="yes" ;;
     --no-mirror) MIRROR_MODE="no" ;;
     --no-edk2)   DO_EDK2=0 ;;
+    --decompress)    DECOMPRESS="yes" ;;
+    --no-decompress) DECOMPRESS="no" ;;
     --alpine)    ALPINE_BRANCH="$2"; shift ;;
     --dir)       OUT_DIR="$2"; shift ;;
     -h|--help)   sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
@@ -603,11 +609,32 @@ bootstrap_alpine() {
   # 再出一份**未压缩**的。内核在解 initramfs 前会先认压缩格式，认不出就按裸 cpio 直接用 ——
   # 于是"在模拟器里跑一遍 inflate"这段指令整个省掉（实测数字见文件末尾的引导命令）。
   # 代价只是文件大一倍，而 tmp/ 本来就不入库。
-  "$TSX" "$REPO_ROOT/tools/initramfs.ts" decompress \
-    "$OUT_DIR/initramfs.cpio.gz" "$OUT_DIR/initramfs.cpio" \
-    || die "initramfs 解压失败（tools/initramfs.ts decompress）"
-  local usz; usz=$(stat -c %s "$OUT_DIR/initramfs.cpio")
-  log "  ✅ initramfs.cpio     ($usz B，未压缩；引导更快)"
+  #
+  # 是"推荐但可选"，所以问一句。无人值守时 read 会拿到 EOF（等同回答 no），不会挂住；
+  # 想预先表态用 --decompress / --no-decompress。
+  local want_cpio=0
+  case "$DECOMPRESS" in
+    yes) want_cpio=1 ;;
+    no)  want_cpio=0 ;;
+    *)
+      echo
+      log "  解压 initramfs 可省 38.9% 的引导指令（实测 12.7 亿 → 7.76 亿条，两条路都到 shell）"
+      printf '强烈建议解压缩initramfs，节省CPU指令从而减少启动时间 (y/N) '
+      local ans=""; read -r ans || true
+      case "$ans" in y|Y|yes|YES) want_cpio=1 ;; esac
+      ;;
+  esac
+
+  if [ "$want_cpio" = 1 ]; then
+    "$TSX" "$REPO_ROOT/tools/initramfs.ts" decompress \
+      "$OUT_DIR/initramfs.cpio.gz" "$OUT_DIR/initramfs.cpio" \
+      || die "initramfs 解压失败（tools/initramfs.ts decompress）"
+    local usz; usz=$(stat -c %s "$OUT_DIR/initramfs.cpio")
+    log "  ✅ initramfs.cpio     ($usz B，未压缩；引导更快)"
+    INITRD_FILE="initramfs.cpio"
+  else
+    log "  跳过了，只留 initramfs.cpio.gz（随时可补做：tools/initramfs.ts decompress）"
+  fi
 }
 
 # ----------------------------------------------------------------------- 主流程
@@ -628,6 +655,22 @@ main() {
 
   local fw="$FW_DIR/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin"
   local rel_out="${OUT_DIR#$REPO_ROOT/}"
+
+  # 解释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
+  local initrd_note
+  if [ "$INITRD_FILE" = "initramfs.cpio" ]; then
+    initrd_note="  # ⚠️ 用的是**未压缩**的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，
+  #    省掉在模拟器里跑 inflate。同机同核实测（instret，两条路都到 ~ #）：
+  #      initramfs.cpio.gz   1,270,638,213 条   到 /init 用 t=120.26s
+  #      initramfs.cpio        776,011,912 条   到 /init 用 t=64.67s
+  #    ⇒ 省 4.95 亿条（38.9%）。差别不是\"能不能起来\"，是快多少。
+  #    （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）"
+  else
+    initrd_note="  # 这次用的是压缩态 initramfs.cpio.gz。想快 38.9% 就补一步（实测省 4.95 亿条指令）：
+  #      npx tsx tools/initramfs.ts decompress $rel_out/initramfs.cpio.gz $rel_out/initramfs.cpio
+  #    然后把下面 --initrd 换成 $rel_out/initramfs.cpio。"
+  fi
+
   cat <<EOF
 
 引导命令（在仓库根执行）：
@@ -636,15 +679,10 @@ main() {
   # ⚠️ 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内
   #    就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台
   #    注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。
-  # ⚠️ 用 **initramfs.cpio（未压缩那份）**：内核认不出压缩就直接按裸 cpio 用，
-  #    省掉在模拟器里跑 inflate。同机同核实测（instret，两条路都到 ~ #）：
-  #      initramfs.cpio.gz   1,270,638,213 条   到 /init 用 t=120.26s
-  #      initramfs.cpio        776,011,912 条   到 /init 用 t=64.67s
-  #    ⇒ 省 4.95 亿条（38.9%）。差别不是"能不能起来"，是快多少。
-  #    （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）
+$initrd_note
   npx tsx src/cli.ts \\
     --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin \\
-    --kernel $rel_out/Image --initrd $rel_out/initramfs.cpio \\
+    --kernel $rel_out/Image --initrd $rel_out/$INITRD_FILE \\
     --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 1500000000 --stats
 
   # EDK II (UEFI)：需要成对提供 CODE / VARS
