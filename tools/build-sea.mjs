@@ -51,7 +51,7 @@ function run(cmd, args, label) {
   return r;
 }
 
-function main() {
+async function main() {
   const args = process.argv.slice(2);
   const outArg = args.indexOf('--out');
   // 默认落在 tmp/sea/（gitignored）。**默认不能是相对的裸文件名** —— 那会 resolve 到
@@ -61,12 +61,19 @@ function main() {
   if (outArg >= 0 && !args[outArg + 1]) fail('--out 后面要给路径');
 
   mkdirSync(OUT_DIR, { recursive: true });
-  rmSync(outFile, { force: true });
-
-  // ① 单文件 CJS
   const bundle = join(OUT_DIR, 'tsie.cjs');
+  const cfg = join(OUT_DIR, 'sea-config.json');
+  const blob = join(OUT_DIR, 'sea-prep.blob');
+
+  // ⚠️ 先清掉中间产物，否则这个脚本能"假通过"：
+  //    最初 version 忘了 await esbuild 的 build()，紧随其后的 statSync 检查到的是
+  //    **上一次留下的陈旧 bundle**，本地一路绿灯，CI 上（全新环境没有那个文件）
+  //    当场 ENOENT。清理 + await 两样都要有。
+  for (const f of [bundle, cfg, blob, outFile]) rmSync(f, { force: true });
+
+  // ① 单文件 CJS（必须 await —— esbuild 的 build() 是异步的）
   process.stdout.write('==> esbuild 打成单文件（CJS）...\n');
-  build({
+  await build({
     entryPoints: [join(ROOT, 'src', 'cli.ts')],
     bundle: true,
     platform: 'node',
@@ -79,8 +86,6 @@ function main() {
 
   // ② SEA blob
   process.stdout.write('==> 生成 SEA blob...\n');
-  const cfg = join(OUT_DIR, 'sea-config.json');
-  const blob = join(OUT_DIR, 'sea-prep.blob');
   writeFileSync(cfg, JSON.stringify({
     main: bundle,
     output: blob,
@@ -92,32 +97,34 @@ function main() {
   //    用 process.execPath 而不是 PATH 里的 node：blob 是它生成的，版本天然一致。
   process.stdout.write('==> 注入（postject）...\n');
   copyFileSync(process.execPath, outFile);
-  return inject(outFile, 'NODE_SEA_BLOB', readFileSync(blob), { sentinelFuse: SENTINEL_FUSE })
-    .then(() => {
-      if (!IS_WINDOWS) spawnSync('chmod', ['+x', outFile]);
-
-      // ④ 冒烟：打出来的东西必须真能跑
-      const help = run(outFile, ['--help'], '冒烟测试（--help）');
-      const firstLine = help.stdout.toString().split('\n').find((l) => l.trim() !== '') ?? '';
-
-      const mb = (statSync(outFile).size / 1048576).toFixed(1);
-      process.stdout.write(
-        `\n✅ ${outFile}\n` +
-        `   ${mb} MB，内嵌 Node ${process.versions.node}（${process.platform}-${process.arch}）\n` +
-        `   冒烟输出首行: ${firstLine.trim()}\n`,
+  try {
+    await inject(outFile, 'NODE_SEA_BLOB', readFileSync(blob), { sentinelFuse: SENTINEL_FUSE });
+  } catch (err) {
+    process.stderr.write(`错误: 注入失败: ${err?.message ?? err}\n`);
+    if (IS_WINDOWS) {
+      process.stderr.write(
+        '提示：Windows 上 node.exe 带代码签名，注入前可能要先去掉签名：\n' +
+        '  signtool remove /s <node.exe 的副本>\n',
       );
-      process.exit(0);
-    })
-    .catch((err) => {
-      process.stderr.write(`错误: 注入失败: ${err?.message ?? err}\n`);
-      if (IS_WINDOWS) {
-        process.stderr.write(
-          '提示：Windows 上 node.exe 带代码签名，注入前可能需要先去掉签名：\n' +
-          '  signtool remove /s <node.exe 的副本>\n',
-        );
-      }
-      process.exit(1);
-    });
+    }
+    process.exit(1);
+  }
+
+  if (!IS_WINDOWS) spawnSync('chmod', ['+x', outFile]);
+
+  // ④ 冒烟：打出来的东西必须真能跑
+  const help = run(outFile, ['--help'], '冒烟测试（--help）');
+  const firstLine = help.stdout.toString().split('\n').find((l) => l.trim() !== '') ?? '';
+
+  const mb = (statSync(outFile).size / 1048576).toFixed(1);
+  process.stdout.write(
+    `\n✅ ${outFile}\n` +
+    `   ${mb} MB，内嵌 Node ${process.versions.node}（${process.platform}-${process.arch}）\n` +
+    `   冒烟输出首行: ${firstLine.trim()}\n`,
+  );
 }
 
-main();
+main().catch((err) => {
+  process.stderr.write(`错误: ${err?.stack ?? err}\n`);
+  process.exit(1);
+});
