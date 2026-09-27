@@ -5,13 +5,13 @@
 # 一键拉取并拼装 TSIE 的引导素材：OpenSBI 固件 + EDK II (UEFI) 固件 + Alpine 内核/initramfs。
 #
 # 设计约定（照着改之前先读）：
-#   * 版本号一律**动态发现**，不硬编码。Alpine 的包更新很快，写死的 URL 会 404
+#   * 版本号一律动态发现，不硬编码。Alpine 的包更新很快，写死的 URL 会 404
 #     （README 里那个 linux-lts-6.18.44 在 2026-09-26 就已经是 404）。
-#   * 所有产物落在 gitignored 目录（`firmware/`、`tmp/`），**不得入库**：
+#   * 所有产物落在 gitignored 目录（`firmware/`、`tmp/`），不得入库：
 #     这些是 GPL-2.0 / 第三方产物，本项目是 Apache-2.0。
-#   * 下载全部带重试。本机网络对 dl-cdn / deb.debian.org 是**间歇性**可达的，
+#   * 下载全部带重试。本机网络对 dl-cdn / deb.debian.org 是间歇性可达的，
 #     同一个域名前一刻成功、后一刻 21 秒超时，不带重试必然随机失败。
-#   * GitHub release 资产**直连不通**（github.com 能到，但 302 之后的
+#   * GitHub release 资产直连不通（github.com 能到，但 302 之后的
 #     objects.githubusercontent.com 超时），所以需要镜像。镜像属代理转发，
 #     脚本会先征求同意（--mirror 可预先授权）。
 #
@@ -31,15 +31,15 @@
 # 依赖（缺失时的后果已注明）：
 #   必需  curl / tar / sha256sum   Git Bash 自带
 #   必需  node + tsx               打 initramfs 用 tools/initramfs.ts，而 tsx 是
-#                                  devDependency（先 npm install）。这一步**不经过磁盘**：
+#                                  devDependency（先 npm install）。这一步不经过磁盘：
 #                                  直接从 tar 头里读 mode/linkname 组装 cpio，所以
 #                                  "Windows 建不了符号链接 / 存不住执行位"都不影响它。
 #                                  已不再需要 Python。
-#   可选  bsdtar / 7-Zip           只有 EDK II 需要：.deb 是 **ar 归档**，而 Git Bash 的
-#                                  GNU tar **不支持 ar**。系统里已有就免下载（Windows
+#   可选  bsdtar / 7-Zip           只有 EDK II 需要：.deb 是 ar 归档，而 Git Bash 的
+#                                  GNU tar 不支持 ar。系统里已有就免下载（Windows
 #                                  自带的 C:\Windows\System32\tar.exe 就是 bsdtar）；
 #                                  都没有时会征求同意，从第三方仓库拉一份静态 bsdtar
-#                                  到临时目录，**用完即删**。
+#                                  到临时目录，用完即删。
 #   不需要 xz                      OpenSBI 是 .tar.xz，但 tar 自己经 liblzma 解压。
 
 set -euo pipefail
@@ -77,7 +77,7 @@ while [ $# -gt 0 ]; do
 done
 
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1"; }
-# 注意：**不检查 xz**。OpenSBI 是 .tar.xz，但 `tar -xf` 自己会经 liblzma 解压，
+# 注意：不检查 xz。OpenSBI 是 .tar.xz，但 `tar -xf` 自己会经 liblzma 解压，
 # 不需要独立的 xz 命令（实测 GNU tar 1.35 直接解开）。ps1 侧同理，从未依赖它。
 for c in curl tar sha256sum node; do need "$c"; done
 # 不再依赖 Python：initramfs 由 tools/initramfs.ts 直接 tar→cpio（见下），复用项目
@@ -88,10 +88,10 @@ TSX="$REPO_ROOT/node_modules/.bin/tsx"
 
 # ------------------------------------------------- EDK II 的 ar 拆包工具选择
 #
-# .deb 是 **ar 归档**（魔数 `!<arch>`），不是 tar 也不是 zip。本机没有 ar/dpkg-deb。
+# 注意 .deb 是 ar 归档（魔数 `!<arch>`），不是 tar 也不是 zip。本机没有 ar/dpkg-deb。
 # 关键事实（实测，别再凭印象）：
-#   * Git Bash 的 `tar` 是 **GNU tar 1.35 → 不支持 ar**，用它解 .deb 必报错。
-#   * **Windows 自带的 bsdtar（libarchive 3.8.8）支持 ar**，且能一路穿透内层 data.tar.xz。
+#   * Git Bash 的 `tar` 是 GNU tar 1.35 → 不支持 ar，用它解 .deb 必报错。
+#   * Windows 自带的 bsdtar（libarchive 3.8.8）支持 ar，且能一路穿透内层 data.tar.xz。
 #     它在 PATH 里被 Git 的 tar 遮蔽（同名 tar.exe），必须按绝对路径调用。
 #     实测产物与 7-Zip 逐字节一致（两个 .fd 的 sha256 相同）。
 #   * 7-Zip 也能做；macOS / FreeBSD 的 /usr/bin/tar 本身就是 bsdtar。
@@ -101,7 +101,7 @@ TSX="$REPO_ROOT/node_modules/.bin/tsx"
 #   ② 系统已有 7-Zip   → 直接用，不下载
 #   ③ 都没有           → 征求同意后从第三方仓库下静态 bsdtar 到临时目录，用完即删
 #
-# 谁能用一律由**实读一次 .deb** 判定，不看名字（PATH 里有两个同名 tar.exe）。
+# 谁能用一律由实读一次 .deb 判定，不看名字（PATH 里有两个同名 tar.exe）。
 AR_TOOL=""
 AR_TOOL_IS_7ZIP=0
 BORROWED_DIR=""          # 下载来的 bsdtar 所在临时目录，退出时删除
@@ -130,10 +130,10 @@ build_ar_candidates() {
   return 0
 }
 
-# 用真实的 .deb 试读，并且要求**列出 data.tar 成员** —— 这才证明它真懂 ar。
+# 用真实的 .deb 试读，并且要求列出 data.tar 成员 —— 这才证明它真懂 ar。
 # GNU tar 会在这里失败（".deb 不像 tar 归档"），正是我们要区分掉的。
 #
-# ⚠️ 语法不同，不能用同一套旗标探测：tar/bsdtar 是 `-tf`，**7-Zip 是 `l`**。
+# 语法不同，不能用同一套旗标探测：tar/bsdtar 是 `-tf`，7-Zip 是 `l`。
 # 早先用 `-tf` 去测 7z，把它误判成"读不了 ar"（实测踩过）。
 probe_ar_tool() {  # probe_ar_tool <候选> <deb>；成功则设好 AR_TOOL / AR_TOOL_IS_7ZIP
   local bin="$1" deb="$2"
@@ -164,7 +164,7 @@ find_local_ar_tool() {  # ①②档：系统里已有的工具
 # ------------------------------------------------- ③ 第三方静态 bsdtar（兜底）
 #
 # 仓库：https://github.com/probonopd/static-tools（continuous 连续构建，Linux 静态二进制）
-# 资产名按架构选。注意 i686 的是 **bsdtar-i686** —— 同一个 release 里还有个
+# 资产名按架构选。注意 i686 的是 bsdtar-i686 —— 同一个 release 里还有个
 # desktop-file-install-i686，那是另一个工具，别拿错。
 BSDTAR_BASE="https://github.com/probonopd/static-tools/releases/download/continuous"
 
@@ -182,7 +182,7 @@ acquire_bsdtar() {  # acquire_bsdtar <deb>；成功则设好 AR_TOOL / BORROWED_
   # MSYS / Cygwin 执行不了 Linux ELF：与其白下 6.6 MB，不如直接说清楚
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-      warn "  系统里没有能解 ar 的工具，而该 release 提供的是 **Linux 静态二进制**，"
+      warn "  系统里没有能解 ar 的工具，而该 release 提供的是 Linux 静态二进制，"
       warn "  在 MSYS/Cygwin 下无法执行。Windows 10 1803+ 自带"
       warn "  C:\\Windows\\System32\\tar.exe（bsdtar），请确认它还在。"
       return 1 ;;
@@ -193,9 +193,9 @@ acquire_bsdtar() {  # acquire_bsdtar <deb>；成功则设好 AR_TOOL / BORROWED_
 
   echo
   warn "缺少能解 ar 的拆包工具（.deb 是 ar 归档，GNU tar 不支持它）。"
-  warn "打算从**第三方仓库**下载一份静态编译的 bsdtar："
+  warn "打算从第三方仓库下载一份静态编译的 bsdtar："
   warn "    https://github.com/probonopd/static-tools   →   $asset"
-  warn "该二进制由第三方构建，**按原样（AS IS）提供，不附带任何担保**，"
+  warn "该二进制由第三方构建，按原样（AS IS）提供，不附带任何担保，"
   warn "本项目未审计也不为其背书；若 GitHub 直连不通，会经镜像站（gh-proxy.org）"
   warn "转发，同样属于第三方。它只用于解 EDK II 的 .deb，用完立即删除。"
   printf '是否继续下载？[y/N] '
@@ -237,7 +237,7 @@ cleanup_borrowed() {
   fi
   return 0
 }
-# ⚠️ 只写 EXIT 不够：Ctrl-C（SIGINT）与 SIGTERM 默认**不触发** EXIT trap，
+# 只写 EXIT 不够：Ctrl-C（SIGINT）与 SIGTERM 默认不触发 EXIT trap，
 # 临时目录会留在 /tmp 里。所以三个信号都要接，再接回 EXIT 做真正的清理。
 trap cleanup_borrowed EXIT
 trap 'exit 130' INT
@@ -250,25 +250,25 @@ build_ar_candidates
 # ---------------------------------------------------------------- 下载（重试 + 续传 + 多源）
 
 # 本机网络有三个特点，fetch 必须同时应付：
-#   1. **间歇性可达** —— 同一域名前一刻成功、后一刻 21s 超时；必须退避重试。
-#   2. **会中途掉速** —— 实测 22 MB 的内核在 45 KB/s 与 5 KB/s 之间摆（差 9 倍），
+#   1. 间歇性可达 —— 同一域名前一刻成功、后一刻 21s 超时；必须退避重试。
+#   2. 会中途掉速 —— 实测 22 MB 的内核在 45 KB/s 与 5 KB/s 之间摆（差 9 倍），
 #      纯重试会从 0 重来，前功尽弃。故用 `-C -` 断点续传。
-#   3. **多源快慢不一** —— 故接受多个 URL 候选，逐个试，谁快谁上。
+#   3. 多源快慢不一 —— 故接受多个 URL 候选，逐个试，谁快谁上。
 
-# 权威文件大小：必须跟随重定向取**最终**响应的 Content-Length。
+# 权威文件大小：必须跟随重定向取最终响应的 Content-Length。
 #
-# ⚠️ 这里踩过一个严重坑：早先写成 `curl -I`（不带 -L），拿到的是重定向源站的
+# 这里踩过一个严重坑：早先写成 `curl -I`（不带 -L），拿到的是重定向源站的
 # Content-Length —— dl-cdn 返回 15501313（rc 页面大小），而真实文件是 22001665。
-# 于是"续传到 14.5 MB"被误判为**下载完成**，直到 `tar -xzf` 才炸。
+# 于是"续传到 14.5 MB"被误判为下载完成，直到 `tar -xzf` 才炸。
 # 静默地把残缺文件当成品交给下一步，是这个脚本最危险的失败模式。
 remote_size() {
   curl -fsSLI --max-time 30 -4 --noproxy '*' "$1" 2>/dev/null \
     | grep -i '^content-length' | tail -1 | tr -d '\r' | awk '{print $2}'
 }
 
-# 提前验证归档**数据完整**（不只是能列目录）。
+# 提前验证归档数据完整（不只是能列目录）。
 #
-# ⚠️ 关键区别，踩过：`tar -tzf` 只读文件表、不解压数据流，所以**残缺文件也能列出**。
+# 关键区别，踩过：`tar -tzf` 只读文件表、不解压数据流，所以残缺文件也能列出。
 # apk 是拼接的多个 gzip 流（实测 4 段），截断会切在流中间：
 #     tar -tzf 通过 / tar -xzf 失败 —— 于是残缺文件一路走到解压步骤才炸。
 # 这里解压到 /dev/null（丢弃内容、完整读一遍），能真正发现截断。
@@ -283,7 +283,7 @@ fetch_one() {  # fetch_one <url> <输出文件>
   local url="$1" out="$2" part="$2.part"
   local total; total="$(remote_size "$url")"
 
-  # ⚠️ 源一致性：`.part` 可能来自**另一个**源（上一次运行走的是镜像）。
+  # 源一致性：`.part` 可能来自另一个源（上一次运行走的是镜像）。
   # 不同源的字节流不能拼接 —— 曾因此产出"大小对得上但内容损坏"的文件。
   # 换源就从 0 重来（宁可慢，不可错）。
   if [ -s "$part" ]; then
@@ -378,7 +378,7 @@ fetch() {  # fetch <输出文件> <校验sha256|""> <url> [备用url...]
 ARCH="riscv64"
 #
 # 官方 dl-cdn 是本机唯一稳定可用的 Alpine 源；国内镜像对 v3.24 普遍未同步（实测
-# 清华 403、阿里/南大/上交/华为 404）。所以镜像只作为**官方源失败时的兜底**，
+# 清华 403、阿里/南大/上交/华为 404）。所以镜像只作为官方源失败时的兜底，
 # 不指望它更快。多一个源就自动获得"换源重试"，且校验值仍取自官方 manifest。
 ALPINE_MIRROR="https://mirrors.ustc.edu.cn/alpine"
 
@@ -387,8 +387,8 @@ ALPINE_MIRROR="https://mirrors.ustc.edu.cn/alpine"
 GITHUB_PROXY=""
 OPENSBI_PROBE_URL="https://github.com/riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz"
 
-# 直连探测：只看能否**真取到字节**。
-# ⚠️ HEAD 能通不代表能下载：本机 github.com 一直答得好好的，302 之后的
+# 直连探测：只看能否真取到字节。
+# HEAD 能通不代表能下载：本机 github.com 一直答得好好的，302 之后的
 # objects.githubusercontent.com 才是真正超时的那个。所以这里取前 1 KiB 试读。
 probe_url_bytes() {  # probe_url_bytes <url>
   curl -fsSL -o /dev/null --max-time 25 -4 --noproxy '*' -r 0-1023 "$1" 2>/dev/null
@@ -460,7 +460,7 @@ bootstrap_opensbi() {
   tar -xf "$tarball" -C "$FW_DIR"
   local fw="$FW_DIR/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin"
   [ -f "$fw" ] || die "解压后未找到 fw_jump.bin"
-  log "  ✅ $fw"
+  log "  $fw"
 }
 
 # --------------------------------------------------------------- ② EDK II 固件
@@ -509,7 +509,7 @@ bootstrap_edk2() {
         || die "解内层 $(basename "$data") 失败"
       ;;
     *)
-      # .tar / .tar.gz / .tar.xz：**GNU tar 自己能解**（经 liblzma / zlib），
+      # .tar / .tar.gz / .tar.xz：GNU tar 自己能解（经 liblzma / zlib），
       # 不需要 ar 工具 —— 它只是读不了外层的 ar 而已。
       log "  解内层 $(basename "$data")..."
       verify_archive "$data" || die ".deb 内的 data.tar 不完整，重新下载 $deb_name"
@@ -523,7 +523,7 @@ bootstrap_edk2() {
     [ -f "$src/$f" ] || die "未找到 $f"
     cp -f "$src/$f" "$OUT_DIR/$f"
     local sz; sz=$(stat -c %s "$OUT_DIR/$f")
-    log "  ✅ $f  ($sz B = $(awk "BEGIN{printf \"%.2f\", $sz/1048576}") MiB)"
+    log "  $f  ($sz B = $(awk "BEGIN{printf \"%.2f\", $sz/1048576}") MiB)"
     # EDK II 强制要求两块各 32 MiB，尺寸不对就别让用户拿到一个会在固件里报错的产物
     [ "$sz" -eq 33554432 ] || warn "  尺寸不是 32 MiB（33554432），EDK II 可能拒绝该固件"
   done
@@ -554,7 +554,7 @@ bootstrap_alpine() {
   verify_archive "$apk_path" -z \
     || die "apk 下载不完整（完整解压校验失败）—— 删掉 $apk_path 与同名 .part 后重跑"
 
-  # ⚠️ 只解 `boot/`，**不要**整包解压。apk 里有个指向 `/boot/vmlinuz-lts` 的相对符号链接
+  # 只解 `boot/`，不要整包解压。apk 里有个指向 `/boot/vmlinuz-lts` 的相对符号链接
   # （lib/modules/*/vmlinuz），Windows 上建不了，会让 tar 以退出码 2 结束并带上
   # "Cannot create symlink" —— 整个归档其实完好，只是那一条无关链接失败。
   # 只取需要的成员既避开这个坑，也少解 20 MB 的模块树。
@@ -567,7 +567,7 @@ bootstrap_alpine() {
   rm -rf "$t"
   local isz; isz=$(stat -c %s "$OUT_DIR/Image")
   [ "$isz" -gt 1000000 ] || die "解出的 Image 太小（$isz B），可能不是内核"
-  log "  ✅ Image  ($isz B = $(awk "BEGIN{printf \"%.1f\", $isz/1048576}") MiB)"
+  log "  Image  ($isz B = $(awk "BEGIN{printf \"%.1f\", $isz/1048576}") MiB)"
 
   # --- initramfs：从 latest-releases.yaml 取 minirootfs（含官方 sha256 可校验）
   log "  读取 latest-releases.yaml 取 minirootfs 版本与校验值..."
@@ -596,7 +596,7 @@ bootstrap_alpine() {
   verify_archive "$rfs" -z \
     || die "minirootfs 下载不完整（完整解压校验失败）—— 删掉重跑"
 
-  # ⚠️ 这一步**不经过磁盘**：initramfs.ts 直接从 tar 头里读 mode 与 linkname，
+  # 这一步不经过磁盘：initramfs.ts 直接从 tar 头里读 mode 与 linkname，
   # 在内存里组装 cpio。原因见该文件头部的长注释 —— 一旦落盘，Windows 上符号链接
   # 建不出来（要提权）、执行位也存不住（内核 execve 报 EACCES，起不到 init）。
   # 顺带好处：不再解出一棵 7 MB 的树再走一遍磁盘，也少一个 .modes.json 中间文件。
@@ -604,9 +604,9 @@ bootstrap_alpine() {
     || die "initramfs 打包失败（tools/initramfs.ts alpine）"
   local csz; csz=$(stat -c %s "$OUT_DIR/initramfs.cpio.gz")
   [ "$csz" -gt 500000 ] || die "initramfs 太小（$csz B），大概率缺符号链接"
-  log "  ✅ initramfs.cpio.gz  ($csz B)"
+  log "  initramfs.cpio.gz  ($csz B)"
 
-  # 再出一份**未压缩**的。内核在解 initramfs 前会先认压缩格式，认不出就按裸 cpio 直接用 ——
+  # 再出一份未压缩的。内核在解 initramfs 前会先认压缩格式，认不出就按裸 cpio 直接用 ——
   # 于是"在模拟器里跑一遍 inflate"这段指令整个省掉（实测数字见文件末尾的引导命令）。
   # 代价只是文件大一倍，而 tmp/ 本来就不入库。
   #
@@ -630,7 +630,7 @@ bootstrap_alpine() {
       "$OUT_DIR/initramfs.cpio.gz" "$OUT_DIR/initramfs.cpio" \
       || die "initramfs 解压失败（tools/initramfs.ts decompress）"
     local usz; usz=$(stat -c %s "$OUT_DIR/initramfs.cpio")
-    log "  ✅ initramfs.cpio     ($usz B，未压缩；引导更快)"
+    log "  initramfs.cpio     ($usz B，未压缩；引导更快)"
     INITRD_FILE="initramfs.cpio"
   else
     log "  跳过了，只留 initramfs.cpio.gz（随时可补做：tools/initramfs.ts decompress）"
@@ -659,7 +659,7 @@ main() {
   # 解释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
   local initrd_note
   if [ "$INITRD_FILE" = "initramfs.cpio" ]; then
-    initrd_note="  # ⚠️ 用的是**未压缩**的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，
+    initrd_note="  # 用的是未压缩的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，
   #    省掉在模拟器里跑 inflate。同机同核实测（instret，两条路都到 ~ #）：
   #      initramfs.cpio.gz   1,270,638,213 条   到 /init 用 t=120.26s
   #      initramfs.cpio        776,011,912 条   到 /init 用 t=64.67s
@@ -676,7 +676,7 @@ main() {
 引导命令（在仓库根执行）：
 
   # Alpine + OpenSBI（到 BusyBox shell）
-  # ⚠️ 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内
+  # 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内
   #    就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台
   #    注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。
 $initrd_note

@@ -132,6 +132,26 @@ jobs:
           fi
           echo "OK：bootstrap.ps1 的 UTF-8 BOM 在位"
 
+      # 注释式帮助有个静默陷阱：帮助块里**行首的 `.` 会被当成关键字**（.SYNOPSIS/.NOTES/…），
+      # 出现一个不认识的关键字，整块帮助就被丢弃、静默回退成"脚本名 + 参数列表"的自动摘要 ——
+      # 解析不报错、脚本照跑，只有 Get-Help 的输出悄悄变短。
+      # 踩过一次：删掉 `⚠️ .deb 是 ar 归档…` 里的 emoji 后，该行以 `.deb` 开头，
+      # 整块帮助就这样没了（渲染长度 1339 → 161）。
+      - name: bootstrap.ps1 的注释式帮助仍然有效
+        run: |
+          if command -v pwsh >/dev/null 2>&1; then
+            len=$(pwsh -NoProfile -Command \
+              '(Get-Help ./tools/bootstrap.ps1 | Out-String).Length' | tr -d '\r')
+            echo "帮助渲染长度: $len"
+            if [ "${len:-0}" -lt 800 ]; then
+              echo "::error file=tools/bootstrap.ps1::注释式帮助未被识别（渲染仅 $len 字节）——多半是帮助块里出现了行首点号的非关键字行"
+              exit 1
+            fi
+            echo "OK：帮助块被正确解析"
+          else
+            echo "跳过：本机没有 pwsh"
+          fi
+
       # GitHub 网页编辑器（Add file / 铅笔按钮）**绕过本地的 .gitattributes**，
       # 提交进来的 blob 直接带 CRLF。而 git 的归一是逐个文件"自愈"的：谁下次编辑到它，
       # 谁就得到一份整文件重写的 diff（实测：只加一个换行 → 70 insertions / 69 deletions），
