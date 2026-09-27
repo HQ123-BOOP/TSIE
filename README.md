@@ -55,6 +55,25 @@ tools/bootstrap.sh --decompress    # 预先同意解压 initramfs（无人值守
 两个脚本都**动态发现版本号**：上游一发新版，写死的 URL 就会 404。本 README 下面那些手动
 步骤是给"想自己控制每一步"的人看的，也按同一原则写。
 
+### 打成独立可执行文件（用户机器上不需要装 Node）
+
+```bash
+npm run sea        # → tmp/sea/tsie（Windows 上是 tsie.exe），约 90–100 MB
+```
+
+用 Node 官方的 **SEA**（Single Executable Application）把 CLI 连同 Node 运行时打成一个
+可执行文件。启动也比 `npx tsx` 快约 9 倍（**90 ms vs 830 ms**，省掉 tsx 的转译）。
+三条已知限制：
+
+- **不能交叉编译**：SEA 的 blob 与平台无关，但要把它注入**目标平台的 node 可执行文件**，
+  所以 Windows 的包只能在 Windows 上做、Linux 的包只能在 Linux 上做（CI 里就是两平台各构建一次）。
+- 注入会破坏 node 自带的代码签名（postject 会警告），正式对外分发需要自己签名，
+  否则 Windows SmartScreen / macOS Gatekeeper 会拦。
+- 约 90–100 MB（内嵌整个 Node 运行时），远大于 npm 包的 455 KB —— 它是给"不想装 Node"
+  的人用的，不是省空间的。
+
+发布版本里的二进制见 <https://github.com/HQ123-BOOP/TSIE/releases>。
+
 ### 启动 OpenSBI（已验证 ✅）
 
 模拟器可以直接运行真实的 OpenSBI 固件（v1.9 实测通过）。

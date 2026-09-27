@@ -55,6 +55,27 @@ jobs:
       - name: 端到端冒烟（裸机 demo，不依赖任何固件）
         run: npm run demo
 
+  # 独立可执行文件（Node SEA）。这条链没有别的地方会碰：esbuild 打单文件 CJS、
+  # 生成 SEA blob、注入 node 可执行文件、再跑一次 --help 冒烟。任何一个环节坏掉
+  # （比如有人给 CLI 又加了顶层 await，CJS 就打包不了）都该在这里当场红，
+  # 而不是等到打标签发布时才发现。
+  sea:
+    name: sea (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: 打独立可执行文件并冒烟
+        run: npm run sea
+
   hygiene:
     name: hygiene
     runs-on: ubuntu-latest

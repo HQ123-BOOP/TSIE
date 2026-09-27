@@ -64,3 +64,36 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             ./*.tgz
+
+  # 独立可执行文件必须**在目标平台本机构建**：SEA 的 blob 与平台无关，但要注入
+  # 目标平台的 node 可执行文件，没法交叉编译。所以矩阵而不是一次构建。
+  # Windows runner 计费 2 倍，这里只做两个平台（macOS 是 10 倍，且未签名二进制会被
+  # Gatekeeper 拦，暂时不做）。
+  binaries:
+    name: binary (${{ matrix.asset }})
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: tsie-linux-x64
+          - os: windows-latest
+            asset: tsie-windows-x64.exe
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+
+      - name: 打独立可执行文件（内含 --help 冒烟）
+        run: npm run sea -- --out ${{ matrix.asset }}
+
+      - name: 附到 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}" --clobber
