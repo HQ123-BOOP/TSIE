@@ -557,4 +557,15 @@ async function main(): Promise<number> {
   return machine.exitCode ?? 0;
 }
 
-process.exitCode = await main();
+// ⚠️ 这里刻意**不用**顶层 await（原本是 `process.exitCode = await main();`）：
+// Node 的 SEA（单文件可执行）只把内嵌脚本当 CommonJS 跑，而 esbuild 无法把顶层 await
+// 降级成 CJS —— 有它就没法把 CLI 打成独立二进制。写成 then 语义完全一样
+// （main() 内部已有 try/catch，这里只补一个兜底的拒绝处理，避免静默的 unhandled rejection）。
+main().then(
+  (code) => { process.exitCode = code; },
+  (err: unknown) => {
+    process.stderr.write(`致命错误: ${err instanceof Error ? err.stack : String(err)}\n`);
+    process.exitCode = 1;
+  },
+);
+
