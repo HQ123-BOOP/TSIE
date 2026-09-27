@@ -5,6 +5,7 @@
 <img src="https://img.shields.io/github/v/release/HQ123-BOOP/TSIE" alt="Release">
 <img src="https://img.shields.io/github/license/HQ123-BOOP/TSIE" alt="License">
 <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript">
+<img src="https://github.com/HQ123-BOOP/TSIE/actions/workflows/ci.yml/badge.svg" alt="CI">
 
 **一个 TypeScript 从零实现的 RISC-V 64 位模拟器。**
 
@@ -26,20 +27,38 @@
 | **显示** | virtio-gpu 画面可经 WebSocket 实时推到浏览器（脏矩形增量推送），浏览器键盘回传到 guest |
 | **固件** | 直接运行真实固件：实测 OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) 完整引导到 `login:`**，以及 EDK II (UEFI) 启动链（含 TianoCore logo 上屏）。**SBI 调用需外部 OpenSBI —— 内建 SBI 固件已移除** |
 | **加载** | ELF64 装载（自动处理 vaddr/paddr 偏移）、裸二进制、扁平设备树（DTB）生成器（含 `rng-seed` 熵注入） |
-| **工具** | 指令编码器（`tools/encoder.ts`）、指令级单元测试、CLI |
+| **工具** | 引导素材一键拉齐（`tools/bootstrap.sh` / `.ps1`）、cpio initramfs 打包（`tools/initramfs.ts`）、指令编码器（`tools/encoder.ts`）、CPU profile 汇总（`tools/prof-summary.ts`）、指令级单元测试、CLI |
 
 ## 快速开始
 
 ```bash
 npm install        # 运行时依赖只有 ws；另有 typescript / tsx / @types/node 开发依赖
-npm test           # 运行 222 项单元测试
+npm test           # 运行 249 项单元测试
 npm run demo       # 裸机 "Hello, RISC-V 64!"（直接驱动 UART，不依赖固件）
 npm run bench      # 性能基准
 ```
 
+### 一键拉齐引导素材（跑真实固件前先做这个）
+
+跑 OpenSBI / EDK II / Linux 需要几份外部素材。`tools/bootstrap.sh`（Git Bash）与
+`tools/bootstrap.ps1`（PowerShell 7）会把它们全部拉齐、拼好，并打印可直接复制的引导命令：
+
+```bash
+tools/bootstrap.sh                 # 交互：GitHub 不通时询问是否用镜像站
+tools/bootstrap.sh --no-edk2       # 跳过 EDK II（省约 70 MB）
+tools/bootstrap.sh --decompress    # 预先同意解压 initramfs（无人值守；引导快 38.9%）
+```
+
+产物落在 gitignored 的 `tmp/boot/` 与 `firmware/` —— 这些是 GPL-2.0 / 第三方二进制，
+**不入库**（本项目是 Apache-2.0）。
+
+两个脚本都**动态发现版本号**：上游一发新版，写死的 URL 就会 404。本 README 下面那些手动
+步骤是给"想自己控制每一步"的人看的，也按同一原则写。
+
 ### 启动 OpenSBI（已验证 ✅）
 
-模拟器可以直接运行真实的 OpenSBI 固件（v1.9 实测通过）：
+模拟器可以直接运行真实的 OpenSBI 固件（v1.9 实测通过）。
+（这一步 `tools/bootstrap.sh` / `.ps1` 会自动做完并解压，下面的命令是手动路径。）
 
 ```bash
 # 下载预编译固件（约 30 MB，包含所有平台）
@@ -101,10 +120,16 @@ initramfs（`alpine` 子命令），把已有的压缩 initramfs 去掉压缩层
 
 ```bash
 # 1) 下载 Alpine riscv64 内核与最小根文件系统
-curl -O https://dl-cdn.alpinelinux.org/alpine/v3.24/main/riscv64/linux-lts-6.18.44-r0.apk
-curl -O https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/riscv64/alpine-minirootfs-3.24.1-riscv64.tar.gz
+#    ⚠️ 版本号一律**动态取**：这个分支的包更新很快，写死的 URL 会 404
+#    （本 README 早先写的 linux-lts-6.18.44 就已成死链）。
+BASE=https://dl-cdn.alpinelinux.org/alpine/latest-stable
+APK=$(curl -fsSL $BASE/main/riscv64/ | grep -oE 'linux-lts-[0-9][^"]*\.apk' | sort -u | tail -1)
+ROOTFS=$(curl -fsSL $BASE/releases/riscv64/latest-releases.yaml \
+  | grep -oE 'alpine-minirootfs-[0-9][^"]*riscv64\.tar\.gz' | sort -u | tail -1)
+curl -O $BASE/main/riscv64/$APK
+curl -O $BASE/releases/riscv64/$ROOTFS
 # apk 本质是 tar.gz：解出 boot/vmlinuz-lts，再 gzip -dc 得到扁平 Image
-mkdir apk && tar -xzf linux-lts-*.apk -C apk/ boot/ && gzip -dc apk/boot/vmlinuz-lts > Image
+mkdir apk && tar -xzf "$APK" -C apk/ boot/ && gzip -dc apk/boot/vmlinuz-lts > Image
 
 # 2) 打包 initramfs（直接从 minirootfs 归档转换，含 /init 与 dev/console 等设备节点）
 npx tsx tools/initramfs.ts alpine alpine-minirootfs-*.tar.gz initramfs.cpio.gz
@@ -124,9 +149,10 @@ tsx src/cli.ts --bios .../fw_jump.bin \
   --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 1500000000 --stats
 ```
 
-实测进度（Linux 6.18.44，rv64gc）：内核启动 → 内存管理（DMA32 512MB /
+实测进度（Linux **6.18.53**，rv64gc）：内核启动 → 内存管理（DMA32 512MB /
 131072 页）→ SBI TIME/IPI/RFENCE/DBCN/HSM 全部识别 → 定时器与时钟源 →
-VFS / TCP-IP / PCI / USB 子系统 → **initramfs 解包成功**。
+VFS / TCP-IP / PCI / USB 子系统 → initramfs 解包 → **`Run /init as init process`，
+落到 BusyBox 的 `~ #` 提示符**（虚拟时间约 t=64.7s，见上面第 2b 步的实测数字）。
 
 另有更完整的一条链路已跑通：Alpine 3.24.2 的 ext4 rootfs 配精简内核
 （`Image-min-7.2.3`），经 OpenSBI 直接引导，**挂载根文件系统后进入
@@ -295,17 +321,27 @@ src/
 ├── machine.ts            virt 机器组装与主循环
 ├── index.ts              公共 API 导出
 └── cli.ts                命令行入口
+tools/bootstrap.sh        引导素材一键拉齐（OpenSBI + EDK II + Alpine 内核/initramfs）
+tools/bootstrap.ps1       同上，PowerShell 7 版
+tools/initramfs.ts        tar.gz → cpio-newc initramfs；另有 decompress / verify 子命令
+tools/uncompress-fv.ts    去掉 EDK II 固件里的 LZMA 压缩层（UEFI 启动快约 5 倍）
+tools/prof-summary.ts     汇总 node --cpu-prof 采样，按自身耗时列热点
 tools/encoder.ts          RISC-V 指令编码器（测试与示例用）
-tests/                    222 项单元测试（node:test）
+tools/bench.ts            吞吐基准；bench-hilo.ts 量高位/低位运算的分项开销
+tests/                    249 项单元测试（node:test，28 个文件）
 ```
 
 ## 测试
 
 ```bash
-npm test                              # 全部 222 项（25 个文件）
+npm test                              # 全部 249 项（28 个文件）
 npx tsx --test tests/mmu.test.ts      # 单个模块
 npm run typecheck                     # 类型检查（当前 0 错误）
 ```
+
+CI 在每次推送到 `main` 与每个 PR 上跑同一套检查（typecheck / 测试 / 构建 / 加载构建产物 /
+裸机 demo），Ubuntu 与 Windows 各一遍；另有一条 hygiene 作业守住 SPDX 头、GPL 与二进制产物
+不入库、行尾统一 LF。打 `v*` 标签会额外构建并把 npm tarball 附到 GitHub Release。
 
 覆盖范围：RV64I 全部整数指令与访存、M 扩展（含除零/溢出）、A 扩展（LR/SC/AMO）、
 F/D 扩展（舍入模式、NaN 装箱、FCLASS）、RVC 压缩指令、Zba/Zbb/Zbs/Zicntr、
