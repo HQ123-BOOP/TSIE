@@ -121,6 +121,17 @@ jobs:
           fi
           echo "OK：没有构建/缓存产物入库"
 
+      # bootstrap.ps1 刻意带 UTF-8 BOM：PowerShell 5.1 按 ANSI/GBK 读无 BOM 的 UTF-8
+      # 脚本，会直接抛语法错误 —— 那样它连"请装 PowerShell 7+"这句提示都读不到。
+      # BOM 很容易被编辑器/格式化工具悄悄吃掉（本仓库里就被吃掉过一次），所以钉一条。
+      - name: bootstrap.ps1 必须保留 UTF-8 BOM
+        run: |
+          if ! head -c 3 tools/bootstrap.ps1 | od -An -tx1 | grep -q 'ef bb bf'; then
+            echo "::error file=tools/bootstrap.ps1::缺少 UTF-8 BOM，PowerShell 5.1 将无法显示版本提示而只报语法错误"
+            exit 1
+          fi
+          echo "OK：bootstrap.ps1 的 UTF-8 BOM 在位"
+
       # GitHub 网页编辑器（Add file / 铅笔按钮）**绕过本地的 .gitattributes**，
       # 提交进来的 blob 直接带 CRLF。而 git 的归一是逐个文件"自愈"的：谁下次编辑到它，
       # 谁就得到一份整文件重写的 diff（实测：只加一个换行 → 70 insertions / 69 deletions），

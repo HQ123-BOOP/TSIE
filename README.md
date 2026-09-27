@@ -41,7 +41,7 @@ npm run bench      # 性能基准
 ### 一键拉齐引导素材（跑真实固件前先做这个）
 
 跑 OpenSBI / EDK II / Linux 需要几份外部素材。`tools/bootstrap.sh`（Git Bash）与
-`tools/bootstrap.ps1`（PowerShell 7）会把它们全部拉齐、拼好，并打印可直接复制的引导命令：
+`tools/bootstrap.ps1`（**需要 PowerShell 7+**：Windows 自带的 5.1 会被检测到，打印安装提示后以退出码 1 结束）会把它们全部拉齐、拼好，并打印可直接复制的引导命令：
 
 ```bash
 tools/bootstrap.sh                 # 交互：GitHub 不通时询问是否用镜像站

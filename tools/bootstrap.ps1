@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   一键拉取并拼装 TSIE 的引导素材：OpenSBI 固件 + EDK II (UEFI) 固件 + Alpine 内核/initramfs。
 
@@ -27,6 +27,13 @@
   pwsh tools/bootstrap.ps1 -Alpine v3.24 -Dir tmp/boot-pinned
 
 .NOTES
+  **需要 PowerShell 7+**（`pwsh`，不是 Windows 自带的 `powershell.exe` 5.1）。
+  脚本启动时会检测版本：5.1 会打印一段安装提示、等 5 秒后以退出码 1 结束。
+
+  ⚠️ 本文件刻意带 **UTF-8 BOM**，别把它删掉：5.1 按 ANSI/GBK 读无 BOM 的 UTF-8 脚本，
+  会直接抛一堆语法错误 —— 那样它连上面那段"请装 7+"的提示都读不到，用户只会看到乱码报错。
+  CI 的 hygiene 作业会检查这个 BOM 还在不在。
+
   依赖（缺失时的后果已注明）：
     必需  curl.exe              Windows 10 1803+ 自带，或装 Git for Windows
     必需  tar.exe               **必须是 Windows 自带的那个 bsdtar**，不是 Git 的 GNU tar。
@@ -62,6 +69,19 @@ param(
   [string]$Alpine = 'latest-stable',  # Alpine 分支（默认 latest-stable 别名）
   [string]$Dir          # 换输出目录（默认 tmp/boot）
 )
+
+# ---------------------------------------------------------------- 版本守卫
+#
+# 只支持 PowerShell 7+。5.1 在这个脚本依赖的几处行为上都不一样：
+#   * `$null` 传给原生命令的语义不同（见下面 curl 的 `-o NUL` 注释）；
+#   * 它按 ANSI/GBK 读无 BOM 的 UTF-8 脚本 —— 本文件因此**刻意带 UTF-8 BOM**：
+#     不是为了"支持 5.1"，而是为了让它**能读懂这段提示**。否则 5.1 会在解析阶段
+#     抛出一堆语法错误，用户根本看不到下面这句话。
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+  Write-Host '本工具不支持PowerShell 5，请参阅https://learn.microsoft.com/zh-cn/powershell/scripting/install/install-powershell-on-windows 获取PowerShell 7+。然后重试'
+  Start-Sleep -Seconds 5
+  exit 1
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -204,7 +224,9 @@ $script:GithubProxy = $null
 
 function Test-GithubRelease {
   $u = 'https://github.com/riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz'
-  & $Curl -fsSL -o $null --max-time 25 -4 --noproxy '*' -r 0-1023 $u 2>$null
+  # ⚠️ `-o NUL`（Windows 空设备），**不能**写 `-o $null`：PowerShell 传给原生命令的
+  # $null 不会变成"丢弃" —— curl 会把 1 KiB 响应体照样吐到 stdout。
+  & $Curl -fsSL -o NUL --max-time 25 -4 --noproxy '*' -r 0-1023 $u 2>$null
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -221,10 +243,18 @@ function Select-Mirror {
   Write-Log '探测镜像站速度（各取前 1 MiB）...'
   $best = $null; $bestSpeed = 0
   foreach ($name in @('v4', 'v6')) {
-    $sp = & $Curl -fsSL -o $null --max-time 30 -4 --noproxy '*' -r 0-1048575 `
+    # `-o NUL` 让 stdout 只剩 -w 打出的那个数字（实测：1 行）。
+    # 解析**不用 $Matches** —— 之前那句 `[double]($sp -replace '[^\d.]','')`
+    # 在 `-o $null` 把 1 MiB 二进制响应体也捕获进来时，会把整坨数字拼成一个
+    # 无法转换的数组，在 $ErrorActionPreference='Stop' 下整个脚本直接崩。
+    $sp = 0.0
+    $raw = & $Curl -fsSL -o NUL --max-time 30 -4 --noproxy '*' -r 0-1048575 `
       -w '%{speed_download}' "https://$name.gh-proxy.org/$u" 2>$null
-    if ($LASTEXITCODE -ne 0) { $sp = 0 }
-    $sp = [double]($sp -replace '[^\d.]', '')
+    if ($LASTEXITCODE -eq 0) {
+      $last = [string](@($raw)[-1])
+      $tok = @($last -split '[^\d.]+' | Where-Object { $_ -ne '' })
+      if ($tok.Count -gt 0) { $sp = [double]$tok[-1] }
+    }
     Write-Host ("    {0,-4} {1} B/s" -f $name, $sp)
     if ($sp -gt $bestSpeed) { $bestSpeed = $sp; $best = $name }
   }
