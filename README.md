@@ -94,7 +94,8 @@ U-Boot 下载：Debian 包 `u-boot-qemu`（`ftp.debian.org/debian/pool/main/u/u-
 ### 启动 Linux（Alpine，已验证引导到 shell ✅）
 
 配套工具：`tools/initramfs.ts` —— 直接把 minirootfs 归档转成内核可用的 cpio-newc
-initramfs（`alpine` 子命令），或校验归档结构（`verify` 子命令）。
+initramfs（`alpine` 子命令），把已有的压缩 initramfs 去掉压缩层（`decompress` 子命令），
+或校验归档结构（`verify` 子命令）。
 它**不经过磁盘**：模式位与符号链接目标直接取自 tar 头，因此在 Windows 上也不会
 遇到"符号链接建不出来、执行位存不住导致 `Failed to execute /init (error -13)`"。
 
@@ -109,10 +110,18 @@ mkdir apk && tar -xzf linux-lts-*.apk -C apk/ boot/ && gzip -dc apk/boot/vmlinuz
 npx tsx tools/initramfs.ts alpine alpine-minirootfs-*.tar.gz initramfs.cpio.gz
 npx tsx tools/initramfs.ts verify initramfs.cpio.gz        # 结构校验
 
+# 2b) 再去掉压缩层 —— 引导时快得多（下面第 3 步用的就是它）
+#     内核在解 initramfs 前先认压缩格式，**认不出就按裸 cpio 直接用**，
+#     于是"在模拟器里跑一遍 inflate"整段省掉。同机同内核实测（都到 ~ #）：
+#       initramfs.cpio.gz  1,270,638,213 条指令，到 /init 用 t=120.26s
+#       initramfs.cpio       776,011,912 条指令，到 /init 用 t=64.67s
+#     ⇒ 省 4.95 亿条（38.9%）。代价只是文件大 2 倍（3.4 MB → 6.9 MB）。
+npx tsx tools/initramfs.ts decompress initramfs.cpio.gz initramfs.cpio
+
 # 3) 启动（实测吞吐约 2–4 MIPS，随宿主负载浮动；完整引导需数亿条指令，约数分钟）
 tsx src/cli.ts --bios .../fw_jump.bin \
-  --kernel tmp/alpine/Image-lts --initrd tmp/alpine/initramfs.cpio.gz \
-  --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 300000000 --stats
+  --kernel tmp/alpine/Image-lts --initrd tmp/alpine/initramfs.cpio \
+  --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 1500000000 --stats
 ```
 
 实测进度（Linux 6.18.44，rv64gc）：内核启动 → 内存管理（DMA32 512MB /

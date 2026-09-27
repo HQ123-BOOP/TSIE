@@ -36,7 +36,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { gunzipSync, gzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync, zstdDecompressSync } from 'node:zlib';
 
 const BLOCK = 512;
 export const CPIO_HEADER = 110;
@@ -488,6 +488,34 @@ function maybeGunzip(path: string, buf: Buffer): Buffer {
   return buf;
 }
 
+/**
+ * 解开 initramfs 的外层压缩，得到内核可以直接吃的裸 cpio。
+ *
+ * 为什么要这一步：内核在解 initramfs 之前会先认压缩格式，**认不出压缩就直接按裸 cpio 用**。
+ * 压缩态下它得在模拟器里跑一遍 inflate —— 那是纯计算，实测占掉可观的指令数；
+ * 换成裸 cpio 这段就整个省掉（省的是 inflate，cpio 本身的解包两条路都要做）。
+ *
+ * 内核认得 gzip / bzip2 / lzma / xz / lzo / lz4 / zstd；这里只做 Node 标准库做得到的两种，
+ * 其余格式明确报错而不是猜 —— 猜错会产出一个内核读不懂的 initramfs。
+ */
+export function uncompressedInitramfs(buf: Buffer): { data: Buffer; format: string } {
+  if (buf[0] === 0x1f && buf[1] === 0x8b) return { data: gunzipSync(buf), format: 'gzip' };
+  if (buf[0] === 0x28 && buf[1] === 0xb5 && buf[2] === 0x2f && buf[3] === 0xfd) {
+    if (typeof zstdDecompressSync !== 'function') {
+      throw new Error('这是 zstd 压缩的 initramfs，但当前 Node 没有 zstd（需要 22.15+）');
+    }
+    return { data: zstdDecompressSync(buf), format: 'zstd' };
+  }
+  if (buf.subarray(0, 6).toString('latin1') === '070701') {
+    throw new Error('这个文件已经是未压缩的 cpio 了，不需要再解');
+  }
+  throw new Error(
+    '认不出压缩格式（前 4 字节 ' +
+    buf.subarray(0, 4).toString('hex') +
+    '）。内核还支持 bzip2 / lzma / xz / lzo / lz4，但这几种 Node 标准库解不了，请用对应的外部工具',
+  );
+}
+
 export function verifyCpio(buf: Buffer): { count: number; exec: number; symlinks: number; names: string[] } {
   const entries = parseCpio(buf);
   const names = entries.map((e) => e.name);
@@ -505,15 +533,35 @@ export function verifyCpio(buf: Buffer): { count: number; exec: number; symlinks
 function usage(): void {
   process.stderr.write(
     '用法:\n' +
-    '  npx tsx tools/initramfs.ts alpine <minirootfs.tar.gz> <out.cpio.gz>\n' +
-    '  npx tsx tools/initramfs.ts mini   <minirootfs.tar.gz> <out.cpio>\n' +
-    '  npx tsx tools/initramfs.ts verify <initramfs.cpio[.gz]>\n',
+    '  npx tsx tools/initramfs.ts alpine     <minirootfs.tar.gz> <out.cpio.gz>\n' +
+    '  npx tsx tools/initramfs.ts mini       <minirootfs.tar.gz> <out.cpio>\n' +
+    '  npx tsx tools/initramfs.ts decompress <initramfs.cpio.gz> <out.cpio>\n' +
+    '  npx tsx tools/initramfs.ts verify     <initramfs.cpio[.gz]>\n',
   );
 }
 
 export function main(argv: string[]): number {
   const [cmd, input, out] = argv;
   try {
+    if (cmd === 'decompress') {
+      if (!input || !out) { usage(); return 2; }
+      if (out.endsWith('.gz') || out.endsWith('.zst')) {
+        process.stderr.write('错误: 输出别再用压缩后缀 —— 这一步的目的就是去掉压缩层\n');
+        return 2;
+      }
+      const raw = readFileSync(input);
+      const { data, format } = uncompressedInitramfs(raw);
+      // 解出来必须真的是个完好的 cpio，否则交给内核只会得到一个"看起来卡住"的引导
+      const r = verifyCpio(data);
+      writeFileSync(out, data);
+      const pct = (100 * data.length / raw.length - 100).toFixed(0);
+      process.stdout.write(
+        `${input}  ${raw.length} B (${format}) → ${out}  ${data.length} B（未压缩，+${pct}%）\n` +
+        `条目 ${r.count}，符号链接 ${r.symlinks}，可执行文件 ${r.exec} —— 结构校验通过\n` +
+        '内核认不出压缩就会直接按裸 cpio 用，省掉的是它在模拟器里跑 inflate 的那段指令。\n',
+      );
+      return 0;
+    }
     if (cmd === 'verify') {
       if (!input) { usage(); return 2; }
       const raw = maybeGunzip(input, readFileSync(input));

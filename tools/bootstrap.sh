@@ -599,6 +599,15 @@ bootstrap_alpine() {
   local csz; csz=$(stat -c %s "$OUT_DIR/initramfs.cpio.gz")
   [ "$csz" -gt 500000 ] || die "initramfs 太小（$csz B），大概率缺符号链接"
   log "  ✅ initramfs.cpio.gz  ($csz B)"
+
+  # 再出一份**未压缩**的。内核在解 initramfs 前会先认压缩格式，认不出就按裸 cpio 直接用 ——
+  # 于是"在模拟器里跑一遍 inflate"这段指令整个省掉（实测数字见文件末尾的引导命令）。
+  # 代价只是文件大一倍，而 tmp/ 本来就不入库。
+  "$TSX" "$REPO_ROOT/tools/initramfs.ts" decompress \
+    "$OUT_DIR/initramfs.cpio.gz" "$OUT_DIR/initramfs.cpio" \
+    || die "initramfs 解压失败（tools/initramfs.ts decompress）"
+  local usz; usz=$(stat -c %s "$OUT_DIR/initramfs.cpio")
+  log "  ✅ initramfs.cpio     ($usz B，未压缩；引导更快)"
 }
 
 # ----------------------------------------------------------------------- 主流程
@@ -627,10 +636,15 @@ main() {
   # ⚠️ 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内
   #    就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台
   #    注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。
-  # ⚠️ 指令预算给足 1.5e9：完整引导需约 1.2e9 条（含 initramfs 解包）。
+  # ⚠️ 用 **initramfs.cpio（未压缩那份）**：内核认不出压缩就直接按裸 cpio 用，
+  #    省掉在模拟器里跑 inflate。同机同核实测（instret，两条路都到 ~ #）：
+  #      initramfs.cpio.gz   1,270,638,213 条   到 /init 用 t=120.26s
+  #      initramfs.cpio        776,011,912 条   到 /init 用 t=64.67s
+  #    ⇒ 省 4.95 亿条（38.9%）。差别不是"能不能起来"，是快多少。
+  #    （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）
   npx tsx src/cli.ts \\
     --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin \\
-    --kernel $rel_out/Image --initrd $rel_out/initramfs.cpio.gz \\
+    --kernel $rel_out/Image --initrd $rel_out/initramfs.cpio \\
     --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 1500000000 --stats
 
   # EDK II (UEFI)：需要成对提供 CODE / VARS

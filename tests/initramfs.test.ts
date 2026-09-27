@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 TSIE
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { gzipSync } from 'node:zlib';
 
 import {
   CPIO_HEADER,
@@ -15,6 +19,7 @@ import {
   main,
   parseCpio,
   parseTar,
+  uncompressedInitramfs,
   verifyCpio,
   type CpioEntry,
   type TarEntry,
@@ -217,4 +222,39 @@ test('main 在参数不足时返回用法错误码而不是崩溃', () => {
   assert.equal(main([]), 2);
   assert.equal(main(['alpine']), 2);
   assert.equal(main(['nonsense', 'a', 'b']), 2);
+});
+
+// ------------------------------------------------------- decompress 子命令
+
+test('uncompressedInitramfs 解开 gzip 并报出格式', () => {
+  const raw = buildAlpine(parseTar(sampleTar())).buf;
+  const r = uncompressedInitramfs(gzipSync(raw, { level: 9 }));
+  assert.equal(r.format, 'gzip');
+  assert.deepEqual(r.data, raw, '解开的内容必须与原 cpio 逐字节一致');
+});
+
+test('uncompressedInitramfs 对已经是裸 cpio 的输入明确报错，而不是再解一次', () => {
+  const raw = buildAlpine(parseTar(sampleTar())).buf;
+  assert.throws(() => uncompressedInitramfs(raw), /已经是未压缩/);
+});
+
+test('uncompressedInitramfs 认不出的格式要报错并带上魔数，不能猜', () => {
+  assert.throws(() => uncompressedInitramfs(Buffer.from('not an initramfs')), /认不出压缩格式/);
+});
+
+test('decompress 子命令端到端：解出来的是完好 cpio，且拒绝 .gz 输出', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tsie-initramfs-'));
+  try {
+    const src = join(dir, 'in.cpio.gz');
+    const dst = join(dir, 'out.cpio');
+    const raw = buildAlpine(parseTar(sampleTar())).buf;
+    writeFileSync(src, gzipSync(raw, { level: 9 }));
+
+    assert.equal(main(['decompress', src, join(dir, 'bad.cpio.gz')]), 2, '拒绝压缩后缀的输出');
+    assert.equal(main(['decompress', src, dst]), 0);
+    assert.deepEqual(readFileSync(dst), raw);
+    assert.equal(main(['decompress', join(dir, 'missing.gz'), dst]), 1, '输入不存在应报错而不是崩溃');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
