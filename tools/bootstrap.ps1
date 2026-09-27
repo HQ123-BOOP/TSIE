@@ -17,7 +17,7 @@
     * 下载统一走 curl.exe（Windows 自带的就够），这样与 .sh 版本共用同一套
       旗标语义（--retry / --noproxy / -4），避免 Invoke-WebRequest 的差异。
 
-  cpio 打包复用项目已有的 tools/make-initramfs.py —— PowerShell 与 Git Bash
+  cpio 打包复用项目自己的 tools/initramfs.ts（tsx 跑）—— PowerShell 与 Git Bash
   都没有原生 cpio（本机也没有 ar/dpkg-deb），没必要造第三份实现。
 
 .EXAMPLE
@@ -31,10 +31,10 @@
     必需  tar.exe               **必须是 Windows 自带的那个 bsdtar**，不是 Git 的 GNU tar。
                                 两者同名但能力不同：本脚本显式取 System32\tar.exe，
                                 因为 PATH 里 Git 的 tar.exe 排在前面且**不支持 ar**。
-    必需  python                解压与打 cpio 都靠它。**不是可选项**：Windows 的 tar
-                                建不了符号链接、也不保留执行位，直接 tar 解出来的 rootfs
-                                产出的 initramfs 会因 EACCES 起不到 init。
-                                需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
+    必需  node + tsx            打 initramfs 用 tools/initramfs.ts，tsx 是 devDependency
+                                （先 npm install）。这一步**不经过磁盘**：直接从 tar 头里
+                                读 mode/linkname 组装 cpio，所以 "Windows 建不了符号链接、
+                                存不住执行位" 都不影响它。已不再需要 Python。
     可选  7-Zip                 只有 EDK II 拆 ar 会用到，且**仅在 bsdtar 不可用时**兜底。
                                 两者都没有就自动跳过 EDK II 并警告。
     不需要 xz                   OpenSBI 是 .tar.xz，但 tar/bsdtar 自己经 liblzma 解压。
@@ -100,8 +100,9 @@ if (-not $SevenZip) { $SevenZip = (Get-Command 7z -ErrorAction SilentlyContinue)
 # 谁能解 ar 由**实读一次 .deb** 判定（见 Select-DebTool），这里只列候选。
 $DebToolCandidates = @($Tar) + @($SevenZip | Where-Object { $_ })
 
-$Python = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $Python) { $Python = (Get-Command py -ErrorAction SilentlyContinue).Source }
+# 打 initramfs 用 tools/initramfs.ts（tsx 是 devDependency）。
+# 与 .sh 一致：**不再要求系统装 Python** —— 那一步现在直接从 tar 组装 cpio，不落盘。
+$Tsx = Join-Path $RepoRoot 'node_modules\.bin\tsx.cmd'
 
 $DoEdk2 = -not $NoEdk2
 # 注意：这里**不再**因为"没有 7-Zip"就跳过 EDK II —— bsdtar 同样能解 ar，
@@ -395,32 +396,19 @@ function Install-Alpine {
   $rfs = Join-Path $OutDir $rootfs
   try { Invoke-Fetch -Url "${rel}${rootfs}" -OutFile $rfs -Sha256 $sha } catch { Write-Die 'minirootfs 下载/校验失败' }
 
-  # Python 是硬依赖：解压（保符号链接）与打 cpio 都要它。
-  if (-not $Python) {
-    Write-Die '找不到 python。解压必须用 tools/extract_archive.py —— Windows 的 tar 建不了符号链接（见下），而缺少链接的 initramfs 起不到 shell。'
+  # tsx 是 devDependency；打 initramfs 复用项目自己的工具链，不再要求系统装 Python。
+  if (-not $Tsx) {
+    Write-Die "找不到 tsx（$RepoRoot\node_modules\.bin\tsx）—— 请先在仓库根执行 npm install"
   }
 
-  Write-Log '  解出 rootfs 树并打成 cpio-newc initramfs...'
-  $root = Join-Path $OutDir 'rootfs'
-  # 权限表是 rootfs 的**同级**文件（extract_archive.py 写出），清理时要一起删。
-  $rootModes = "$root.modes.json"
-  if (Test-Path $root) { Remove-Item -Recurse -Force $root }
-  if (Test-Path $rootModes) { Remove-Item -Force $rootModes }
-  New-Item -ItemType Directory -Force -Path $root | Out-Null
+  Write-Log '  打成 cpio-newc initramfs（tools/initramfs.ts）...'
 
-  # ⚠️ 必须用 extract_archive.py，不能用 tar：
-  # Alpine 的可执行文件几乎全是指向 /bin/busybox 的符号链接，而 Windows 上
-  # tar 与 ln 都建不了链接（需管理员或开发者模式）—— 实测 tar 解完 0 链接 / 106 文件
-  # 且提前中止。Python tarfile 用重解析点写链接，普通用户即可，能解出 335 个。
-  # 少了这些链接，initramfs 里 /bin/sh 就不存在，根本起不到 shell。
-  & $Python (Join-Path $RepoRoot 'tools\extract_archive.py') $rfs $root
-  if ($LASTEXITCODE -ne 0) { Write-Die 'rootfs 解压失败（extract_archive.py）' }
-
+  # ⚠️ 这一步**不经过磁盘**：initramfs.ts 直接从 tar 头里读 mode 与 linkname，
+  # 在内存里组装 cpio。一旦落盘，Windows 上符号链接建不出来（要提权）、执行位
+  # 也存不住（内核 execve 报 EACCES，起不到 init）—— 这正是它不落盘的原因。
   $cpio = Join-Path $OutDir 'initramfs.cpio.gz'
-  & $Python (Join-Path $RepoRoot 'tools\make-initramfs.py') $root $cpio
-  if ($LASTEXITCODE -ne 0) { Write-Die 'make-initramfs.py 失败' }
-  Remove-Item -Recurse -Force $root
-  if (Test-Path $rootModes) { Remove-Item -Force $rootModes }
+  & $Tsx (Join-Path $RepoRoot 'tools\initramfs.ts') alpine $rfs $cpio
+  if ($LASTEXITCODE -ne 0) { Write-Die 'initramfs 打包失败（tools/initramfs.ts alpine）' }
 
   $csz = (Get-Item $cpio).Length
   if ($csz -lt 500000) { Write-Die "initramfs 太小（$csz B），大概率缺符号链接" }

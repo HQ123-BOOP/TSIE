@@ -93,19 +93,21 @@ U-Boot 下载：Debian 包 `u-boot-qemu`（`ftp.debian.org/debian/pool/main/u/u-
 
 ### 启动 Linux（Alpine，已验证引导到 shell ✅）
 
-配套工具：`tools/make-initramfs.py`（Windows 上自制 cpio-newc initramfs）、
-`tools/verify-cpio.py`（校验归档结构）。
+配套工具：`tools/initramfs.ts` —— 直接把 minirootfs 归档转成内核可用的 cpio-newc
+initramfs（`alpine` 子命令），或校验归档结构（`verify` 子命令）。
+它**不经过磁盘**：模式位与符号链接目标直接取自 tar 头，因此在 Windows 上也不会
+遇到"符号链接建不出来、执行位存不住导致 `Failed to execute /init (error -13)`"。
 
 ```bash
 # 1) 下载 Alpine riscv64 内核与最小根文件系统
 curl -O https://dl-cdn.alpinelinux.org/alpine/v3.24/main/riscv64/linux-lts-6.18.44-r0.apk
 curl -O https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/riscv64/alpine-minirootfs-3.24.1-riscv64.tar.gz
 # apk 本质是 tar.gz：解出 boot/vmlinuz-lts，再 gzip -dc 得到扁平 Image
-mkdir rootfs && tar -xzf alpine-minirootfs-*.tar.gz -C rootfs/
+mkdir apk && tar -xzf linux-lts-*.apk -C apk/ boot/ && gzip -dc apk/boot/vmlinuz-lts > Image
 
-# 2) 自制 initramfs（含 /init 与 dev/console 等控制台设备节点）
-python tools/make-initramfs.py rootfs initramfs.cpio.gz
-python tools/verify-cpio.py initramfs.cpio.gz        # 结构校验
+# 2) 打包 initramfs（直接从 minirootfs 归档转换，含 /init 与 dev/console 等设备节点）
+npx tsx tools/initramfs.ts alpine alpine-minirootfs-*.tar.gz initramfs.cpio.gz
+npx tsx tools/initramfs.ts verify initramfs.cpio.gz        # 结构校验
 
 # 3) 启动（实测吞吐约 2–4 MIPS，随宿主负载浮动；完整引导需数亿条指令，约数分钟）
 tsx src/cli.ts --bios .../fw_jump.bin \

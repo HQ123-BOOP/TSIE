@@ -28,10 +28,11 @@
 #
 # 依赖（缺失时的后果已注明）：
 #   必需  curl / tar / sha256sum   Git Bash 自带
-#   必需  python                   解压与打 cpio 都靠它。**不是可选项**：Windows 的 tar
-#                                  建不了符号链接、也不保留执行位，直接 tar 解出来的 rootfs
-#                                  产出的 initramfs 会因 EACCES 起不到 init。
-#                                  需 Python 3.12+（extract_archive.py 用 tarfile 的 filter=）
+#   必需  node + tsx               打 initramfs 用 tools/initramfs.ts，而 tsx 是
+#                                  devDependency（先 npm install）。这一步**不经过磁盘**：
+#                                  直接从 tar 头里读 mode/linkname 组装 cpio，所以
+#                                  "Windows 建不了符号链接 / 存不住执行位"都不影响它。
+#                                  已不再需要 Python。
 #   可选  bsdtar / 7-Zip           只有 EDK II 需要：.deb 是 **ar 归档**，而 Git Bash 的
 #                                  GNU tar **不支持 ar**。系统里已有就免下载（Windows
 #                                  自带的 C:\Windows\System32\tar.exe 就是 bsdtar）；
@@ -63,7 +64,7 @@ while [ $# -gt 0 ]; do
     --no-edk2)   DO_EDK2=0 ;;
     --alpine)    ALPINE_BRANCH="$2"; shift ;;
     --dir)       OUT_DIR="$2"; shift ;;
-    -h|--help)   sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
+    -h|--help)   sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
     *) die "未知参数: $1（--help 看用法）" ;;
   esac
   shift
@@ -72,9 +73,12 @@ done
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1"; }
 # 注意：**不检查 xz**。OpenSBI 是 .tar.xz，但 `tar -xf` 自己会经 liblzma 解压，
 # 不需要独立的 xz 命令（实测 GNU tar 1.35 直接解开）。ps1 侧同理，从未依赖它。
-for c in curl tar sha256sum python; do need "$c"; done
-# python 是硬依赖（ps1 侧同样）：解压必须走 extract_archive.py —— Windows 的 tar 建不了
-# 符号链接、也不保留执行位，缺了它产出的 initramfs 无法引导。提前检查，别等 20 分钟后才报。
+for c in curl tar sha256sum node; do need "$c"; done
+# 不再依赖 Python：initramfs 由 tools/initramfs.ts 直接 tar→cpio（见下），复用项目
+# 自己的工具链 —— tsx 本来就在 devDependencies 里，跑模拟器也要用它。
+# 提前检查，别等下载完 70 MB 才报缺工具。
+TSX="$REPO_ROOT/node_modules/.bin/tsx"
+[ -x "$TSX" ] || die "缺少 tsx（$TSX）—— 请先在仓库根执行 npm install"
 
 # ------------------------------------------------- EDK II 的 ar 拆包工具选择
 #
@@ -582,24 +586,16 @@ bootstrap_alpine() {
   fetch "$rfs" "$sha" "${rel}${rootfs}" "$mirror_rfs" \
     || die "minirootfs 下载/校验失败"
 
-  log "  解出 rootfs 树并打成 cpio-newc initramfs（复用 tools/make-initramfs.py）..."
-  local root="$OUT_DIR/rootfs"
-  # 权限表是 rootfs 的**同级**文件（extract_archive.py 写出），清理时要一起删，否则残留干扰下次运行。
-  rm -rf "$root" "$root.modes.json"; mkdir -p "$root"
+  log "  打成 cpio-newc initramfs（tools/initramfs.ts）..."
   verify_archive "$rfs" -z \
     || die "minirootfs 下载不完整（完整解压校验失败）—— 删掉重跑"
 
-  # ⚠️ 必须用 extract_archive.py，**不能**用 tar：
-  # Alpine 的可执行文件几乎全是指向 /bin/busybox 的符号链接，而 Windows 上
-  # tar/ln 都建不了链接（需管理员或开发者模式）。实测 tar 解完是 0 链接 / 106 文件
-  # 且提前中止；Python tarfile 走重解析点，普通用户即可，能解出 335 个链接。
-  # 少了这些链接，initramfs 里 /bin/sh 就不存在，根本起不到 shell。
-  python "$REPO_ROOT/tools/extract_archive.py" "$rfs" "$root" \
-    || die "minirootfs 解压失败（extract_archive.py）"
-
-  python "$REPO_ROOT/tools/make-initramfs.py" "$root" "$OUT_DIR/initramfs.cpio.gz" \
-    || die "make-initramfs.py 失败"
-  rm -rf "$root" "$root.modes.json"
+  # ⚠️ 这一步**不经过磁盘**：initramfs.ts 直接从 tar 头里读 mode 与 linkname，
+  # 在内存里组装 cpio。原因见该文件头部的长注释 —— 一旦落盘，Windows 上符号链接
+  # 建不出来（要提权）、执行位也存不住（内核 execve 报 EACCES，起不到 init）。
+  # 顺带好处：不再解出一棵 7 MB 的树再走一遍磁盘，也少一个 .modes.json 中间文件。
+  "$TSX" "$REPO_ROOT/tools/initramfs.ts" alpine "$rfs" "$OUT_DIR/initramfs.cpio.gz" \
+    || die "initramfs 打包失败（tools/initramfs.ts alpine）"
   local csz; csz=$(stat -c %s "$OUT_DIR/initramfs.cpio.gz")
   [ "$csz" -gt 500000 ] || die "initramfs 太小（$csz B），大概率缺符号链接"
   log "  ✅ initramfs.cpio.gz  ($csz B)"
