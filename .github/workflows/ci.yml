@@ -86,3 +86,21 @@ jobs:
             exit 1
           fi
           echo "OK：没有 GPL / 二进制产物入库"
+
+      # GitHub 网页编辑器（Add file / 铅笔按钮）**绕过本地的 .gitattributes**，
+      # 提交进来的 blob 直接带 CRLF。而 git 的归一是逐个文件"自愈"的：谁下次编辑到它，
+      # 谁就得到一份整文件重写的 diff（实测：只加一个换行 → 70 insertions / 69 deletions），
+      # 那个文件的 git blame 也就废了。所以在这里挡一道。
+      #
+      # ⚠️ 必须查 **index**：CI 里 checkout 会按 .gitattributes 把文件还原成 LF，
+      # 查工作区永远是干净的、什么也发现不了。
+      - name: 不得有 CRLF 行尾入库
+        run: |
+          bad=$(git ls-files --eol | grep -E '^i/(crlf|mixed)' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::以下文件的 blob 里含 CRLF（网页编辑器提交会绕过 .gitattributes）"
+            printf '%s\n' "$bad"
+            echo "修法：git add --renormalize . 然后提交" 
+            exit 1
+          fi
+          echo "OK：仓库里所有文本文件都是 LF"
