@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 TSIE
 """汇总 V8 CPU profile（node --cpu-prof 产出的 .cpuprofile）。
 
 按**自身耗时**（self time）聚合函数，输出 top-N。自身耗时 = 该函数栈顶被采样到的次数，
