@@ -27,12 +27,12 @@
 | **显示** | virtio-gpu 画面可经 WebSocket 实时推到浏览器（脏矩形增量推送），浏览器键盘回传到 guest |
 | **固件** | 直接运行真实固件：实测 OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) 完整引导到 `login:`**，以及 EDK II (UEFI) 启动链（含 TianoCore logo 上屏）。**SBI 调用需外部 OpenSBI —— 内建 SBI 固件已移除** |
 | **加载** | ELF64 装载（自动处理 vaddr/paddr 偏移）、裸二进制、扁平设备树（DTB）生成器（含 `rng-seed` 熵注入） |
-| **工具** | 引导素材一键拉齐（`tools/bootstrap.sh` / `.ps1`）、cpio initramfs 打包（`tools/initramfs.ts`）、指令编码器（`tools/encoder.ts`）、CPU profile 汇总（`tools/prof-summary.ts`）、指令级单元测试、CLI |
+| **工具** | 引导素材一键拉齐（`tools/bootstrap.sh` / `.ps1`）、cpio initramfs 打包（`tools/initramfs.ts`）、**独立可执行文件构建（`npm run sea`）**、指令编码器（`tools/encoder.ts`）、CPU profile 汇总（`tools/prof-summary.ts`）、指令级单元测试、CLI |
 
 ## 快速开始
 
 ```bash
-npm install        # 运行时依赖只有 ws；另有 typescript / tsx / @types/node 开发依赖
+npm install        # 运行时依赖只有 ws；开发依赖 typescript / tsx / esbuild / postject / @types/*
 npm test           # 运行 249 项单元测试
 npm run demo       # 裸机 "Hello, RISC-V 64!"（直接驱动 UART，不依赖固件）
 npm run bench      # 性能基准
@@ -358,9 +358,10 @@ npx tsx --test tests/mmu.test.ts      # 单个模块
 npm run typecheck                     # 类型检查（当前 0 错误）
 ```
 
-CI 在每次推送到 `main` 与每个 PR 上跑同一套检查（typecheck / 测试 / 构建 / 加载构建产物 /
-裸机 demo），Ubuntu 与 Windows 各一遍；另有一条 hygiene 作业守住 SPDX 头、GPL 与二进制产物
-不入库、行尾统一 LF。打 `v*` 标签会额外构建并把 npm tarball 附到 GitHub Release。
+CI 在每次推送到 `main` 与每个 PR 上跑三组作业：`check`（typecheck / 测试 / 构建 / 加载构建产物 /
+裸机 demo，Ubuntu 与 Windows 各一遍）、`sea`（把 CLI 打成独立可执行文件并冒烟，
+同样两个平台）、`hygiene`（SPDX 头、GPL 与二进制产物不入库、行尾统一 LF、构建缓存不入库）。
+打 `v*` 标签会额外构建，并把 npm tarball 与两个平台的独立可执行文件一起附到 GitHub Release。
 
 覆盖范围：RV64I 全部整数指令与访存、M 扩展（含除零/溢出）、A 扩展（LR/SC/AMO）、
 F/D 扩展（舍入模式、NaN 装箱、FCLASS）、RVC 压缩指令、Zba/Zbb/Zbs/Zicntr、
