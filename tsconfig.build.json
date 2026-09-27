@@ -3,7 +3,12 @@
   "compilerOptions": {
     "noEmit": false,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // 源码里的 import 带 .ts 后缀（见 tsconfig.json 的 allowImportingTsExtensions）。
+    // 只开那个开关是**不能 emit 的**：tsc 报 TS5096，而且**照样把 .ts 后缀原样写进产物**
+    // —— dist/cli.js 里留下 `import ... from './machine.ts'`，一运行就是
+    // ERR_MODULE_NOT_FOUND。本开关（TS 5.7+）让 emit 时把后缀改写成 .js。
+    "rewriteRelativeImportExtensions": true
   },
   "include": ["src/**/*.ts"]
 }
