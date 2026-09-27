@@ -20,7 +20,7 @@ are hand-written; there is no delegation to an external emulator or VM.
 
 ```bash
 npm install          # ws is the only runtime dep
-npm test             # 222 unit tests across 25 files (node:test)
+npm test             # 234 unit tests across 26 files (node:test)
 npm run typecheck    # tsc --noEmit — must stay at 0 errors
 npm run demo         # bare-metal "Hello, RISC-V 64!"; drives UART directly, needs no firmware
 npm run bench        # bare-metal throughput benchmark
@@ -116,4 +116,11 @@ npx tsx --test tests/mmu.test.ts
 Prefer synthetic in-process guest-driver tests over booting a full OS — they run in
 milliseconds instead of minutes.
 
-There is no CI configured; the checks above are run locally.
+CI runs the same checks on every push to `main` and every pull request
+(`.github/workflows/ci.yml`): `typecheck`, `npm test`, `npm run build`, loading the built
+`dist/cli.js`, and `npm run demo` — on Ubuntu and Windows alike, with a single Node version
+(24, the active LTS). A second job enforces the SPDX headers and the ban on committing GPL or
+binary artifacts. Pushing a `v*` tag additionally builds and attaches an npm tarball to the
+GitHub Release (`.github/workflows/release.yml`), and the tag must match the version in
+`package.json`. The commands above are still what you run locally; CI only makes them
+non-optional.

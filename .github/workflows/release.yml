@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 TSIE
+#
+# 打 v* 标签即发布：跑完整的检查，构建，把 npm tarball 挂到 GitHub Release 上。
+#
+# 为什么附 tarball：现在 dist/ 只有本地能生成（它被 .gitignore 挡着，不在仓库里），
+# 想用的人只能自己装 Node 构建。Release 附一份构建产物，`npm i -g <tarball>`
+# 就能直接得到 tsie 命令。
+#
+# 注意：**不发 npm 公共源**。那需要额外的 NPM_TOKEN 且包名已被占用与否未知；
+# 想发的时候在这个工作流后面加一步 `npm publish --provenance` 即可。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write          # 创建 Release 需要写权限
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      # 标签与 package.json 的版本必须一致，否则会发出一个"名叫 v2.0.0 的 1.0.0"。
+      - name: 标签与 package.json 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          echo "tag=$tag package.json=$pkg"
+          [ "$tag" = "$pkg" ] || { echo "::error::标签 $GITHUB_REF_NAME 与 package.json 版本 $pkg 不一致"; exit 1; }
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建
+        run: npm run build
+
+      - name: 构建产物必须真的能加载
+        run: node dist/cli.js --help
+
+      - name: 打包
+        run: |
+          npm pack
+          ls -l ./*.tgz
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            ./*.tgz

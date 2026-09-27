@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 TSIE
+#
+# 每次推送到 main、以及每个 PR 都跑。矩阵只有两个系统、一个 Node 版本
+# （活跃 LTS）：这个项目刻意在意 Windows（bootstrap 的符号链接/权限位那一堆坑），
+# 而 Windows runner 计费是 Linux 的 2 倍，所以只在它上面跑同一套检查，不再加版本矩阵。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read          # CI 不需要写权限
+
+concurrency:              # 同一分支重复推送时，取消上一次没跑完的
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'   # 活跃 LTS（Krypton）
+          cache: npm
+
+      - run: npm ci
+
+      - name: 类型检查（必须 0 错误）
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建
+        run: npm run build
+
+      # 这一步是本仓库最该守的门：tsconfig 里开了 allowImportingTsExtensions，
+      # 若不同时开 rewriteRelativeImportExtensions，tsc 会**照样 emit** 却把 .ts
+      # 后缀写进产物 —— dist 能生成、却一加载就 ERR_MODULE_NOT_FOUND。
+      # 2026-09-27 发现时 dist/ 已经这么坏了一段时间，因为平时都用 tsx 跑源码。
+      - name: 构建产物必须真的能加载
+        run: node dist/cli.js --help
+
+      - name: 端到端冒烟（裸机 demo，不依赖任何固件）
+        run: npm run demo
+
+  hygiene:
+    name: hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 每个 .ts 都要有 SPDX 头
+        run: |
+          missing=0
+          for f in $(git ls-files '*.ts'); do
+            if ! head -5 "$f" | grep -q 'SPDX-License-Identifier: Apache-2.0'; then
+              echo "::error file=$f::缺少 SPDX-License-Identifier: Apache-2.0"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] && echo "OK：所有 .ts 都带 SPDX 头"
+
+      # 仓库是 Apache-2.0：GPL-2.0 的固件/内核/镜像，以及任何第三方大二进制，
+      # 一律不得入库（见 AGENTS.md 硬规矩 1）。.gitignore 已经挡住它们，
+      # 这里再挡一层 —— 因为 `git add -f` 与改错的 .gitignore 都能绕过第一层。
+      - name: 不得提交 GPL / 二进制产物
+        run: |
+          bad=$(git ls-files | grep -E '^(firmware|linux-image|tmp|dist)/' || true)
+          bad="$bad"$'\n'"$(git ls-files | grep -E '\.(fd|img|deb|apk|cpio|bin|elf|iso|raw|qcow2)$' || true)"
+          bad=$(printf '%s\n' "$bad" | sed '/^$/d')
+          if [ -n "$bad" ]; then
+            echo "::error::以下产物不得入库（GPL-2.0 / 第三方二进制）："
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          echo "OK：没有 GPL / 二进制产物入库"
