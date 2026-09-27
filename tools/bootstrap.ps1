@@ -1,4 +1,7 @@
-﻿<#
+﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 TSIE
+
+<#
 .SYNOPSIS
   一键拉取并拼装 TSIE 的引导素材：OpenSBI 固件 + EDK II (UEFI) 固件 + Alpine 内核/initramfs。
 
@@ -56,8 +59,6 @@
   已知坑：本机 dl-cdn 会重定向且速度在 45 KB/s~5 KB/s 间摆动，故下载走 -C - 断点续传
   并按**最终**响应的 Content-Length 判完成；`.part` 还记录来源 URL，换源即重下。
 #>
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2026 TSIE
 
 [CmdletBinding()]
 param(
