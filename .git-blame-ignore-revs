@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 TSIE
+#
+# 本文件列出"纯机械改动"的提交，`git blame` 应当跳过它们，
+# 否则每一行都会归因到这些提交，而不是真正写它的人。
+#
+# 本地启用：
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub 的 blame 页面会自动读取本文件，无需配置。
+#
+# 只放**不改变任何一行语义**的提交，且必须是完整 40 位 hash（短 hash 会被忽略）。
+
+# 行尾归一：12 个文件的 CRLF → LF，`git diff -w` 为空（2575 增 = 2575 删）
+f072de0db701e35d19afe3b285cdcd78427eef56
