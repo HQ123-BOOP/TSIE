@@ -74,7 +74,14 @@ param(
   [switch]$Decompress,  # 预先同意解压 initramfs（无人值守）
   [switch]$NoDecompress,# 不要解压，只留 .cpio.gz
   [string]$Alpine = 'latest-stable',  # Alpine 分支（默认 latest-stable 别名）
-  [string]$Dir          # 换输出目录（默认 tmp/boot）
+  [string]$Dir,         # 换输出目录（默认 tmp/boot）
+  # 接住没人认领的位置参数。PowerShell **不认 `--name` 这种写法**（只认 `-name`），
+  # 所以 `--help` 到不了 -Help 开关上，会**原样**落进这里（实测；它不是被拆成 `help`）。
+  # ⚠️ 两种调用方式的规则还不一样：直接调用脚本（`./bootstrap.ps1 --help`）会报
+  # "找不到接受自变量的位置参数"，而 `pwsh -File bootstrap.ps1 --help` 却能过 ——
+  # 我第一版只测了后者，于是在用户真实的用法下是坏的。这里接住它，与 .sh 的 `--help` 对齐。
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$Rest
 )
 
 # ---------------------------------------------------------------- 版本守卫
@@ -90,12 +97,21 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
   exit 1
 }
 
-# 帮助入口。PowerShell 的绑定规则让三种写法都落到这个开关上：
-#   -Help（标准）、--help（--name 等价 -name）、-h（-Help 的唯一前缀）。
+# 帮助入口。四种写法都要能出帮助：
+#   -Help（标准开关）、-h（-Help 的唯一前缀）、-?（PowerShell 内建）、
+#   以及 --help / --h。**后两种到不了开关上**：PowerShell 不认 `--name`，
+#   实测直接调用脚本时它们**原样**落进 $Rest（并不是被拆成 `help`），所以按字面匹配。
 # 与 .sh 侧的 `-h|--help` 对齐 —— 注释式帮助本身是给 Get-Help 读的，用户未必知道。
-if ($Help) {
+if ($Help -or ($Rest.Count -gt 0 -and $Rest[0] -imatch '^(--)?(help|h|\?|/\?)$')) {
   Get-Help $PSCommandPath -Full
   exit 0
+}
+
+# 其余没人认领的参数：**当场报错**，不要静默变成别的意思
+# （这里用 Write-Host 而不是后面定义的 Write-Die —— 那些函数还没定义到）。
+if ($Rest.Count -gt 0) {
+  Write-Host ("错误: 无法识别的参数 '" + ($Rest -join ' ') + "'。用 -Help（或 --help）看用法。") -ForegroundColor Red
+  exit 1
 }
 
 $ErrorActionPreference = 'Stop'
