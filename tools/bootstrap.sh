@@ -57,6 +57,46 @@ DECOMPRESS="ask"      # ask | yes | no：是否额外产出一份未压缩 initr
 DO_EDK2=1
 INITRD_FILE="initramfs.cpio.gz"   # 最终推荐用哪一份引导（解压成功则换成 .cpio）
 
+# ---------------------------------------------------------------- 语言 / i18n
+#
+# 文案表是**单一来源**：tools/i18n/messages.tsv（key<TAB>zh<TAB>en）。
+# 选 TSV 是因为三种语言都能零依赖读它 —— bash 没有内置 JSON 解析器，引 jq 就多一个依赖；
+# 而成对维护两份内联文案，迟早会漂移。
+MSG_FILE="$REPO_ROOT/tools/i18n/messages.tsv"
+declare -A MSG
+
+# 跟随系统区域：明确是英文区域就说英文，其余（含认不出来）一律中文 ——
+# 本项目的文档与注释以中文为主，认不出来时中文是更合理的默认。
+detect_lang() {
+  case "${LC_ALL:-}${LC_MESSAGES:-}${LANG:-}" in
+    *[Ee][Nn]*) echo en ;;
+    *)          echo zh ;;
+  esac
+}
+
+load_messages() {  # load_messages <zh|en>
+  local lang="$1" key zh en
+  MSG=()
+  while IFS=$'	' read -r key zh en || [ -n "$key" ]; do
+    case "$key" in ''|\#*) continue ;; esac
+    [ -n "$en" ] || en="$zh"
+    if [ "$lang" = "en" ]; then MSG["$key"]="$en"; else MSG["$key"]="$zh"; fi
+  done < "$MSG_FILE"
+}
+
+# msg <key> [参数...]：取当前语言的文案，替换 {0}{1}…，并把字面 \n 变成真换行。
+msg() {
+  local key="$1"; shift
+  local s="${MSG[$key]:-$key}" i=0
+  s="${s//\\n/$'\n'}"
+  for a in "$@"; do s="${s//\{$i\}/$a}"; i=$((i + 1)); done
+  printf '%s' "$s"
+}
+
+# 先按环境/区域预加载：参数解析阶段就可能报错（未知参数），那时也得有文案。
+LANG_SEL="${TSIE_LANG:-$(detect_lang)}"
+load_messages "$LANG_SEL"
+
 log()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m警告:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -70,13 +110,34 @@ while [ $# -gt 0 ]; do
     --no-decompress) DECOMPRESS="no" ;;
     --alpine)    ALPINE_BRANCH="$2"; shift ;;
     --dir)       OUT_DIR="$2"; shift ;;
-    -h|--help)   sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
-    *) die "未知参数: $1（--help 看用法）" ;;
+    --lang)      # 立即校验并重载：这样「--lang en 后面跟个错参数」报的也是英文
+                 case "$2" in
+                   zh|en) LANG_SEL="$2"; load_messages "$LANG_SEL" ;;
+                   *) die "unknown --lang: $2 (expected zh or en)" ;;
+                 esac
+                 shift ;;
+    -h|--help)   DO_HELP=1 ;;   # 真打印在语言确定之后（否则 --lang en --help 会打成中文）
+    *) die "$(msg common.unknownArg "$1")" ;;
   esac
   shift
 done
 
-need() { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1"; }
+# 语言来源优先级：--lang > TSIE_LANG > 系统区域
+LANG_SEL="${LANG_SEL:-${TSIE_LANG:-}}"
+case "$LANG_SEL" in
+  en|zh) ;;
+  "") LANG_SEL="$(detect_lang)" ;;
+  *) die "unknown --lang: $LANG_SEL (expected zh or en)" ;;
+esac
+load_messages "$LANG_SEL"
+
+# 用法文本也是双语的，各一份文件（长文本塞进 TSV 的单元格里可读性太差）
+if [ "${DO_HELP:-0}" = 1 ]; then
+  cat "$REPO_ROOT/tools/i18n/usage.$LANG_SEL.txt"
+  exit 0
+fi
+
+need() { command -v "$1" >/dev/null 2>&1 || die "$(msg common.missingCmd "$1")"; }
 # 注意：不检查 xz。OpenSBI 是 .tar.xz，但 `tar -xf` 自己会经 liblzma 解压，
 # 不需要独立的 xz 命令（实测 GNU tar 1.35 直接解开）。ps1 侧同理，从未依赖它。
 for c in curl tar sha256sum node; do need "$c"; done
@@ -84,7 +145,7 @@ for c in curl tar sha256sum node; do need "$c"; done
 # 自己的工具链 —— tsx 本来就在 devDependencies 里，跑模拟器也要用它。
 # 提前检查，别等下载完 70 MB 才报缺工具。
 TSX="$REPO_ROOT/node_modules/.bin/tsx"
-[ -x "$TSX" ] || die "缺少 tsx（$TSX）—— 请先在仓库根执行 npm install"
+[ -x "$TSX" ] || die "$(msg common.missingTsx "$TSX")"
 
 # ------------------------------------------------- EDK II 的 ar 拆包工具选择
 #
@@ -154,7 +215,7 @@ find_local_ar_tool() {  # ①②档：系统里已有的工具
   local bin
   for bin in "${AR_CANDIDATES[@]}"; do
     if probe_ar_tool "$bin" "$1"; then
-      log "  拆包工具: $(basename "$AR_TOOL")（系统已有，无需下载）"
+      log "  $(msg ar.toolSystem "$(basename "$AR_TOOL")")"
       return 0
     fi
   done
@@ -182,27 +243,20 @@ acquire_bsdtar() {  # acquire_bsdtar <deb>；成功则设好 AR_TOOL / BORROWED_
   # MSYS / Cygwin 执行不了 Linux ELF：与其白下 6.6 MB，不如直接说清楚
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-      warn "  系统里没有能解 ar 的工具，而该 release 提供的是 Linux 静态二进制，"
-      warn "  在 MSYS/Cygwin 下无法执行。Windows 10 1803+ 自带"
-      warn "  C:\\Windows\\System32\\tar.exe（bsdtar），请确认它还在。"
+      warn "  $(msg ar.msysNoElf)"
       return 1 ;;
   esac
 
   local asset
-  asset="$(bsdtar_asset)" || { warn "  未知架构 $(uname -m)，不知道该取哪个 bsdtar 资产"; return 1; }
+  asset="$(bsdtar_asset)" || { warn "  $(msg ar.unknownArch "$(uname -m)")"; return 1; }
 
   echo
-  warn "缺少能解 ar 的拆包工具（.deb 是 ar 归档，GNU tar 不支持它）。"
-  warn "打算从第三方仓库下载一份静态编译的 bsdtar："
-  warn "    https://github.com/probonopd/static-tools   →   $asset"
-  warn "该二进制由第三方构建，按原样（AS IS）提供，不附带任何担保，"
-  warn "本项目未审计也不为其背书；若 GitHub 直连不通，会经镜像站（gh-proxy.org）"
-  warn "转发，同样属于第三方。它只用于解 EDK II 的 .deb，用完立即删除。"
-  printf '是否继续下载？[y/N] '
+  warn "$(msg ar.consent "https://github.com/probonopd/static-tools   →   $asset")"
+  printf '%s ' "$(msg ar.consentAsk)"
   local ans=""; read -r ans || true
   case "$ans" in
     y|Y|yes|YES) ;;
-    *) die "已取消：没有拆包工具，EDK II 无法获取（想去掉这一步请用 --no-edk2）" ;;
+    *) die "$(msg ar.cancelled)" ;;
   esac
   MIRROR_OK=yes   # 上面的提示已说明镜像用途，不再重复询问
 
@@ -210,30 +264,30 @@ acquire_bsdtar() {  # acquire_bsdtar <deb>；成功则设好 AR_TOOL / BORROWED_
   local bin="$BORROWED_DIR/bsdtar" url="$BSDTAR_BASE/$asset" ok=0
   # 先探一次直连再决定：直接 hard 试 fetch 的话，不通时要磨完 10 轮重试才轮到镜像
   if probe_url_bytes "$url"; then
-    log "  直连可用，下载 $asset（约 6.6 MB）..."
+    log "  $(msg ar.directOk "$asset")"
     fetch "$bin" "" "$url" && ok=1 || true
   else
-    warn "  GitHub 直连不通"
+    warn "  $(msg ar.directDown)"
   fi
   if [ "$ok" = 0 ] && pick_mirror "$url"; then
-    log "  改走镜像下载 $asset..."
+    log "  $(msg ar.viaMirror "$asset")"
     fetch "$bin" "" "${GITHUB_PROXY}${url}" && ok=1 || true
   fi
-  [ "$ok" = 1 ] || { warn "  bsdtar 下载失败"; return 1; }
+  [ "$ok" = 1 ] || { warn "  $(msg ar.downloadFailed)"; return 1; }
 
   chmod +x "$bin" 2>/dev/null || true
   if ! probe_ar_tool "$bin" "$1"; then
-    warn "  下载到的 bsdtar 无法使用（架构不符？）"
+    warn "  $(msg ar.unusable)"
     return 1
   fi
-  log "  拆包工具: 临时 bsdtar ($bin)"
+  log "  $(msg ar.toolBorrowed "$bin")"
   return 0
 }
 
 cleanup_borrowed() {
   if [ -n "$BORROWED_DIR" ] && [ -d "$BORROWED_DIR" ]; then
     rm -rf "$BORROWED_DIR"
-    log "已删除临时 bsdtar"
+    log "$(msg ar.cleaned)"
   fi
   return 0
 }
@@ -290,16 +344,16 @@ fetch_one() {  # fetch_one <url> <输出文件>
     local prev=""
     [ -f "$part.src" ] && prev="$(cat "$part.src" 2>/dev/null || true)"
     if [ "$prev" != "$url" ]; then
-      warn "    断点来自另一个源，丢弃重下（跨源续传会损坏文件）"
+      warn "    $(msg fetch.crossSource)"
       rm -f "$part" "$part.src"
     fi
   fi
   printf '%s' "$url" > "$part.src"
 
   if [ -z "$total" ]; then
-    warn "    取不到权威大小（该源可能不支持 HEAD），只能整下"
+    warn "    $(msg fetch.noSize)"
   else
-    log "    源声明大小: $total B"
+    log "    $(msg fetch.size "$total")"
   fi
 
   local i have
@@ -307,7 +361,7 @@ fetch_one() {  # fetch_one <url> <输出文件>
     curl -fsSL -C - --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 300 \
          -4 --noproxy '*' -o "$part" "$url" || true
     if [ ! -s "$part" ]; then
-      warn "    第 $i 次尝试失败，$((i*3))s 后重试"
+      warn "    $(msg fetch.retry "$i" "$((i*3))")"
       sleep $((i*3)); continue
     fi
     have=$(stat -c %s "$part")
@@ -316,13 +370,13 @@ fetch_one() {  # fetch_one <url> <输出文件>
     fi
     if [ -n "$total" ] && [ "$have" -gt "$total" ]; then
       # 超出声明大小 = 拼接污染或服务端变了；重下而不是硬用
-      warn "    文件超过声明大小（$have > $total），丢弃重下"
+      warn "    $(msg fetch.oversize "$have" "$total")"
       rm -f "$part"; continue
     fi
     if [ -z "$total" ]; then
       mv -f "$part" "$out"; rm -f "$part.src"; return 0
     fi
-    warn "    已续传至 $have / $total B（$(awk "BEGIN{printf \"%.0f\", $have*100/$total}")%），继续..."
+    warn "    $(msg fetch.progress "$have" "$total" "$(awk "BEGIN{printf \"%.0f\", $have*100/$total}")")"
     sleep $((i*2))
   done
   return 1
@@ -346,28 +400,28 @@ fetch() {  # fetch <输出文件> <校验sha256|""> <url> [备用url...]
   local out="$1" want="$2"; shift 2
   if [ -f "$out" ] && [ -s "$out" ]; then
     if [ -z "$want" ] || [ "$(sha256sum "$out" | cut -d' ' -f1)" = "$want" ]; then
-      log "已存在，跳过下载: $(basename "$out")"; return 0
+      log "$(msg fetch.exists "$(basename "$out")")"; return 0
     fi
-    warn "已存在但校验不符，重新下载: $(basename "$out")"
+    warn "$(msg fetch.existsBad "$(basename "$out")")"
     rm -f "$out"
   fi
-  [ -f "$out.part" ] && log "  发现未完成的续传文件，将从断点继续"
+  [ -f "$out.part" ] && log "  $(msg fetch.hasPartial)"
 
   local url
   for url in "$@"; do
-    log "  源: $(echo "$url" | cut -d/ -f3)"
+    log "  $(msg fetch.source "$(echo "$url" | cut -d/ -f3)")"
     if fetch_one "$url" "$out"; then
       if [ -n "$want" ]; then
         local got; got="$(sha256sum "$out" | cut -d' ' -f1)"
         if [ "$got" != "$want" ]; then
-          warn "  sha256 不符（期望 $want 得到 $got），换下一个源"
+          warn "  $(msg fetch.shaMismatch "$want" "$got")"
           rm -f "$out"; continue
         fi
-        log "  校验通过: $(basename "$out")"
+        log "  $(msg fetch.verified "$(basename "$out")")"
       fi
       return 0
     fi
-    warn "  该源失败: $(echo "$url" | cut -d/ -f3)"
+    warn "  $(msg fetch.sourceFailed "$(echo "$url" | cut -d/ -f3)")"
   done
   rm -f "$out.part"
   return 1
@@ -401,13 +455,13 @@ pick_mirror() {  # pick_mirror [用于测速的 URL，默认 OpenSBI 资产]
   local u="${1:-$OPENSBI_PROBE_URL}" best="" best_speed=0 name speed
   if [ "$MIRROR_MODE" = "ask" ] && [ -z "$MIRROR_OK" ]; then
     echo
-    warn "GitHub release 资产直连不通。"
-    warn "镜像站（gh-proxy.org）会转发 GitHub 内容，理论上可被中间方替换 —— 属于信任边界变更。"
-    printf '是否允许使用镜像站？[y/N] '
+    warn "$(msg mirror.directDown)"
+    warn "$(msg mirror.trustNote)"
+    printf '%s ' "$(msg mirror.ask)"
     local ans=""; read -r ans || true
     case "$ans" in y|Y|yes|YES) MIRROR_OK=yes ;; *) return 1 ;; esac
   fi
-  log "探测镜像站速度（各取前 1 MiB）..."
+  log "$(msg mirror.probing)"
   for name in v4 v6; do
     speed=$(curl -fsSL -o /dev/null --max-time 30 -4 --noproxy '*' -r 0-1048575 \
       -w '%{speed_download}' "https://${name}.gh-proxy.org/${u}" 2>/dev/null || echo 0)
@@ -417,30 +471,30 @@ pick_mirror() {  # pick_mirror [用于测速的 URL，默认 OpenSBI 资产]
   done
   [ -n "$best" ] || return 1
   GITHUB_PROXY="https://${best}.gh-proxy.org/"
-  log "选用镜像: ${best}.gh-proxy.org（${best_speed} B/s）"
+  log "$(msg mirror.chosen "${best}.gh-proxy.org" "$best_speed")"
   return 0
 }
 
 # ---------------------------------------------------------------- ① OpenSBI 固件
 
 bootstrap_opensbi() {
-  log "① OpenSBI 固件"
+  log "$(msg stage.opensbi)"
   local rel="riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz"
   local url="https://github.com/${rel}"
   local tarball="$FW_DIR/opensbi-1.9-rv-bin.tar.xz"
 
   if [ -f "$FW_DIR/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin" ]; then
-    log "  已存在，跳过: firmware/opensbi-1.9-rv-bin/.../fw_jump.bin"
+    log "  $(msg opensbi.exists "firmware/opensbi-1.9-rv-bin/.../fw_jump.bin")"
     return 0
   fi
 
   # 直连优先；失败再走镜像（镜像需授权）。授权被拒则回退本地文件。
   local ok=0
   if probe_github_release; then
-    log "  GitHub 直连可用"
+    log "  $(msg opensbi.directOk)"
     fetch "$tarball" "" "$url" && ok=1 || true
   else
-    warn "  GitHub release 资产直连不可用"
+    warn "  $(msg opensbi.directDown)"
   fi
   if [ "$ok" = 0 ]; then
     if pick_mirror; then
@@ -448,26 +502,26 @@ bootstrap_opensbi() {
     fi
   fi
   if [ "$ok" = 0 ]; then
-    warn "  无法下载 OpenSBI。"
-    warn "  请手动放置：curl -L -o $tarball $url"
-    warn "  然后解压到 $FW_DIR/ 并重跑本脚本。"
-    die "OpenSBI 获取失败（--no-mirror 时这是预期行为）"
+    warn "  $(msg opensbi.cantDownload)"
+    warn "  $(msg opensbi.manualHint "$tarball" "$url")"
+    warn "  $(msg opensbi.manualHint2 "$FW_DIR/")"
+    die "$(msg opensbi.failed)"
   fi
 
-  log "  解压..."
+  log "  $(msg opensbi.extracting)"
   verify_archive "$tarball" \
-    || die "OpenSBI tar.xz 下载不完整（tar 无法列出内容）—— 删掉后重跑，或手动放置"
+    || die "$(msg opensbi.badArchive)"
   tar -xf "$tarball" -C "$FW_DIR"
   local fw="$FW_DIR/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin"
-  [ -f "$fw" ] || die "解压后未找到 fw_jump.bin"
+  [ -f "$fw" ] || die "$(msg opensbi.noFwJump)"
   log "  $fw"
 }
 
 # --------------------------------------------------------------- ② EDK II 固件
 
 bootstrap_edk2() {
-  log "② EDK II (UEFI) 固件"
-  [ "$DO_EDK2" = 1 ] || { log "  已按 --no-edk2 跳过"; return 0; }
+  log "$(msg stage.edk2)"
+  [ "$DO_EDK2" = 1 ] || { log "  $(msg edk2.skipped)"; return 0; }
 
   # Debian 的 qemu-efi-riscv64 包里就是 32 MiB 的 CODE + VARS，尺寸天然合规。
   # 版本号动态取（池目录里可能有多个版本，取最新的）。
@@ -475,44 +529,44 @@ bootstrap_edk2() {
   local deb_name
   deb_name=$(fetch_text "$pool" 2>/dev/null \
     | grep -oE 'qemu-efi-riscv64_[^"]*_all\.deb' | sort -u | tail -1) || true
-  [ -n "$deb_name" ] || { warn "  无法列出 Debian edk2 池目录，跳过 EDK II"; return 0; }
-  log "  最新包: $deb_name"
+  [ -n "$deb_name" ] || { warn "  $(msg edk2.noListing)"; return 0; }
+  log "  $(msg edk2.latest "$deb_name")"
 
   local deb="$OUT_DIR/$deb_name"
-  fetch "$deb" "" "$pool$deb_name" || { warn "  下载失败，跳过 EDK II"; return 0; }
+  fetch "$deb" "" "$pool$deb_name" || { warn "  $(msg edk2.downloadFailed)"; return 0; }
 
   # 拆 ar 容器：先看系统里已有的（①bsdtar ②7-Zip），都没有才谈下载（③）。
   if ! find_local_ar_tool "$deb"; then
-    acquire_bsdtar "$deb" || { warn "  没有可用的拆包工具，跳过 EDK II"; return 0; }
+    acquire_bsdtar "$deb" || { warn "  $(msg edk2.noTool)"; return 0; }
   fi
 
   local x="$OUT_DIR/.deb-x"
   rm -rf "$x"; mkdir -p "$x"
   # bsdtar 与 7z 的调用语法不同：bsdtar 是 -xf ... -C，7z 是 x -y -o<dir>
   if [ "$AR_TOOL_IS_7ZIP" = 1 ]; then
-    log "  拆包（7-Zip）..."
-    "$AR_TOOL" x -y -o"$x" "$deb" >/dev/null 2>&1 || die "7-Zip 解 .deb 失败"
+    log "  $(msg edk2.unpack7z)"
+    "$AR_TOOL" x -y -o"$x" "$deb" >/dev/null 2>&1 || die "$(msg edk2.unpackFailed7z)"
   else
-    log "  拆包（bsdtar）..."
-    "$AR_TOOL" -xf "$deb" -C "$x" 2>/dev/null || die "bsdtar 解 .deb 失败"
+    log "  $(msg edk2.unpackBsdtar)"
+    "$AR_TOOL" -xf "$deb" -C "$x" 2>/dev/null || die "$(msg edk2.unpackFailedBsdtar)"
   fi
 
   # 内层可能是 data.tar / data.tar.xz（Debian 上游用 xz）
   local data; data="$(ls "$x"/data.tar* 2>/dev/null | head -1)"
-  [ -n "$data" ] || die "未在 .deb 里找到 data.tar*"
+  [ -n "$data" ] || die "$(msg edk2.noDataTar)"
   case "$data" in
     *.zst)
       # GNU tar 未必编了 zstd，这一步交给 bsdtar（libarchive 带 zstd）
-      [ "$AR_TOOL_IS_7ZIP" = 0 ] || die "内层是 zstd，7-Zip 主路径处理不了，请装 bsdtar"
-      log "  解内层 $(basename "$data")（bsdtar）..."
+      [ "$AR_TOOL_IS_7ZIP" = 0 ] || die "$(msg edk2.zstdNeedsBsdtar)"
+      log "  $(msg edk2.innerBsdtar "$(basename "$data")")"
       "$AR_TOOL" -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null \
-        || die "解内层 $(basename "$data") 失败"
+        || die "$(msg edk2.innerFailed "$(basename "$data")")"
       ;;
     *)
       # .tar / .tar.gz / .tar.xz：GNU tar 自己能解（经 liblzma / zlib），
       # 不需要 ar 工具 —— 它只是读不了外层的 ar 而已。
-      log "  解内层 $(basename "$data")..."
-      verify_archive "$data" || die ".deb 内的 data.tar 不完整，重新下载 $deb_name"
+      log "  $(msg edk2.inner "$(basename "$data")")"
+      verify_archive "$data" || die "$(msg edk2.dataIncomplete "$deb_name")"
       tar -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null || true
       ;;
   esac
@@ -520,12 +574,12 @@ bootstrap_edk2() {
   local src="$x/usr/share/qemu-efi-riscv64"
   local f
   for f in RISCV_VIRT_CODE.fd RISCV_VIRT_VARS.fd; do
-    [ -f "$src/$f" ] || die "未找到 $f"
+    [ -f "$src/$f" ] || die "$(msg edk2.notFound "$f")"
     cp -f "$src/$f" "$OUT_DIR/$f"
     local sz; sz=$(stat -c %s "$OUT_DIR/$f")
     log "  $f  ($sz B = $(awk "BEGIN{printf \"%.2f\", $sz/1048576}") MiB)"
     # EDK II 强制要求两块各 32 MiB，尺寸不对就别让用户拿到一个会在固件里报错的产物
-    [ "$sz" -eq 33554432 ] || warn "  尺寸不是 32 MiB（33554432），EDK II 可能拒绝该固件"
+    [ "$sz" -eq 33554432 ] || warn "  $(msg edk2.badSize)"
   done
   rm -rf "$x"
 }
@@ -533,7 +587,7 @@ bootstrap_edk2() {
 # ------------------------------------------------------------ ③ Alpine 内核 + initramfs
 
 bootstrap_alpine() {
-  log "③ Alpine 内核 + initramfs"
+  log "$(msg stage.alpine)"
   local main="https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main/$ARCH/"
   local rel="https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/releases/$ARCH/"
 
@@ -541,69 +595,69 @@ bootstrap_alpine() {
   local apk
   apk=$(fetch_text "$main" 2>/dev/null \
     | grep -oE 'linux-lts-[0-9][^"]*\.apk' | sort -u | tail -1) || true
-  [ -n "$apk" ] || die "无法列出 Alpine 内核包（网络间歇性，可重跑）"
-  log "  内核包: $apk"
+  [ -n "$apk" ] || die "$(msg alpine.noKernelList)"
+  log "  $(msg alpine.kernel "$apk")"
 
   local apk_path="$OUT_DIR/$apk"
   local mirror_main="$ALPINE_MIRROR/$ALPINE_BRANCH/main/$ARCH/$apk"
   fetch "$apk_path" "" "$main$apk" "$mirror_main" \
-    || die "内核下载失败（可重跑，会从断点续传）"
+    || die "$(msg alpine.kernelFailed)"
 
-  log "  解出内核 Image（apk 内是 gzip 压缩的 vmlinuz，需再 gunzip）..."
+  log "  $(msg alpine.extractImage)"
   local t="$OUT_DIR/.apk-x"; rm -rf "$t"; mkdir -p "$t"
   verify_archive "$apk_path" -z \
-    || die "apk 下载不完整（完整解压校验失败）—— 删掉 $apk_path 与同名 .part 后重跑"
+    || die "$(msg alpine.badApk "$apk_path")"
 
   # 只解 `boot/`，不要整包解压。apk 里有个指向 `/boot/vmlinuz-lts` 的相对符号链接
   # （lib/modules/*/vmlinuz），Windows 上建不了，会让 tar 以退出码 2 结束并带上
   # "Cannot create symlink" —— 整个归档其实完好，只是那一条无关链接失败。
   # 只取需要的成员既避开这个坑，也少解 20 MB 的模块树。
   tar -xzf "$apk_path" -C "$t" boot/ 2>/dev/null \
-    || die "apk 解压 boot/ 失败"
+    || die "$(msg alpine.apkUnpackFailed)"
   local vmz="$t/boot/vmlinuz-lts"
   [ -f "$vmz" ] || vmz="$(find "$t" -name 'vmlinuz*' | head -1)"
-  [ -n "$vmz" ] || die "apk 内未找到 vmlinuz"
+  [ -n "$vmz" ] || die "$(msg alpine.noVmlinuz)"
   gzip -dc "$vmz" > "$OUT_DIR/Image"
   rm -rf "$t"
   local isz; isz=$(stat -c %s "$OUT_DIR/Image")
-  [ "$isz" -gt 1000000 ] || die "解出的 Image 太小（$isz B），可能不是内核"
+  [ "$isz" -gt 1000000 ] || die "$(msg alpine.imageTooSmall "$isz")"
   log "  Image  ($isz B = $(awk "BEGIN{printf \"%.1f\", $isz/1048576}") MiB)"
 
   # --- initramfs：从 latest-releases.yaml 取 minirootfs（含官方 sha256 可校验）
-  log "  读取 latest-releases.yaml 取 minirootfs 版本与校验值..."
+  log "  $(msg alpine.readingYaml)"
   local yaml="$OUT_DIR/latest-releases.yaml"
   local mirror_yaml="$ALPINE_MIRROR/$ALPINE_BRANCH/releases/$ARCH/latest-releases.yaml"
   fetch "$yaml" "" "${rel}latest-releases.yaml" "$mirror_yaml" \
-    || die "无法获取 latest-releases.yaml"
+    || die "$(msg alpine.noYaml)"
 
   local rootfs sha
   rootfs=$(grep -oE 'alpine-minirootfs-[0-9][^"]*riscv64\.tar\.gz' "$yaml" | sort -u | tail -1)
-  [ -n "$rootfs" ] || die "latest-releases.yaml 里没有 minirootfs 条目"
+  [ -n "$rootfs" ] || die "$(msg alpine.noRootfsEntry)"
   # 取该条目后面的 sha256（同一块里 file: 与 sha256: 相邻）
   sha=$(awk -v f="$rootfs" '
     $0 ~ "file: *"f {found=1}
     found && /sha256:/ {gsub(/.*sha256: */,""); print; exit}
   ' "$yaml")
-  [ -n "$sha" ] || warn "  未解析到 sha256，将跳过校验"
+  [ -n "$sha" ] || warn "  $(msg alpine.noSha)"
   log "  minirootfs: $rootfs"
 
   local rfs="$OUT_DIR/$rootfs"
   local mirror_rfs="$ALPINE_MIRROR/$ALPINE_BRANCH/releases/$ARCH/$rootfs"
   fetch "$rfs" "$sha" "${rel}${rootfs}" "$mirror_rfs" \
-    || die "minirootfs 下载/校验失败"
+    || die "$(msg alpine.rootfsFailed)"
 
-  log "  打成 cpio-newc initramfs（tools/initramfs.ts）..."
+  log "  $(msg alpine.packing)"
   verify_archive "$rfs" -z \
-    || die "minirootfs 下载不完整（完整解压校验失败）—— 删掉重跑"
+    || die "$(msg alpine.rootfsIncomplete)"
 
   # 这一步不经过磁盘：initramfs.ts 直接从 tar 头里读 mode 与 linkname，
   # 在内存里组装 cpio。原因见该文件头部的长注释 —— 一旦落盘，Windows 上符号链接
   # 建不出来（要提权）、执行位也存不住（内核 execve 报 EACCES，起不到 init）。
   # 顺带好处：不再解出一棵 7 MB 的树再走一遍磁盘，也少一个 .modes.json 中间文件。
   "$TSX" "$REPO_ROOT/tools/initramfs.ts" alpine "$rfs" "$OUT_DIR/initramfs.cpio.gz" \
-    || die "initramfs 打包失败（tools/initramfs.ts alpine）"
+    || die "$(msg alpine.packFailed)"
   local csz; csz=$(stat -c %s "$OUT_DIR/initramfs.cpio.gz")
-  [ "$csz" -gt 500000 ] || die "initramfs 太小（$csz B），大概率缺符号链接"
+  [ "$csz" -gt 500000 ] || die "$(msg alpine.tooSmall "$csz")"
   log "  initramfs.cpio.gz  ($csz B)"
 
   # 再出一份未压缩的。内核在解 initramfs 前会先认压缩格式，认不出就按裸 cpio 直接用 ——
@@ -618,8 +672,8 @@ bootstrap_alpine() {
     no)  want_cpio=0 ;;
     *)
       echo
-      log "  解压 initramfs 可省 38.9% 的引导指令（实测 12.7 亿 → 7.76 亿条，两条路都到 shell）"
-      printf '强烈建议解压缩initramfs，节省CPU指令从而减少启动时间 (y/N) '
+      log "  $(msg alpine.decompressNote)"
+      printf '%s ' "$(msg alpine.decompressAsk)"
       local ans=""; read -r ans || true
       case "$ans" in y|Y|yes|YES) want_cpio=1 ;; esac
       ;;
@@ -628,21 +682,21 @@ bootstrap_alpine() {
   if [ "$want_cpio" = 1 ]; then
     "$TSX" "$REPO_ROOT/tools/initramfs.ts" decompress \
       "$OUT_DIR/initramfs.cpio.gz" "$OUT_DIR/initramfs.cpio" \
-      || die "initramfs 解压失败（tools/initramfs.ts decompress）"
+      || die "$(msg alpine.decompressFailed)"
     local usz; usz=$(stat -c %s "$OUT_DIR/initramfs.cpio")
     log "  initramfs.cpio     ($usz B，未压缩；引导更快)"
     INITRD_FILE="initramfs.cpio"
   else
-    log "  跳过了，只留 initramfs.cpio.gz（随时可补做：tools/initramfs.ts decompress）"
+    log "  $(msg alpine.decompressSkipped)"
   fi
 }
 
 # ----------------------------------------------------------------------- 主流程
 
 main() {
-  log "TSIE 引导素材 bootstrap"
-  log "仓库: $REPO_ROOT"
-  log "输出: $OUT_DIR"
+  log "$(msg common.banner)"
+  log "$(msg common.repo "$REPO_ROOT")"
+  log "$(msg common.outdir "$OUT_DIR")"
   echo
   bootstrap_opensbi
   echo
@@ -650,42 +704,35 @@ main() {
   echo
   bootstrap_alpine
   echo
-  log "全部完成。产物："
+  log "$(msg common.done)"
   ls -la "$OUT_DIR" | awk 'NR>3 && $5>0 {printf "  %12d B  %s\n", $5, $9}'
 
   local fw="$FW_DIR/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin"
   local rel_out="${OUT_DIR#$REPO_ROOT/}"
+  local fw_rel="firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin"
 
-  # 解释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
+  # 注释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
   local initrd_note
   if [ "$INITRD_FILE" = "initramfs.cpio" ]; then
-    initrd_note="  # 用的是未压缩的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，
-  #    省掉在模拟器里跑 inflate。同机同核实测（instret，两条路都到 ~ #）：
-  #      initramfs.cpio.gz   1,270,638,213 条   到 /init 用 t=120.26s
-  #      initramfs.cpio        776,011,912 条   到 /init 用 t=64.67s
-  #    ⇒ 省 4.95 亿条（38.9%）。差别不是\"能不能起来\"，是快多少。
-  #    （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）"
+    initrd_note="$(msg tail.uncompressed)"
   else
-    initrd_note="  # 这次用的是压缩态 initramfs.cpio.gz。想快 38.9% 就补一步（实测省 4.95 亿条指令）：
-  #      npx tsx tools/initramfs.ts decompress $rel_out/initramfs.cpio.gz $rel_out/initramfs.cpio
-  #    然后把下面 --initrd 换成 $rel_out/initramfs.cpio。"
+    initrd_note="$(msg tail.compressedHint "$rel_out")"
   fi
 
   cat <<EOF
 
-引导命令（在仓库根执行）：
+$(msg tail.title)
 
-  # Alpine + OpenSBI（到 BusyBox shell）
-  # 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内
-  #    就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台
-  #    注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。
+  # Alpine + OpenSBI
+$(msg tail.earlycon)
 $initrd_note
+
   npx tsx src/cli.ts \\
-    --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin \\
+    --bios $fw_rel \\
     --kernel $rel_out/Image --initrd $rel_out/$INITRD_FILE \\
     --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 1500000000 --stats
 
-  # EDK II (UEFI)：需要成对提供 CODE / VARS
+  # $(msg tail.edk2)
   npx tsx src/cli.ts \\
     --flash-code $rel_out/RISCV_VIRT_CODE.fd \\
     --flash-vars $rel_out/RISCV_VIRT_VARS.fd

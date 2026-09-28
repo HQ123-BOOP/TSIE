@@ -1,0 +1,145 @@
+# TSIE 自举脚本的用户可见文案（单一来源）。
+# User-facing strings for the TSIE bootstrap scripts (single source of truth).
+#
+# 格式 / Format:  key <TAB> 中文 <TAB> English
+#   * `#` 开头的行是注释，三个解析器都会跳过。
+#   * `{0}` `{1}` 是占位符，按调用处给的顺序替换。
+#   * 值里的 `\n` 表示换行（bash 用 ${s//\\n/$'\n'}，PowerShell 用 -replace，都是字面两字符）。
+#   * 只放"会打印给用户看"的文案。注释、代码标识符不进这里。
+#
+# 读取方 / Readers:
+#   tools/bootstrap.sh    (IFS=$'\t' read)
+#   tools/bootstrap.ps1   (按 TAB 手工切分，不依赖 Import-Csv)
+# 依赖为零：三种语言都能直接读 TSV，不需要 jq 之类的解析器。
+#
+# ⚠️ 改这里的键名要同步改两个脚本；ci 里有一条检查会核对两边用到的键都存在。
+
+# ---------------------------------------------------------------- 框架
+warn.prefix	警告:	WARNING:
+error.prefix	错误:	ERROR:
+common.missingCmd	缺少命令 {0}	Missing command: {0}
+common.unknownArg	未知参数: {0}（--help 看用法）	Unknown argument: {0} (see --help)
+common.missingTsx	缺少 tsx（{0}）—— 请先在仓库根执行 npm install	Missing tsx ({0}) — run npm install in the repository root first
+common.banner	TSIE 引导素材 bootstrap	TSIE boot artifacts bootstrap
+common.bannerPs	TSIE 引导素材 bootstrap (PowerShell)	TSIE boot artifacts bootstrap (PowerShell)
+common.repo	仓库: {0}	Repository: {0}
+common.outdir	输出: {0}	Output: {0}
+common.done	全部完成。产物：	All done. Artifacts:
+
+# ---------------------------------------------------------------- 镜像站
+mirror.directDown	GitHub release 资产直连不通。	Cannot reach GitHub release assets directly.
+mirror.trustNote	镜像站（gh-proxy.org）会转发 GitHub 内容，理论上可被中间方替换 —— 属于信任边界变更。	The mirror (gh-proxy.org) relays GitHub content and could in principle be replaced by a middleman — that changes the trust boundary.
+mirror.ask	是否允许使用镜像站？[y/N]	Allow using the mirror? [y/N]
+mirror.probing	探测镜像站速度（各取前 1 MiB）...	Probing mirror speed (first 1 MiB of each)...
+mirror.chosen	选用镜像: {0}（{1} B/s）	Using mirror: {0} ({1} B/s)
+
+# ---------------------------------------------------------------- 下载
+fetch.size	源声明大小: {0} B	Source declares {0} B
+fetch.noSize	取不到权威大小（该源可能不支持 HEAD），只能整下	No authoritative size (the source may not support HEAD); downloading whole
+fetch.crossSource	断点来自另一个源，丢弃重下（跨源续传会损坏文件）	The partial file came from another source; restarting (resuming across sources corrupts data)
+fetch.retry	第 {0} 次尝试失败，{1}s 后重试	Attempt {0} failed; retrying in {1}s
+fetch.oversize	文件超过声明大小（{0} > {1}），丢弃重下	File exceeds the declared size ({0} > {1}); restarting
+fetch.progress	已续传至 {0} / {1} B（{2}%），继续...	Resumed to {0} / {1} B ({2}%); continuing...
+fetch.exists	已存在，跳过下载: {0}	Already present; skipping download: {0}
+fetch.existsVerified	已存在且校验通过: {0}	Already present and verified: {0}
+fetch.existsBad	已存在但校验不符，重新下载: {0}	Already present but the checksum differs; re-downloading: {0}
+fetch.hasPartial	发现未完成的续传文件，将从断点继续	Found an unfinished partial file; resuming from it
+fetch.source	源: {0}	Source: {0}
+fetch.shaMismatch	sha256 不符（期望 {0} 得到 {1}），换下一个源	sha256 mismatch (expected {0}, got {1}); trying the next source
+fetch.shaMismatchDie	sha256 不符: {0}（期望 {1} 得到 {2}）	sha256 mismatch: {0} (expected {1}, got {2})
+fetch.sourceFailed	该源失败: {0}	Source failed: {0}
+fetch.verified	校验通过: {0}	Verified: {0}
+fetch.listFailed	无法列出 {0}	Cannot list {0}
+
+# ---------------------------------------------------------------- ar 拆包工具
+ar.toolSystem	拆包工具: {0}（系统已有，无需下载）	Unpacker: {0} (already installed; nothing to download)
+ar.toolBorrowed	拆包工具: 临时 bsdtar ({0})	Unpacker: temporary bsdtar ({0})
+ar.cleaned	已删除临时 bsdtar	Removed the temporary bsdtar
+ar.unknownArch	未知架构 {0}，不知道该取哪个 bsdtar 资产	Unknown architecture {0}; cannot choose a bsdtar asset
+ar.msysNoElf	系统里没有能解 ar 的工具，而该 release 提供的是 Linux 静态二进制，\n在 MSYS/Cygwin 下无法执行。Windows 10 1803+ 自带\nC:\\Windows\\System32\\tar.exe（bsdtar），请确认它还在。	No tool here can read ar, and that release ships Linux static binaries,\nwhich MSYS/Cygwin cannot execute. Windows 10 1803+ includes\nC:\\Windows\\System32\\tar.exe (bsdtar) — please check it is still there.
+ar.consent	缺少能解 ar 的拆包工具（.deb 是 ar 归档，GNU tar 不支持它）。\n打算从第三方仓库下载一份静态编译的 bsdtar：\n    {0}\n该二进制由第三方构建，按原样（AS IS）提供，不附带任何担保，\n本项目未审计也不为其背书；若 GitHub 直连不通，会经镜像站（gh-proxy.org）\n转发，同样属于第三方。它只用于解 EDK II 的 .deb，用完立即删除。	Nothing here can read ar (.deb files are ar archives, and GNU tar cannot read them).\nThis script would download a statically linked bsdtar from a third-party repository:\n    {0}\nThat binary is built by a third party and provided AS IS, without any warranty.\nThis project has not audited it and does not endorse it. If GitHub is unreachable,\nthe download goes through the mirror (gh-proxy.org), which is third-party too.\nIt is used only to unpack the EDK II .deb and is deleted immediately afterwards.
+ar.consentAsk	是否继续下载？[y/N]	Continue the download? [y/N]
+ar.cancelled	已取消：没有拆包工具，EDK II 无法获取（去掉这一步请用 --no-edk2 / -NoEdk2）	Cancelled: without an unpacker, EDK II cannot be fetched (use --no-edk2 / -NoEdk2 to skip that step)
+ar.directOk	直连可用，下载 {0}（约 6.6 MB）...	Direct connection works; downloading {0} (~6.6 MB)...
+ar.directDown	GitHub 直连不通	GitHub is unreachable directly
+ar.viaMirror	改走镜像下载 {0}...	Downloading {0} through the mirror...
+ar.downloadFailed	bsdtar 下载失败	bsdtar download failed
+ar.unusable	下载到的 bsdtar 无法使用（架构不符？）	The downloaded bsdtar does not run (wrong architecture?)
+
+# ---------------------------------------------------------------- ① OpenSBI
+stage.opensbi	① OpenSBI 固件	① OpenSBI firmware
+opensbi.exists	已存在，跳过: {0}	Already present; skipping: {0}
+opensbi.directOk	GitHub 直连可用	GitHub is reachable directly
+opensbi.directDown	GitHub release 资产直连不可用	GitHub release assets are unreachable directly
+opensbi.cantDownload	无法下载 OpenSBI。	Cannot download OpenSBI.
+opensbi.manualHint	请手动放置：curl -L -o {0} {1}	Place it manually: curl -L -o {0} {1}
+opensbi.manualHint2	然后解压到 {0} 并重跑本脚本。	Then extract it into {0} and re-run this script.
+opensbi.failed	OpenSBI 获取失败（--no-mirror 时这是预期行为）	Failed to obtain OpenSBI (expected when the mirror is disabled)
+opensbi.extracting	解压...	Extracting...
+opensbi.badArchive	OpenSBI tar.xz 下载不完整（tar 无法列出内容）—— 删掉后重跑，或手动放置	The OpenSBI tar.xz is incomplete (tar cannot list it) — delete it and re-run, or place it manually
+opensbi.noFwJump	解压后未找到 fw_jump.bin	fw_jump.bin not found after extraction
+
+# ---------------------------------------------------------------- ② EDK II
+stage.edk2	② EDK II (UEFI) 固件	② EDK II (UEFI) firmware
+edk2.skipped	已按 --no-edk2 跳过	Skipped (--no-edk2)
+edk2.skippedPs	已跳过（-NoEdk2）	Skipped (-NoEdk2)
+edk2.noListing	无法列出 Debian edk2 池目录，跳过 EDK II	Cannot list the Debian edk2 pool directory; skipping EDK II
+edk2.latest	最新包: {0}	Latest package: {0}
+edk2.downloadFailed	下载失败，跳过 EDK II	Download failed; skipping EDK II
+edk2.noTool	没有可用的拆包工具，跳过 EDK II	No usable unpacker; skipping EDK II
+edk2.noTarNo7z	找不到任何 tar/7-Zip，跳过 EDK II	Found neither tar nor 7-Zip; skipping EDK II
+edk2.gnuTarNote	.deb 是 ar 归档；Git 自带的 GNU tar 不支持它	A .deb is an ar archive; the GNU tar bundled with Git cannot read it
+edk2.unpack7z	拆包（7-Zip）...	Unpacking (7-Zip)...
+edk2.unpackBsdtar	拆包（bsdtar）...	Unpacking (bsdtar)...
+edk2.unpackFailed7z	7-Zip 解 .deb 失败	7-Zip failed to unpack the .deb
+edk2.unpackFailedBsdtar	bsdtar 解 .deb 失败	bsdtar failed to unpack the .deb
+edk2.noDataTar	未在 .deb 里找到 data.tar*	No data.tar* inside the .deb
+edk2.zstdNeedsBsdtar	内层是 zstd，7-Zip 主路径处理不了，请装 bsdtar	The inner archive is zstd, which the 7-Zip path cannot handle; install bsdtar
+edk2.innerBsdtar	解内层 {0}（bsdtar）...	Unpacking the inner {0} (bsdtar)...
+edk2.inner	解内层 {0}...	Unpacking the inner {0}...
+edk2.innerFailed	解内层 {0} 失败	Failed to unpack the inner {0}
+edk2.dataIncomplete	.deb 内的 data.tar 不完整，重新下载 {0}	The data.tar inside the .deb is incomplete; re-download {0}
+edk2.notFound	未找到 {0}	Not found: {0}
+edk2.badSize	尺寸不是 32 MiB（33554432），EDK II 可能拒绝该固件	The size is not 32 MiB (33554432); EDK II may reject this firmware
+
+# ---------------------------------------------------------------- ③ Alpine
+stage.alpine	③ Alpine 内核 + initramfs	③ Alpine kernel + initramfs
+alpine.branch	Alpine 分支: {0}	Alpine branch: {0}
+alpine.noKernelList	无法列出 Alpine 内核包（网络间歇性，可重跑）	Cannot list Alpine kernel packages (the network here is intermittent; re-running usually works)
+alpine.kernel	内核包: {0}	Kernel package: {0}
+alpine.kernelFailed	内核下载失败（可重跑，会从断点续传）	Kernel download failed (re-run; it resumes from where it stopped)
+alpine.kernelFailedPs	内核下载失败（可重跑，已完成的会跳过）	Kernel download failed (re-run; finished steps are skipped)
+alpine.extractImage	解出内核 Image（apk 内是 gzip 压缩的 vmlinuz，需再 gunzip）...	Extracting the kernel Image (the apk holds a gzipped vmlinuz)...
+alpine.imageOk	Image  ({0} B = {1} MiB)	Image  ({0} B = {1} MiB)
+alpine.badApk	apk 下载不完整（完整解压校验失败）—— 删掉 {0} 与同名 .part 后重跑	The apk is incomplete (a full extract fails) — delete {0} and its .part, then re-run
+alpine.apkUnpackFailed	apk 解压 boot/ 失败	Failed to unpack boot/ from the apk
+alpine.apkUnpackFailedPs	apk 解压失败	apk extraction failed
+alpine.noVmlinuz	apk 内未找到 vmlinuz	No vmlinuz inside the apk
+alpine.imageTooSmall	解出的 Image 太小（{0} B），可能不是内核	The extracted Image is too small ({0} B); it may not be a kernel
+alpine.readingYaml	读取 latest-releases.yaml 取 minirootfs 版本与校验值...	Reading latest-releases.yaml for the minirootfs version and checksum...
+alpine.noYaml	无法获取 latest-releases.yaml	Cannot fetch latest-releases.yaml
+alpine.noRootfsEntry	latest-releases.yaml 里没有 minirootfs 条目	No minirootfs entry in latest-releases.yaml
+alpine.noSha	未解析到 sha256，将跳过校验	Could not parse a sha256; skipping verification
+alpine.rootfsFailed	minirootfs 下载/校验失败	minirootfs download or verification failed
+alpine.rootfsIncomplete	minirootfs 下载不完整（完整解压校验失败）—— 删掉重跑	The minirootfs is incomplete (a full extract fails) — delete it and re-run
+alpine.packing	打成 cpio-newc initramfs（tools/initramfs.ts）...	Packing a cpio-newc initramfs (tools/initramfs.ts)...
+alpine.packFailed	initramfs 打包失败（tools/initramfs.ts alpine）	initramfs packing failed (tools/initramfs.ts alpine)
+alpine.tooSmall	initramfs 太小（{0} B），大概率缺符号链接	The initramfs is too small ({0} B); symlinks are probably missing
+alpine.decompressNote	解压 initramfs 可省 38.9% 的引导指令（实测 12.7 亿 → 7.76 亿条，两条路都到 shell）	Unpacking the initramfs saves 38.9% of the boot instructions (measured: 1.27e9 → 7.76e8, both reaching the shell)
+alpine.decompressAsk	强烈建议解压缩initramfs，节省CPU指令从而减少启动时间 (y/N)	Unpacking the initramfs is strongly recommended: it saves CPU instructions and shortens the boot (y/N)
+alpine.decompressed	initramfs.cpio     ({0} B，未压缩；引导更快)	initramfs.cpio     ({0} B, uncompressed; faster to boot)
+alpine.decompressSkipped	跳过了，只留 initramfs.cpio.gz（随时可补做：tools/initramfs.ts decompress）	Skipped; only initramfs.cpio.gz remains (do it any time with: tools/initramfs.ts decompress)
+alpine.decompressFailed	initramfs 解压失败（tools/initramfs.ts decompress）	initramfs decompression failed (tools/initramfs.ts decompress)
+
+# ---------------------------------------------------------------- 收尾指引
+tail.title	引导命令（在仓库根执行）：	Boot commands (run them from the repository root):
+tail.earlycon	  # 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内\n  # 就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台\n  # 注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。	  # Always pass earlycon=sbi: the Alpine kernel has the SBI earlycon driver, and with\n  # it you see output within about 150M instructions. Without it the kernel buffers\n  # printk until the 16550 console registers (350-400M instructions) and then dumps\n  # everything at once, which looks exactly like a hang.
+tail.uncompressed	  # 用的是未压缩的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，\n  # 省掉在模拟器里跑 inflate。同机同核实测（两条路都到 shell）：\n  #   initramfs.cpio.gz   1,270,638,213 条指令   到 /init 用 t=120.26s\n  #   initramfs.cpio        776,011,912 条指令   到 /init 用 t=64.67s\n  # 省 4.95 亿条（38.9%）。差别不是能不能起来，是快多少。\n  # （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）	  # This run booted the uncompressed initramfs.cpio: the kernel does not recognise a\ncompression format and uses the archive as a plain cpio, skipping the inflate pass.\nMeasured on one machine with one kernel (both reach a shell):\n  initramfs.cpio.gz   1,270,638,213 instructions, /init at t=120.26s\n  initramfs.cpio        776,011,912 instructions, /init at t=64.67s\nThat is 495M instructions, 38.9%. The difference is speed, not whether it boots.\n(Virtual seconds are not proportional to instructions: the kernel's time comes from a\njittered mtime. Trust instret.)
+tail.compressedHint	  # 这次用的是压缩态 initramfs.cpio.gz。想快 38.9% 就补一步（实测省 4.95 亿条指令）：\n  #     npx tsx tools/initramfs.ts decompress {0}/initramfs.cpio.gz {0}/initramfs.cpio\n  # 然后把下面 --initrd 换成 {0}/initramfs.cpio。	  # This run kept the compressed initramfs.cpio.gz. One extra step makes it 38.9%\n  # faster (measured: 495M instructions saved):\n  #     npx tsx tools/initramfs.ts decompress {0}/initramfs.cpio.gz {0}/initramfs.cpio\n  # then point --initrd below at {0}/initramfs.cpio.
+tail.edk2	EDK II (UEFI)：需要成对提供 CODE / VARS	EDK II (UEFI): CODE and VARS must be given as a pair
+
+# ---------------------------------------------------------------- 仅 PowerShell
+ps.needs7	本工具不支持 PowerShell 5，请参阅 {0} 获取 PowerShell 7+，然后重试。	This tool does not support PowerShell 5. See {0} to install PowerShell 7 or newer, then try again.
+ps.unknownArg	无法识别的参数 '{0}'。用 -Help（或 --help）看用法。	Unrecognized argument '{0}'. Use -Help (or --help) for usage.
+ps.missingCurl	缺少 curl（Windows 10 1803+ 自带；或装 Git for Windows）	Missing curl (included in Windows 10 1803+; or install Git for Windows)
+ps.missingTar	缺少 tar（Windows 10 1803+ 自带 bsdtar）	Missing tar (Windows 10 1803+ bundles bsdtar)

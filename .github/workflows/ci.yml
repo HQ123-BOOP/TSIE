@@ -152,6 +152,27 @@ jobs:
             echo "跳过：本机没有 pwsh"
           fi
 
+      # 文案表是单一来源（tools/i18n/messages.tsv），脚本按 key 查它。
+      # 这里守两件事：表本身格式对（3 列、两种语言都非空），
+      # 以及**脚本里用到的每个 key 都在表里** —— 否则运行时会安静地打印出裸 key。
+      - name: i18n 文案表完整
+        run: |
+          bad=$(awk -F'\t' '!/^#/ && NF>0 { if (NF!=3 || $2=="" || $3=="") print NR": "$0 }' tools/i18n/messages.tsv)
+          if [ -n "$bad" ]; then
+            echo "::error file=tools/i18n/messages.tsv::以下行不是 3 列，或某种语言为空"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          missing=""
+          for k in $(grep -ohE 'msg [a-zA-Z0-9._-]+' tools/bootstrap.sh | awk '{print $2}' | sort -u); do
+            grep -q "^$k	" tools/i18n/messages.tsv || missing="$missing $k"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::脚本用到、但文案表里没有的 key:$missing"
+            exit 1
+          fi
+          echo "OK：文案表格式正确，脚本用到的 key 都在"
+
       # GitHub 网页编辑器（Add file / 铅笔按钮）**绕过本地的 .gitattributes**，
       # 提交进来的 blob 直接带 CRLF。而 git 的归一是逐个文件"自愈"的：谁下次编辑到它，
       # 谁就得到一份整文件重写的 diff（实测：只加一个换行 → 70 insertions / 69 deletions），
