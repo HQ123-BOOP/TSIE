@@ -134,45 +134,52 @@ jobs:
           fi
           echo "OK：没有构建/缓存产物入库"
 
-      # bootstrap.ps1 刻意带 UTF-8 BOM：PowerShell 5.1 按 ANSI/GBK 读无 BOM 的 UTF-8
+      # 每个 .ps1 都刻意带 UTF-8 BOM：PowerShell 5.1 按 ANSI/GBK 读无 BOM 的 UTF-8
       # 脚本，会直接抛语法错误 —— 那样它连"请装 PowerShell 7+"这句提示都读不到。
       # BOM 很容易被编辑器/格式化工具悄悄吃掉（本仓库里就被吃掉过一次），所以钉一条。
-      - name: bootstrap.ps1 必须保留 UTF-8 BOM
+      - name: 所有 .ps1 必须保留 UTF-8 BOM
         run: |
-          if ! head -c 3 tools/bootstrap.ps1 | od -An -tx1 | grep -q 'ef bb bf'; then
-            echo "::error file=tools/bootstrap.ps1::缺少 UTF-8 BOM，PowerShell 5.1 将无法显示版本提示而只报语法错误"
-            exit 1
-          fi
-          echo "OK：bootstrap.ps1 的 UTF-8 BOM 在位"
+          bad=""
+          for f in $(git ls-files '*.ps1'); do
+            if ! head -c 3 "$f" | od -An -tx1 | grep -q 'ef bb bf'; then
+              echo "::error file=$f::缺少 UTF-8 BOM，PowerShell 5.1 将无法显示版本提示而只报语法错误"
+              bad="$bad $f"
+            fi
+          done
+          if [ -n "$bad" ]; then exit 1; fi
+          echo "OK：所有 .ps1 的 UTF-8 BOM 都在位"
 
       # 注释式帮助有个静默陷阱：帮助块里**行首的 `.` 会被当成关键字**（.SYNOPSIS/.NOTES/…），
       # 出现一个不认识的关键字，整块帮助就被丢弃、静默回退成"脚本名 + 参数列表"的自动摘要 ——
       # 解析不报错、脚本照跑，只有 Get-Help 的输出悄悄变短。
       # 踩过一次：删掉 `⚠️ .deb 是 ar 归档…` 里的 emoji 后，该行以 `.deb` 开头，
-      # 整块帮助就这样没了（渲染长度 1339 → 161）。
-      - name: bootstrap.ps1 的注释式帮助仍然有效
+      # 整块帮助就这样没了（渲染长度 1339 → 161）。三条引导路各有一份注释块，都要查。
+      - name: 三个 .ps1 的注释式帮助仍然有效
         run: |
           if command -v pwsh >/dev/null 2>&1; then
-            len=$(pwsh -NoProfile -Command \
-              '(Get-Help ./tools/bootstrap.ps1 | Out-String).Length' | tr -d '\r')
-            echo "帮助渲染长度: $len"
-            if [ "${len:-0}" -lt 800 ]; then
-              echo "::error file=tools/bootstrap.ps1::注释式帮助未被识别（渲染仅 $len 字节）——多半是帮助块里出现了行首点号的非关键字行"
-              exit 1
-            fi
-            echo "OK：帮助块被正确解析"
+            for p in direct uboot edk2; do
+              len=$(pwsh -NoProfile -Command \
+                "(Get-Help ./tools/bootstrap-$p.ps1 | Out-String).Length" | tr -d '\r')
+              echo "bootstrap-$p.ps1 帮助渲染长度: $len"
+              if [ "${len:-0}" -lt 800 ]; then
+                echo "::error file=tools/bootstrap-$p.ps1::注释式帮助未被识别（渲染仅 $len 字节）——多半是帮助块里出现了行首点号的非关键字行"
+                exit 1
+              fi
+            done
+            echo "OK：三份帮助块都被正确解析"
           else
             echo "跳过：本机没有 pwsh"
           fi
 
       # 文案表是单一来源（tools/i18n/messages.tsv），三个读取方都按 key 查它：
-      # tools/bootstrap.sh、tools/bootstrap.ps1、tools/*.ts（经 tools/i18n/read.ts）。
+      # tools/lib/bootstrap-common.sh + tools/bootstrap-*.sh、同名的 .ps1 一组、
+      # 以及 tools/*.ts（经 tools/i18n/read.ts）。
       # 这里守四件事：
       #   1. 表本身格式对（3 列、两种语言都非空）；
       #   2. 每个读取方用到的 key 都在表里（否则运行时会安静地打印出裸 key）；
       #   3. 表里没有**没人用**的 key（死键会烂在表里 —— 值里的 `警告:`/`错误:` 前缀
       #      就曾因为 warn()/die() 写死中文而变成死键，那正是英文运行里漏出中文的原因）；
-      #   4. 四种用法文本都在（-Help / --help 直接 cat 它们）。
+      #   4. 六份用法文本都在（三条引导路 × 中英，-Help / --help 直接 cat 它们）。
       - name: i18n 文案表完整
         run: |
           bad=$(awk -F'\t' '!/^#/ && NF>0 { if (NF!=3 || $2=="" || $3=="") print NR": "$0 }' tools/i18n/messages.tsv)
@@ -182,9 +189,9 @@ jobs:
             exit 1
           fi
 
-          used=$( { grep -ohE 'msg [a-zA-Z0-9._-]+' tools/bootstrap.sh | awk '{print $2}'
+          used=$( { grep -ohE 'msg [a-zA-Z0-9._-]+' tools/lib/*.sh tools/bootstrap-*.sh | awk '{print $2}'
                     # ps1 侧多数 key 是交给 Write-Log/Warn/Die/Ok 的，不能只扫 Msg
-                    grep -ohE "(Msg|Write-Log|Write-Warn|Write-Die|Write-Ok) '[a-zA-Z0-9._-]+'" tools/bootstrap.ps1 | sed "s/.* '//;s/'//"
+                    grep -ohE "(Msg|Write-Log|Write-Warn|Write-Die|Write-Ok) '[a-zA-Z0-9._-]+'" tools/lib/*.ps1 tools/bootstrap-*.ps1 | sed "s/.* '//;s/'//"
                     # TS 侧统一形如 t('ns.key')（含三元里的两个分支）
                     grep -ohE "'[a-z][a-zA-Z0-9]*\.[a-zA-Z0-9.]+'" tools/*.ts | tr -d "'"
                   } | sort -u | tr '\n' ' ' )
@@ -207,39 +214,46 @@ jobs:
             exit 1
           fi
 
-          for f in usage.zh.txt usage.en.txt usage.ps.zh.txt usage.ps.en.txt; do
-            if [ ! -s "tools/i18n/$f" ]; then
-              echo "::error file=tools/i18n/$f::用法文本缺失或为空"
-              exit 1
-            fi
+          for path in direct uboot edk2; do
+            for lang in zh en; do
+              f="tools/i18n/usage.$path.$lang.txt"
+              if [ ! -s "$f" ]; then
+                echo "::error file=$f::用法文本缺失或为空"
+                exit 1
+              fi
+            done
           done
-          echo "OK：文案表格式正确，用到的 key 都在，没有死键，用法文本齐全"
+          echo "OK：文案表格式正确，用到的 key 都在，没有死键，六份用法文本齐全"
 
-      # 语言开关必须真的通到用户眼前的那几处：两个脚本的 -Help / --help（各自的用法
+      # 语言开关必须真的通到用户眼前的那几处：三条引导路的 -Help / --help（各自的用法
       # 文本文件），以及 tools/*.ts 的输出（它由脚本通过 TSIE_LANG 传下去 ——
       # 英文流程里漏出中文，最初就是这里漏的）。
       - name: 语言开关端到端可用
         run: |
           if command -v pwsh >/dev/null 2>&1; then
-            for l in zh en; do
-              len=$(pwsh -NoProfile -File tools/bootstrap.ps1 -Help -Lang $l | wc -c)
-              echo "bootstrap.ps1 -Help -Lang $l: $len 字节"
-              [ "$len" -ge 800 ] || { echo "::error file=tools/bootstrap.ps1::用法文本太短（$len 字节）"; exit 1; }
+            for p in direct uboot edk2; do
+              for l in zh en; do
+                len=$(pwsh -NoProfile -File "tools/bootstrap-$p.ps1" -Help -Lang $l | wc -c)
+                echo "bootstrap-$p.ps1 -Help -Lang $l: $len 字节"
+                [ "$len" -ge 800 ] || { echo "::error file=tools/bootstrap-$p.ps1::用法文本太短（$len 字节）"; exit 1; }
+              done
             done
             # 非法语言值必须报错退出，而不是静默退回中文（否则 -Lang fr 看起来"成功了"）。
             # 用哪种语言报错取决于本机区域，所以两种措辞都接受。
-            got=$(TSIE_LANG=fr pwsh -NoProfile -File tools/bootstrap.ps1 2>&1 || true)
+            got=$(TSIE_LANG=fr pwsh -NoProfile -File tools/bootstrap-direct.ps1 2>&1 || true)
             printf '%s\n' "$got" | grep -qE '无法识别的语言|Unrecognized language' \
               || { echo "::error::非法 TSIE_LANG 应当报错，实际输出：$got"; exit 1; }
           else
             echo "跳过 pwsh 侧：本机没有 pwsh"
           fi
-          for l in zh en; do
-            len=$(bash tools/bootstrap.sh --help --lang $l | wc -c)
-            echo "bootstrap.sh --help --lang $l: $len 字节"
-            [ "$len" -ge 800 ] || { echo "::error file=tools/bootstrap.sh::用法文本太短（$len 字节）"; exit 1; }
+          for p in direct uboot edk2; do
+            for l in zh en; do
+              len=$(bash "tools/bootstrap-$p.sh" --help --lang $l | wc -c)
+              echo "bootstrap-$p.sh --help --lang $l: $len 字节"
+              [ "$len" -ge 800 ] || { echo "::error file=tools/bootstrap-$p.sh::用法文本太短（$len 字节）"; exit 1; }
+            done
           done
-          echo "OK：两种语言下帮助与语言校验都对"
+          echo "OK：三条引导路、两种语言下帮助与语言校验都对"
 
       # GitHub 网页编辑器（Add file / 铅笔按钮）**绕过本地的 .gitattributes**，
       # 提交进来的 blob 直接带 CRLF。而 git 的归一是逐个文件"自愈"的：谁下次编辑到它，
