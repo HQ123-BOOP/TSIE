@@ -38,6 +38,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync, zstdDecompressSync } from 'node:zlib';
 
+// 用户可见的文案走 tools/i18n/messages.tsv（与两个 bootstrap 脚本同一张表）。
+// 这个工具的输出来自 bootstrap 运行的中途，所以必须跟着同一份语言走 ——
+// 脚本会把自己的选择通过 TSIE_LANG 传下来（见 tools/bootstrap.sh / .ps1）。
+import { loadMessages, type Translate } from './i18n/read.ts';
+
 const BLOCK = 512;
 export const CPIO_HEADER = 110;
 
@@ -530,49 +535,46 @@ export function verifyCpio(buf: Buffer): { count: number; exec: number; symlinks
 
 // ----------------------------------------------------------------------- CLI
 
-function usage(): void {
-  process.stderr.write(
-    '用法:\n' +
-    '  npx tsx tools/initramfs.ts alpine     <minirootfs.tar.gz> <out.cpio.gz>\n' +
-    '  npx tsx tools/initramfs.ts mini       <minirootfs.tar.gz> <out.cpio>\n' +
-    '  npx tsx tools/initramfs.ts decompress <initramfs.cpio.gz> <out.cpio>\n' +
-    '  npx tsx tools/initramfs.ts verify     <initramfs.cpio[.gz]>\n',
-  );
+function usage(t: Translate): void {
+  process.stderr.write(t('cpio.usage') + '\n');
 }
 
 export function main(argv: string[]): number {
-  const [cmd, input, out] = argv;
+  const { t } = loadMessages();
+  // 直接写 stderr 的错误行统一带上文案表里的前缀（与两个脚本的 warn/die 同源）。
+  // 注意：抛出来的 Error.message 仍是中文 —— 那是"不该发生"的内部诊断，不进文案表。
+  const err = (s: string): void => { process.stderr.write(`${t('error.prefix')} ${s}\n`); };
+  const out = (s: string): void => { process.stdout.write(s + '\n'); };
+  const [cmd, input, dest] = argv;
   try {
     if (cmd === 'decompress') {
-      if (!input || !out) { usage(); return 2; }
-      if (out.endsWith('.gz') || out.endsWith('.zst')) {
-        process.stderr.write('错误: 输出别再用压缩后缀 —— 这一步的目的就是去掉压缩层\n');
+      if (!input || !dest) { usage(t); return 2; }
+      if (dest.endsWith('.gz') || dest.endsWith('.zst')) {
+        err(t('cpio.errCompressedOut'));
         return 2;
       }
       const raw = readFileSync(input);
       const { data, format } = uncompressedInitramfs(raw);
       // 解出来必须真的是个完好的 cpio，否则交给内核只会得到一个"看起来卡住"的引导
       const r = verifyCpio(data);
-      writeFileSync(out, data);
+      writeFileSync(dest, data);
       const pct = (100 * data.length / raw.length - 100).toFixed(0);
-      process.stdout.write(
-        `${input}  ${raw.length} B (${format}) → ${out}  ${data.length} B（未压缩，+${pct}%）\n` +
-        `条目 ${r.count}，符号链接 ${r.symlinks}，可执行文件 ${r.exec} —— 结构校验通过\n` +
-        '内核认不出压缩就会直接按裸 cpio 用，省掉的是它在模拟器里跑 inflate 的那段指令。\n',
-      );
+      out(t('cpio.decompressed', input, raw.length, format, dest, data.length, pct));
+      out(t('cpio.verified', r.count, r.symlinks, r.exec));
+      out(t('cpio.whyKernel'));
       return 0;
     }
     if (cmd === 'verify') {
-      if (!input) { usage(); return 2; }
+      if (!input) { usage(t); return 2; }
       const raw = maybeGunzip(input, readFileSync(input));
       const r = verifyCpio(raw);
-      process.stdout.write(`条目数: ${r.count}, 符号链接: ${r.symlinks}, 可执行文件: ${r.exec}\n`);
-      process.stdout.write(`含 /init: ${r.names.includes('init')} | 含 dev/console: ${r.names.includes('dev/console')}\n`);
-      process.stdout.write(`前 8 项: ${r.names.slice(0, 8).join(' ')}\n`);
-      process.stdout.write(`结构校验: OK（magic / 名字 NUL 结尾 / 4 字节对齐 / TRAILER 全部通过）\n`);
+      out(t('cpio.verifyCounts', r.count, r.symlinks, r.exec));
+      out(t('cpio.verifyPeek', r.names.includes('init'), r.names.includes('dev/console')));
+      out(t('cpio.verifyHead', r.names.slice(0, 8).join(' ')));
+      out(t('cpio.verifyOk'));
       return 0;
     }
-    if ((cmd !== 'alpine' && cmd !== 'mini') || !input || !out) { usage(); return 2; }
+    if ((cmd !== 'alpine' && cmd !== 'mini') || !input || !dest) { usage(t); return 2; }
 
     const tar = parseTar(maybeGunzip(input, readFileSync(input)));
     const built = cmd === 'alpine' ? buildAlpine(tar) : buildMini(tar);
@@ -583,32 +585,27 @@ export function main(argv: string[]): number {
     // 判据要盯**归档来的**可执行文件：/init 是我们自己加的，它可执行是理所当然的，
     // 拿它当判据等于没检查。
     if (built.tarExecCount === 0 || !built.hasShell) {
-      process.stderr.write(
-        `错误: 产物不可引导（归档里的可执行文件 ${built.tarExecCount} 个，bin/sh ${built.hasShell ? '有' : '无'}）。\n` +
-        '      多半是归档本身的权限位/链接有问题 —— 请确认 minirootfs 完好。\n',
-      );
+      err(t('cpio.notBootable', built.tarExecCount, t(built.hasShell ? 'cpio.yes' : 'cpio.no')));
+      err(t('cpio.notBootableHint'));
       return 1;
     }
 
     if (cmd === 'mini') {
-      if (out.endsWith('.gz')) {
-        process.stderr.write('错误: mini 刻意不压缩（省掉内核 inflate 开销），请用 .cpio 后缀\n');
+      if (dest.endsWith('.gz')) {
+        err(t('cpio.miniGz'));
         return 2;
       }
-      writeFileSync(out, built.buf);
+      writeFileSync(dest, built.buf);
     } else {
       const gz = gzipSync(built.buf, { level: 9 });
-      writeFileSync(out, out.endsWith('.gz') ? gz : built.buf);
+      writeFileSync(dest, dest.endsWith('.gz') ? gz : built.buf);
     }
-    const written = readFileSync(out).length;
-    process.stdout.write(
-      `wrote ${out}: ${written} bytes (tar 条目 ${tar.length} → cpio 条目 ${built.entries})\n` +
-      `可执行文件: ${built.execCount} 个（其中来自归档 ${built.tarExecCount} 个）` +
-      `，符号链接: ${built.symlinkCount} 个（均取自归档元数据，未经过磁盘）\n`,
-    );
+    const written = readFileSync(dest).length;
+    out(t('cpio.wrote', dest, written, tar.length, built.entries));
+    out(t('cpio.wroteCounts', built.execCount, built.tarExecCount, built.symlinkCount));
     return 0;
-  } catch (err) {
-    process.stderr.write(`错误: ${err instanceof Error ? err.message : String(err)}\n`);
+  } catch (caught) {
+    err(caught instanceof Error ? caught.message : String(caught));
     return 1;
   }
 }
