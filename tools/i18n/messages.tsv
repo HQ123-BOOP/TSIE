@@ -19,6 +19,7 @@ warn.prefix	警告:	WARNING:
 error.prefix	错误:	ERROR:
 common.missingCmd	缺少命令 {0}	Missing command: {0}
 common.unknownArg	未知参数: {0}（--help 看用法）	Unknown argument: {0} (see --help)
+i18n.badLang	无法识别的语言 '{0}'（可选 zh 或 en）	Unrecognized language '{0}' (expected zh or en)
 common.missingTsx	缺少 tsx（{0}）—— 请先在仓库根执行 npm install	Missing tsx ({0}) — run npm install in the repository root first
 common.banner	TSIE 引导素材 bootstrap	TSIE boot artifacts bootstrap
 common.bannerPs	TSIE 引导素材 bootstrap (PowerShell)	TSIE boot artifacts bootstrap (PowerShell)
@@ -48,11 +49,12 @@ fetch.source	源: {0}	Source: {0}
 fetch.shaMismatch	sha256 不符（期望 {0} 得到 {1}），换下一个源	sha256 mismatch (expected {0}, got {1}); trying the next source
 fetch.shaMismatchDie	sha256 不符: {0}（期望 {1} 得到 {2}）	sha256 mismatch: {0} (expected {1}, got {2})
 fetch.sourceFailed	该源失败: {0}	Source failed: {0}
+fetch.failed	下载失败: {0}	Download failed: {0}
 fetch.verified	校验通过: {0}	Verified: {0}
-fetch.listFailed	无法列出 {0}	Cannot list {0}
 
 # ---------------------------------------------------------------- ar 拆包工具
 ar.toolSystem	拆包工具: {0}（系统已有，无需下载）	Unpacker: {0} (already installed; nothing to download)
+ar.toolPlain	拆包工具: {0}	Unpacker: {0}
 ar.toolBorrowed	拆包工具: 临时 bsdtar ({0})	Unpacker: temporary bsdtar ({0})
 ar.cleaned	已删除临时 bsdtar	Removed the temporary bsdtar
 ar.unknownArch	未知架构 {0}，不知道该取哪个 bsdtar 资产	Unknown architecture {0}; cannot choose a bsdtar asset
@@ -74,8 +76,9 @@ opensbi.directDown	GitHub release 资产直连不可用	GitHub release assets ar
 opensbi.cantDownload	无法下载 OpenSBI。	Cannot download OpenSBI.
 opensbi.manualHint	请手动放置：curl -L -o {0} {1}	Place it manually: curl -L -o {0} {1}
 opensbi.manualHint2	然后解压到 {0} 并重跑本脚本。	Then extract it into {0} and re-run this script.
-opensbi.failed	OpenSBI 获取失败（--no-mirror 时这是预期行为）	Failed to obtain OpenSBI (expected when the mirror is disabled)
+opensbi.failed	OpenSBI 获取失败（禁用镜像时这是预期行为：--no-mirror / -NoMirror）	Failed to obtain OpenSBI (expected when the mirror is disabled: --no-mirror / -NoMirror)
 opensbi.extracting	解压...	Extracting...
+opensbi.extractFailed	解压 OpenSBI 失败（tar 返回非 0）	Failed to extract OpenSBI (tar returned non-zero)
 opensbi.badArchive	OpenSBI tar.xz 下载不完整（tar 无法列出内容）—— 删掉后重跑，或手动放置	The OpenSBI tar.xz is incomplete (tar cannot list it) — delete it and re-run, or place it manually
 opensbi.noFwJump	解压后未找到 fw_jump.bin	fw_jump.bin not found after extraction
 
@@ -87,6 +90,7 @@ edk2.noListing	无法列出 Debian edk2 池目录，跳过 EDK II	Cannot list th
 edk2.latest	最新包: {0}	Latest package: {0}
 edk2.downloadFailed	下载失败，跳过 EDK II	Download failed; skipping EDK II
 edk2.noTool	没有可用的拆包工具，跳过 EDK II	No usable unpacker; skipping EDK II
+edk2.noToolPs	没有能解 ar 的工具（bsdtar 或 7-Zip），跳过 EDK II	No tool here can read ar (bsdtar or 7-Zip); skipping EDK II
 edk2.noTarNo7z	找不到任何 tar/7-Zip，跳过 EDK II	Found neither tar nor 7-Zip; skipping EDK II
 edk2.gnuTarNote	.deb 是 ar 归档；Git 自带的 GNU tar 不支持它	A .deb is an ar archive; the GNU tar bundled with Git cannot read it
 edk2.unpack7z	拆包（7-Zip）...	Unpacking (7-Zip)...
@@ -133,13 +137,33 @@ alpine.decompressFailed	initramfs 解压失败（tools/initramfs.ts decompress�
 
 # ---------------------------------------------------------------- 收尾指引
 tail.title	引导命令（在仓库根执行）：	Boot commands (run them from the repository root):
+tail.alpineCmd	Alpine + OpenSBI（到 BusyBox shell）	Alpine + OpenSBI (to a BusyBox shell)
 tail.earlycon	  # 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内\n  # 就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台\n  # 注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。	  # Always pass earlycon=sbi: the Alpine kernel has the SBI earlycon driver, and with\n  # it you see output within about 150M instructions. Without it the kernel buffers\n  # printk until the 16550 console registers (350-400M instructions) and then dumps\n  # everything at once, which looks exactly like a hang.
 tail.uncompressed	  # 用的是未压缩的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，\n  # 省掉在模拟器里跑 inflate。同机同核实测（两条路都到 shell）：\n  #   initramfs.cpio.gz   1,270,638,213 条指令   到 /init 用 t=120.26s\n  #   initramfs.cpio        776,011,912 条指令   到 /init 用 t=64.67s\n  # 省 4.95 亿条（38.9%）。差别不是能不能起来，是快多少。\n  # （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）	  # This run booted the uncompressed initramfs.cpio: the kernel does not recognise a\ncompression format and uses the archive as a plain cpio, skipping the inflate pass.\nMeasured on one machine with one kernel (both reach a shell):\n  initramfs.cpio.gz   1,270,638,213 instructions, /init at t=120.26s\n  initramfs.cpio        776,011,912 instructions, /init at t=64.67s\nThat is 495M instructions, 38.9%. The difference is speed, not whether it boots.\n(Virtual seconds are not proportional to instructions: the kernel's time comes from a\njittered mtime. Trust instret.)
 tail.compressedHint	  # 这次用的是压缩态 initramfs.cpio.gz。想快 38.9% 就补一步（实测省 4.95 亿条指令）：\n  #     npx tsx tools/initramfs.ts decompress {0}/initramfs.cpio.gz {0}/initramfs.cpio\n  # 然后把下面 --initrd 换成 {0}/initramfs.cpio。	  # This run kept the compressed initramfs.cpio.gz. One extra step makes it 38.9%\n  # faster (measured: 495M instructions saved):\n  #     npx tsx tools/initramfs.ts decompress {0}/initramfs.cpio.gz {0}/initramfs.cpio\n  # then point --initrd below at {0}/initramfs.cpio.
 tail.edk2	EDK II (UEFI)：需要成对提供 CODE / VARS	EDK II (UEFI): CODE and VARS must be given as a pair
 
 # ---------------------------------------------------------------- 仅 PowerShell
-ps.needs7	本工具不支持 PowerShell 5，请参阅 {0} 获取 PowerShell 7+，然后重试。	This tool does not support PowerShell 5. See {0} to install PowerShell 7 or newer, then try again.
+ps.needs7	本工具不支持 PowerShell 5，请参阅 https://learn.microsoft.com/zh-cn/powershell/scripting/install/install-powershell-on-windows 获取 PowerShell 7+，然后重试。	This tool does not support PowerShell 5. See https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows to install PowerShell 7 or newer, then try again.
 ps.unknownArg	无法识别的参数 '{0}'。用 -Help（或 --help）看用法。	Unrecognized argument '{0}'. Use -Help (or --help) for usage.
 ps.missingCurl	缺少 curl（Windows 10 1803+ 自带；或装 Git for Windows）	Missing curl (included in Windows 10 1803+; or install Git for Windows)
 ps.missingTar	缺少 tar（Windows 10 1803+ 自带 bsdtar）	Missing tar (Windows 10 1803+ bundles bsdtar)
+
+# ------------------------------------------------- tools/*.ts（Node 侧，读 tools/i18n/read.ts）
+# 这些会出现在 bootstrap 运行的中途，所以必须跟着同一份语言走。
+cpio.usage	用法:\n  npx tsx tools/initramfs.ts alpine     <minirootfs.tar.gz> <out.cpio.gz>\n  npx tsx tools/initramfs.ts mini       <minirootfs.tar.gz> <out.cpio>\n  npx tsx tools/initramfs.ts decompress <initramfs.cpio.gz> <out.cpio>\n  npx tsx tools/initramfs.ts verify     <initramfs.cpio[.gz]>	Usage:\n  npx tsx tools/initramfs.ts alpine     <minirootfs.tar.gz> <out.cpio.gz>\n  npx tsx tools/initramfs.ts mini       <minirootfs.tar.gz> <out.cpio>\n  npx tsx tools/initramfs.ts decompress <initramfs.cpio.gz> <out.cpio>\n  npx tsx tools/initramfs.ts verify     <initramfs.cpio[.gz]>
+cpio.errCompressedOut	输出别再用压缩后缀 —— 这一步的目的就是去掉压缩层	do not give the output a compressed suffix; removing that layer is the whole point of this step
+cpio.decompressed	{0}  {1} B ({2}) → {3}  {4} B（未压缩，+{5}%）	{0}  {1} B ({2}) → {3}  {4} B (uncompressed, +{5}%)
+cpio.verified	条目 {0}，符号链接 {1}，可执行文件 {2} —— 结构校验通过	entries {0}, symlinks {1}, executables {2} — structure check passed
+cpio.whyKernel	内核认不出压缩就会直接按裸 cpio 用，省掉的是它在模拟器里跑 inflate 的那段指令。	The kernel uses a plain cpio when it cannot recognise the compression format, which skips the inflate pass it would otherwise run inside the emulator.
+cpio.verifyCounts	条目数: {0}, 符号链接: {1}, 可执行文件: {2}	entries: {0}, symlinks: {1}, executables: {2}
+cpio.verifyPeek	含 /init: {0} | 含 dev/console: {1}	has /init: {0} | has dev/console: {1}
+cpio.verifyHead	前 8 项: {0}	first 8: {0}
+cpio.verifyOk	结构校验: OK（magic / 名字 NUL 结尾 / 4 字节对齐 / TRAILER 全部通过）	structure check: OK (magic / NUL-terminated names / 4-byte alignment / TRAILER all pass)
+cpio.notBootable	产物不可引导（归档里的可执行文件 {0} 个，bin/sh {1}）。	the artifact would not boot ({0} executables in the archive, bin/sh {1}).
+cpio.notBootableHint	      多半是归档本身的权限位/链接有问题 —— 请确认 minirootfs 完好。	      the archive's permission bits or links are probably wrong — check that the minirootfs is intact.
+cpio.yes	有	yes
+cpio.no	无	no
+cpio.miniGz	mini 刻意不压缩（省掉内核 inflate 开销），请用 .cpio 后缀	mini deliberately does not compress (it saves the kernel an inflate pass); use a .cpio suffix
+cpio.wrote	wrote {0}: {1} bytes (tar 条目 {2} → cpio 条目 {3})	wrote {0}: {1} bytes ({2} tar entries → {3} cpio entries)
+cpio.wroteCounts	可执行文件: {0} 个（其中来自归档 {1} 个），符号链接: {2} 个（均取自归档元数据，未经过磁盘）	executables: {0} ({1} of them from the archive), symlinks: {2} (all taken from archive metadata; nothing touched the disk)
