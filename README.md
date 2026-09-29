@@ -11,6 +11,14 @@
 
 [English](README.en.md) | 中文
 
+<img src="docs/alpine-boot-shell.png" alt="Alpine Linux 引导到 shell 提示符" width="100%">
+
+<sub>Alpine Linux 引导到 shell（主机名 alpine-tsie）—— 8250 串口控制台、virtio-gpu + DRM、virtio-blk 与 ext4 根文件系统全部就位</sub>
+
+<img src="docs/edk2-uefi-boot.png" alt="EDK II (UEFI) 固件启动画面" width="62%">
+
+<sub>EDK II (UEFI) 启动画面 —— TianoCore logo 与启动倒计时，跑在模拟的 CFI flash 上</sub>
+
 </div>
 
 除 `ws`（浏览器实时显示用的 WebSocket 库）之外没有运行时依赖，从指令译码、特权架构、
@@ -362,6 +370,7 @@ tools/prof-summary.ts     汇总 node --cpu-prof 采样，按自身耗时列热�
 tools/encoder.ts          RISC-V 指令编码器（测试与示例用）
 tools/bench.ts            吞吐基准；bench-hilo.ts 量高位/低位运算的分项开销
 tests/                    249 项单元测试（node:test，28 个文件）
+docs/                     截图（README 顶部那两张，本项目自己的产物，Apache-2.0）
 ```
 
 ## 测试

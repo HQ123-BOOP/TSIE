@@ -44,6 +44,10 @@ independent of the longer `riscv,isa` string the device tree advertises.
 1. **Never commit non-permissive binary artifacts.** The repo is Apache-2.0. GPL-2.0 material
    (Linux kernels, U-Boot, OpenSBI builds, disk images) must not enter git. `firmware/`,
    `linux-image/`, `tmp/`, and `dist/` are gitignored for this reason — keep it that way.
+   Screenshots of this project's own output (`docs/*.png`) are fine and are referenced from
+   the README with relative paths. Do **not** inline them as `data:` URIs: GitHub's README
+   sanitiser only allows `http` / `https` / relative `img src`, so a base64 image silently
+   loses its `src` and renders as nothing.
 2. **Every `.ts` file carries the SPDX header.** Two lines, before the module docs:
    `// SPDX-License-Identifier: Apache-2.0` and `// SPDX-FileCopyrightText: 2026 TSIE`.
 3. **`npm run typecheck` must stay at 0 errors**, and `npm test` at 0 failures. The tsconfig

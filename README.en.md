@@ -11,6 +11,14 @@
 
 English | [中文](README.md)
 
+<img src="docs/alpine-boot-shell.png" alt="Alpine Linux booting to a shell prompt" width="100%">
+
+<sub>Alpine Linux booting to a shell (hostname alpine-tsie) — 8250 serial console, virtio-gpu with DRM, virtio-blk and an ext4 root filesystem all in place</sub>
+
+<img src="docs/edk2-uefi-boot.png" alt="EDK II (UEFI) firmware splash screen" width="62%">
+
+<sub>EDK II (UEFI) splash screen — the TianoCore logo and the boot countdown, running on emulated CFI flash</sub>
+
 </div>
 
 There is no runtime dependency beyond `ws` (the WebSocket library behind the live browser
@@ -383,6 +391,7 @@ tools/prof-summary.ts     summarises node --cpu-prof samples, listing hot spots 
 tools/encoder.ts          RISC-V instruction encoder (used by tests and examples)
 tools/bench.ts            throughput benchmark; bench-hilo.ts measures the itemised cost of high/low-word arithmetic
 tests/                    249 unit tests (node:test, 28 files)
+docs/                     screenshots (the two at the top of this README — our own output, Apache-2.0)
 ```
 
 ## Testing
