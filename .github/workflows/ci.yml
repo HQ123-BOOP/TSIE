@@ -55,6 +55,19 @@ jobs:
       - name: 端到端冒烟（裸机 demo，不依赖任何固件）
         run: npm run demo
 
+      # tools/*.ts 的输出也走同一张文案表（脚本把自己的选择经 TSIE_LANG 传下去）。
+      # 英文流程里漏出中文，最初漏的就是这里 —— 所以单独钉一条，两个系统都跑。
+      - name: 工具输出跟随语言（tools/initramfs.ts）
+        shell: bash
+        run: |
+          for pair in 'en:Usage:' 'zh:用法:'; do
+            lang=${pair%%:*}; want=${pair#*:}
+            got=$(TSIE_LANG=$lang npx tsx tools/initramfs.ts 2>&1 || true)
+            printf '%s\n' "$got" | grep -qF "$want" \
+              || { echo "::error::TSIE_LANG=$lang 时 tools/initramfs.ts 没有输出 '$want'"; exit 1; }
+            echo "TSIE_LANG=$lang → OK"
+          done
+
   # 独立可执行文件（Node SEA）。这条链没有别的地方会碰：esbuild 打单文件 CJS、
   # 生成 SEA blob、注入 node 可执行文件、再跑一次 --help 冒烟。任何一个环节坏掉
   # （比如有人给 CLI 又加了顶层 await，CJS 就打包不了）都该在这里当场红，
@@ -152,9 +165,14 @@ jobs:
             echo "跳过：本机没有 pwsh"
           fi
 
-      # 文案表是单一来源（tools/i18n/messages.tsv），脚本按 key 查它。
-      # 这里守两件事：表本身格式对（3 列、两种语言都非空），
-      # 以及**脚本里用到的每个 key 都在表里** —— 否则运行时会安静地打印出裸 key。
+      # 文案表是单一来源（tools/i18n/messages.tsv），三个读取方都按 key 查它：
+      # tools/bootstrap.sh、tools/bootstrap.ps1、tools/*.ts（经 tools/i18n/read.ts）。
+      # 这里守四件事：
+      #   1. 表本身格式对（3 列、两种语言都非空）；
+      #   2. 每个读取方用到的 key 都在表里（否则运行时会安静地打印出裸 key）；
+      #   3. 表里没有**没人用**的 key（死键会烂在表里 —— 值里的 `警告:`/`错误:` 前缀
+      #      就曾因为 warn()/die() 写死中文而变成死键，那正是英文运行里漏出中文的原因）；
+      #   4. 四种用法文本都在（-Help / --help 直接 cat 它们）。
       - name: i18n 文案表完整
         run: |
           bad=$(awk -F'\t' '!/^#/ && NF>0 { if (NF!=3 || $2=="" || $3=="") print NR": "$0 }' tools/i18n/messages.tsv)
@@ -163,15 +181,65 @@ jobs:
             printf '%s\n' "$bad"
             exit 1
           fi
+
+          used=$( { grep -ohE 'msg [a-zA-Z0-9._-]+' tools/bootstrap.sh | awk '{print $2}'
+                    # ps1 侧多数 key 是交给 Write-Log/Warn/Die/Ok 的，不能只扫 Msg
+                    grep -ohE "(Msg|Write-Log|Write-Warn|Write-Die|Write-Ok) '[a-zA-Z0-9._-]+'" tools/bootstrap.ps1 | sed "s/.* '//;s/'//"
+                    # TS 侧统一形如 t('ns.key')（含三元里的两个分支）
+                    grep -ohE "'[a-z][a-zA-Z0-9]*\.[a-zA-Z0-9.]+'" tools/*.ts | tr -d "'"
+                  } | sort -u | tr '\n' ' ' )
+
           missing=""
-          for k in $(grep -ohE 'msg [a-zA-Z0-9._-]+' tools/bootstrap.sh | awk '{print $2}' | sort -u); do
+          for k in $used; do
             grep -q "^$k	" tools/i18n/messages.tsv || missing="$missing $k"
           done
           if [ -n "$missing" ]; then
             echo "::error::脚本用到、但文案表里没有的 key:$missing"
             exit 1
           fi
-          echo "OK：文案表格式正确，脚本用到的 key 都在"
+
+          dead=""
+          for k in $(awk -F'\t' '!/^#/ && NF>0 {print $1}' tools/i18n/messages.tsv); do
+            case " $used " in *" $k "*) ;; *) dead="$dead $k" ;; esac
+          done
+          if [ -n "$dead" ]; then
+            echo "::error file=tools/i18n/messages.tsv::文案表里没人用的 key（死键）:$dead"
+            exit 1
+          fi
+
+          for f in usage.zh.txt usage.en.txt usage.ps.zh.txt usage.ps.en.txt; do
+            if [ ! -s "tools/i18n/$f" ]; then
+              echo "::error file=tools/i18n/$f::用法文本缺失或为空"
+              exit 1
+            fi
+          done
+          echo "OK：文案表格式正确，用到的 key 都在，没有死键，用法文本齐全"
+
+      # 语言开关必须真的通到用户眼前的那几处：两个脚本的 -Help / --help（各自的用法
+      # 文本文件），以及 tools/*.ts 的输出（它由脚本通过 TSIE_LANG 传下去 ——
+      # 英文流程里漏出中文，最初就是这里漏的）。
+      - name: 语言开关端到端可用
+        run: |
+          if command -v pwsh >/dev/null 2>&1; then
+            for l in zh en; do
+              len=$(pwsh -NoProfile -File tools/bootstrap.ps1 -Help -Lang $l | wc -c)
+              echo "bootstrap.ps1 -Help -Lang $l: $len 字节"
+              [ "$len" -ge 800 ] || { echo "::error file=tools/bootstrap.ps1::用法文本太短（$len 字节）"; exit 1; }
+            done
+            # 非法语言值必须报错退出，而不是静默退回中文（否则 -Lang fr 看起来"成功了"）。
+            # 用哪种语言报错取决于本机区域，所以两种措辞都接受。
+            got=$(TSIE_LANG=fr pwsh -NoProfile -File tools/bootstrap.ps1 2>&1 || true)
+            printf '%s\n' "$got" | grep -qE '无法识别的语言|Unrecognized language' \
+              || { echo "::error::非法 TSIE_LANG 应当报错，实际输出：$got"; exit 1; }
+          else
+            echo "跳过 pwsh 侧：本机没有 pwsh"
+          fi
+          for l in zh en; do
+            len=$(bash tools/bootstrap.sh --help --lang $l | wc -c)
+            echo "bootstrap.sh --help --lang $l: $len 字节"
+            [ "$len" -ge 800 ] || { echo "::error file=tools/bootstrap.sh::用法文本太短（$len 字节）"; exit 1; }
+          done
+          echo "OK：两种语言下帮助与语言校验都对"
 
       # GitHub 网页编辑器（Add file / 铅笔按钮）**绕过本地的 .gitattributes**，
       # 提交进来的 blob 直接带 CRLF。而 git 的归一是逐个文件"自愈"的：谁下次编辑到它，
