@@ -20,7 +20,7 @@ are hand-written; there is no delegation to an external emulator or VM.
 
 ```bash
 npm install          # ws is the only runtime dep
-npm test             # 234 unit tests across 26 files (node:test)
+npm test             # 249 unit tests across 28 files (node:test)
 npm run typecheck    # tsc --noEmit — must stay at 0 errors
 npm run demo         # bare-metal "Hello, RISC-V 64!"; drives UART directly, needs no firmware
 npm run bench        # bare-metal throughput benchmark
