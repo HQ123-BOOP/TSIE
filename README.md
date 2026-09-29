@@ -9,6 +9,8 @@
 
 **一个 TypeScript 从零实现的 RISC-V 64 位模拟器。**
 
+[English](README.en.md) | 中文
+
 </div>
 
 除 `ws`（浏览器实时显示用的 WebSocket 库）之外没有运行时依赖，从指令译码、特权架构、
@@ -27,7 +29,7 @@
 | **显示** | virtio-gpu 画面可经 WebSocket 实时推到浏览器（脏矩形增量推送），浏览器键盘回传到 guest |
 | **固件** | 直接运行真实固件：实测 OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) 完整引导到 `login:`**，以及 EDK II (UEFI) 启动链（含 TianoCore logo 上屏）。**SBI 调用需外部 OpenSBI —— 内建 SBI 固件已移除** |
 | **加载** | ELF64 装载（自动处理 vaddr/paddr 偏移）、裸二进制、扁平设备树（DTB）生成器（含 `rng-seed` 熵注入） |
-| **工具** | 引导素材一键拉齐（`tools/bootstrap.sh` / `.ps1`）、cpio initramfs 打包（`tools/initramfs.ts`）、**独立可执行文件构建（`npm run sea`）**、指令编码器（`tools/encoder.ts`）、CPU profile 汇总（`tools/prof-summary.ts`）、指令级单元测试、CLI |
+| **工具** | 引导素材一键拉齐（`tools/bootstrap.sh` / `.ps1`，中英双语）、cpio initramfs 打包（`tools/initramfs.ts`）、**独立可执行文件构建（`npm run sea`）**、指令编码器（`tools/encoder.ts`）、CPU profile 汇总（`tools/prof-summary.ts`）、指令级单元测试、CLI |
 
 ## 快速开始
 
@@ -53,6 +55,12 @@ tools/bootstrap.sh --help          # 完整用法（内容就是脚本头部那�
 pwsh tools/bootstrap.ps1 -NoEdk2
 pwsh tools/bootstrap.ps1 -Help
 ```
+
+**两个脚本都能中英切换**：`--lang en` / `-Lang en`，或环境变量 `TSIE_LANG=en`，
+默认跟随系统区域（认不出来时用中文）。`--lang en --help` 出的是英文用法，
+连中间调用的 `tools/initramfs.ts` 也跟着同一份语言（脚本把选择经 `TSIE_LANG` 传下去）。
+文案是**单一来源** `tools/i18n/messages.tsv`（`key<TAB>中文<TAB>English`），
+选 TSV 而不是 JSON 是因为 bash / PowerShell / Node 都能零依赖读它。
 
 产物落在 gitignored 的 `tmp/boot/` 与 `firmware/` —— 这些是 GPL-2.0 / 第三方二进制，
 **不入库**（本项目是 Apache-2.0）。
@@ -346,7 +354,8 @@ src/
 ├── index.ts              公共 API 导出
 └── cli.ts                命令行入口
 tools/bootstrap.sh        引导素材一键拉齐（OpenSBI + EDK II + Alpine 内核/initramfs）
-tools/bootstrap.ps1       同上，PowerShell 7 版
+tools/bootstrap.ps1       同上，PowerShell 7 版（两个脚本都中英双语，见 tools/i18n/）
+tools/i18n/               文案表 messages.tsv + 用法文本（中英各一份，三个读取方共用）
 tools/initramfs.ts        tar.gz → cpio-newc initramfs；另有 decompress / verify 子命令
 tools/uncompress-fv.ts    去掉 EDK II 固件里的 LZMA 压缩层（UEFI 启动快约 5 倍）
 tools/prof-summary.ts     汇总 node --cpu-prof 采样，按自身耗时列热点
@@ -365,7 +374,8 @@ npm run typecheck                     # 类型检查（当前 0 错误）
 
 CI 在每次推送到 `main` 与每个 PR 上跑三组作业：`check`（typecheck / 测试 / 构建 / 加载构建产物 /
 裸机 demo，Ubuntu 与 Windows 各一遍）、`sea`（把 CLI 打成独立可执行文件并冒烟，
-同样两个平台）、`hygiene`（SPDX 头、GPL 与二进制产物不入库、行尾统一 LF、构建缓存不入库）。
+同样两个平台）、`hygiene`（SPDX 头、GPL 与二进制产物不入库、行尾统一 LF、构建缓存不入库、
+文案表完整且没有死键、两种语言下帮助与工具输出都正确）。
 打 `v*` 标签会额外构建，并把 npm tarball 与两个平台的独立可执行文件一起附到 GitHub Release。
 
 覆盖范围：RV64I 全部整数指令与访存、M 扩展（含除零/溢出）、A 扩展（LR/SC/AMO）、
