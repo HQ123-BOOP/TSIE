@@ -167,3 +167,39 @@ cpio.no	无	no
 cpio.miniGz	mini 刻意不压缩（省掉内核 inflate 开销），请用 .cpio 后缀	mini deliberately does not compress (it saves the kernel an inflate pass); use a .cpio suffix
 cpio.wrote	wrote {0}: {1} bytes (tar 条目 {2} → cpio 条目 {3})	wrote {0}: {1} bytes ({2} tar entries → {3} cpio entries)
 cpio.wroteCounts	可执行文件: {0} 个（其中来自归档 {1} 个），符号链接: {2} 个（均取自归档元数据，未经过磁盘）	executables: {0} ({1} of them from the archive), symlinks: {2} (all taken from archive metadata; nothing touched the disk)
+
+# 这些会出现在 bootstrap 运行的中途，所以必须跟着同一份语言走。
+# ------------------------------------------------- tools/mkfat.ts（FAT16 镜像构造：MBR + BPB + VFAT 长名）
+fat.usage	用法:\n  npx tsx tools/mkfat.ts <out.img> [--size=BYTES] [--part-type=0x0C] [--label=TSIE] NAME=HOSTPATH [NAME=HOSTPATH ...]\n\n  NAME        镜像内的路径，'/' 分隔，允许前导 '/'；中间目录会自动创建\n  HOSTPATH    宿主机上的文件，必须存在\n  --size      镜像总字节数（可带 K/M/G 后缀，1M = 1 MiB）；省略时自动：\n              文件总字节 + 2 MiB 余量，向上取整到整 MiB\n  --part-type MBR 分区类型字节，默认 0x0C（FAT16 LBA）；EDK II 的 ESP 传 0xEF\n  --label     卷标，最长 11 个字符，默认 TSIE\n\n磁盘布局: 扇区 0 是 MBR，分区从 LBA 2048（1 MiB 对齐）起；卷内 512 字节/扇区、\n  2 份 FAT、保留 1 扇区、根目录固定 512 项。簇大小自动挑：从 64 KiB 往下取第一个\n  让簇数仍 ≥ 4085 的值 —— 簇数低于 4085 时固件会按 FAT12 去解 12 位的 FAT 链。\n确定性: DOS 时间戳固定为 2026-01-01 00:00:00，卷序列号由卷标/卷扇区数/簇大小派生，\n  同样的输入两次构建得到逐字节相同的镜像。	Usage:\n  npx tsx tools/mkfat.ts <out.img> [--size=BYTES] [--part-type=0x0C] [--label=TSIE] NAME=HOSTPATH [NAME=HOSTPATH ...]\n\n  NAME        path inside the image, '/'-separated; a leading '/' is allowed and\n              intermediate directories are created automatically\n  HOSTPATH    a file on the host; it must exist\n  --size      total image size in bytes (K/M/G suffixes accepted, 1M = 1 MiB).\n              Omitted: sum of file sizes + 2 MiB slack, rounded up to a whole MiB\n  --part-type MBR partition type byte, default 0x0C (FAT16 LBA); pass 0xEF for an EDK II ESP\n  --label     volume label, at most 11 characters, default TSIE\n\nDisk layout: sector 0 is the MBR and the partition starts at LBA 2048 (1 MiB aligned);\n  inside the volume: 512-byte sectors, two FATs, one reserved sector, a fixed 512-entry\n  root directory. The cluster size is picked automatically: the largest value from 64 KiB\n  down that still leaves at least 4085 clusters, because below 4085 clusters firmware\n  parses the 12-bit FAT chain instead.\nDeterministic: DOS timestamps are fixed at 2026-01-01 00:00:00 and the volume serial is\n  derived from the label, volume sectors and cluster size, so the same input yields the\n  same bytes on every run.
+fat.errNameEmpty	镜像内的名字是空的（{0}）	the name inside the image is empty ({0})
+fat.errNameDot	名字分量不能是 '.' 或 '..'（{0}）	a name component cannot be '.' or '..' ({0})
+fat.errNameTooLong	名字太长：{0} 有 {1} 个 UTF-16 码元，FAT 长名上限是 255	name too long: {0} has {1} UTF-16 units, the FAT long-name limit is 255
+fat.errNameChar	名字 {0} 里有 FAT 不接受的字符（码位 {1}）	name {0} contains a character FAT does not accept (code point {1})
+fat.errNameTrail	名字 {0} 以空格或点结尾 —— VFAT 会把它们吞掉，长名与 8.3 名就对不上了	name {0} ends with a space or a dot, which VFAT drops, so the long name and the 8.3 name would disagree
+fat.errNameUnencodable	名字 {0} 编不出合法的 8.3 短名	cannot derive a legal 8.3 short name from {0}
+fat.errDupName	镜像内有重名的目标: {0}（FAT 的名字不区分大小写）	duplicate target name in the image: {0} (FAT names are case-insensitive)
+fat.errPathConflict	{0} 既当文件又当目录	{0} is used as both a file and a directory
+fat.errLabel	卷标 {0} 非法：要 1…{1} 个字符，且只能用 8.3 允许的字符	invalid label {0}: it must be 1…{1} characters from the 8.3 character set
+fat.errPartType	非法的分区类型 {0}：应为 0x01…0xFF（例如 0x0C 或 0xEF）	invalid partition type {0}: expected 0x01…0xFF (for example 0x0C or 0xEF)
+fat.errSizeSyntax	非法的 --size 值 {0}：要字节数，可带 K/M/G 后缀	invalid --size value {0}: give bytes, optionally with a K/M/G suffix
+fat.errSizeTooSmall	{0} 字节的镜像装不下 FAT16 的最小卷（至少要 {1} 字节）	an image of {0} bytes is too small for the smallest FAT16 volume ({1} bytes needed)
+fat.errTooLarge	{0} 字节超过 FAT16 能表达的容量（上限 {1} 字节）	{0} bytes exceed what FAT16 can describe (limit {1} bytes)
+fat.errTooLargeRam	{0} 字节超过本工具在内存里拼镜像的上限（{1} 字节）：请改用外部工具	{0} bytes exceed this tool's in-memory limit ({1} bytes); use an external tool instead
+fat.errPayloadTooBig	文件总字节 {0} 装不进 {1} 字节的镜像：数据区 {2} 个簇，需要 {3} 个；请加大 --size	the {0} bytes of files do not fit in a {1}-byte image: {2} clusters available, {3} needed; increase --size
+fat.errRootFull	根目录要 {0} 个目录项，而固定根目录只有 {1} 项；请把文件放进子目录	the root directory needs {0} entries but the fixed root holds {1}; put the files in a subdirectory
+fat.errUnknownOpt	无法识别的选项 '{0}'（用 --help 看用法）	unrecognized option '{0}' (use --help for usage)
+fat.errNoFiles	至少要给一个 NAME=HOSTPATH（用 --help 看用法）	give at least one NAME=HOSTPATH (use --help for usage)
+fat.errBadAssign	参数 '{0}' 不是 NAME=HOSTPATH 形式	argument '{0}' is not of the form NAME=HOSTPATH
+fat.errMissingFile	宿主机上找不到文件: {0}	no such file on the host: {0}
+fat.errNotFile	{0} 不是普通文件（目录和设备不行）	{0} is not a regular file (directories and devices are not supported)
+fat.wrote	写入 {0}: {1} 字节（文件 {2} 个，目录 {3} 个，文件数据 {4} 字节）	wrote {0}: {1} bytes ({2} files, {3} directories, {4} bytes of file data)
+fat.mbr	MBR: 分区类型 {0}，起始 LBA {1}，长度 {2} 扇区（512 字节/扇区）	MBR: partition type {0}, start LBA {1}, {2} sectors long (512 bytes/sector)
+fat.layout	卷: {0} 扇区/簇（{1} 字节），共 {2} 个簇，FAT {3} 扇区 ×2，保留 {4} 扇区，根目录 {5} 项	volume: {0} sectors/cluster ({1} bytes), {2} clusters, FAT {3} sectors ×2, {4} reserved sectors, {5} root entries
+fat.volume	卷标 {0}，序列号 0x{1}，OEM {2}	label {0}, serial 0x{1}, OEM {2}
+fat.clusterNote	  簇大小按“簇数仍 ≥ 4085”取最大：再大一档，固件就会把卷当成 FAT12 解析。	  The cluster size is the largest that still keeps at least 4085 clusters; one step larger and firmware would parse the volume as FAT12.
+fat.autoSize	自动定尺寸: 文件 {0} 字节 + 2 MiB 余量 → {1} 字节	auto size: {0} bytes of files + 2 MiB slack → {1} bytes
+fat.autoSizeBumped	  数据太少，自动尺寸已抬到 FAT16 的最小镜像 {0} 字节（否则簇数不足 4085，固件会按 FAT12 解析）。	  Too little data: the automatic size was raised to the smallest FAT16 image, {0} bytes (below that the cluster count falls under 4085 and firmware would parse the volume as FAT12).
+fat.entry	  {0} → {1}（{2}，{3} 字节，{4} 簇）	  {0} → {1} ({2}, {3} bytes, {4} clusters)
+fat.kindDir	目录	dir
+fat.kindFile	文件	file
+fat.failed	引导盘生成失败（tools/mkfat.ts）	boot disk generation failed (tools/mkfat.ts)
