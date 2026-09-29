@@ -1,0 +1,59 @@
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 TSIE
+
+一键拉取并拼装 TSIE 的引导素材：OpenSBI 固件 + EDK II (UEFI) 固件 + Alpine 内核/initramfs。
+这是 tools/bootstrap.sh 的 PowerShell 孪生，面向原生 Windows 的 pwsh。
+
+设计约定（照着改之前先读）：
+  * 版本号一律动态发现，不硬编码。Alpine 的包更新很快，写死的 URL 会 404
+    （README 里那个 linux-lts-6.18.44 在 2026-09-26 就已经是 404）。
+  * 所有产物落在 gitignored 目录（firmware\、tmp\），不得入库：
+    这些是 GPL-2.0 / 第三方产物，本项目是 Apache-2.0。
+  * 下载全部带重试。本机网络对 dl-cdn / deb.debian.org 是间歇性可达的，
+    同一个域名前一刻成功、后一刻 21 秒超时，不带重试必然随机失败。
+  * GitHub release 资产直连不通（github.com 能到，但 302 之后的
+    objects.githubusercontent.com 超时），所以需要镜像。镜像属代理转发，
+    脚本会先征求同意（-Mirror 可预先授权）。
+  * 下载统一走 curl.exe（Windows 自带的就够），与 .sh 版本共用同一套旗标语义
+    （--retry / --noproxy / -4），避免 Invoke-WebRequest 的差异。
+  * cpio 打包复用项目自己的 tools/initramfs.ts（tsx 跑）：PowerShell 与 Git Bash
+    都没有原生 cpio，没必要造第三份实现。
+
+用法：
+  pwsh tools/bootstrap.ps1                      # 交互：GitHub 不通时询问是否用镜像
+  pwsh tools/bootstrap.ps1 -Help                # 帮助；也可以 --help / -h / -?
+  pwsh tools/bootstrap.ps1 -Mirror              # 预先授权镜像（无人值守）
+  pwsh tools/bootstrap.ps1 -NoMirror            # 禁止镜像；OpenSBI 只从本地已有文件取
+  pwsh tools/bootstrap.ps1 -NoEdk2              # 跳过 EDK II（省约 70 MB）
+  pwsh tools/bootstrap.ps1 -Decompress          # 预先同意解压 initramfs（无人值守）
+  pwsh tools/bootstrap.ps1 -NoDecompress        # 不要解压，只留 .cpio.gz
+  pwsh tools/bootstrap.ps1 -Alpine v3.24        # 固定 Alpine 分支（默认 latest-stable）
+  pwsh tools/bootstrap.ps1 -Dir tmp/boot-pinned # 换输出目录（默认 tmp\boot）
+  pwsh tools/bootstrap.ps1 -Lang en             # 输出英文（默认跟随系统区域；也可用 TSIE_LANG）
+
+  传 -Dir 时用正斜杠或相对路径：PowerShell 会把双引号里的 \t、\n 当转义序列，
+  写 -Dir G:\tmp\ps-test 会静默变成 G:tmpps-test（\t = 制表符）。
+
+EDK II 需要解 .deb（ar 归档）：Windows 自带的 bsdtar 优先，7-Zip 兜底；
+两者都没有就跳过 EDK II 并警告（本脚本不从第三方仓库借 bsdtar，.sh 那边才有这一步）。
+
+注意事项：
+  * 需要 PowerShell 7+（pwsh），不支持 Windows 自带的 powershell.exe 5.1：
+    检测到 5.1 会打印一段安装提示、等 5 秒后以退出码 1 结束。
+  * 本脚本刻意带 UTF-8 BOM：5.1 按 ANSI/GBK 读无 BOM 的 UTF-8 脚本会直接抛语法错误，
+    那样它连上面那句安装提示都读不到，用户只会看到乱码报错。
+  * 已知坑：本机 dl-cdn 会重定向且速度在 45 KB/s~5 KB/s 间摆动，故下载走 -C - 断点续传，
+    并按最终响应的 Content-Length 判完成；.part 还记录来源 URL，换源即重下。
+
+依赖（缺失时的后果已注明）：
+  必需  curl.exe              Windows 10 1803+ 自带，或装 Git for Windows
+  必需  tar.exe               必须是 Windows 自带的那个 bsdtar，不是 Git 的 GNU tar。
+                              两者同名但能力不同：本脚本显式取 System32\tar.exe，
+                              因为 PATH 里 Git 的 tar.exe 排在前面且不支持 ar。
+  必需  node + tsx            打 initramfs 用 tools/initramfs.ts，而 tsx 是 devDependency
+                              （先 npm install）。这一步不经过磁盘：直接从 tar 头里
+                              读 mode/linkname 组装 cpio，所以 "Windows 建不了符号链接、
+                              存不住执行位" 都不影响它。已不再需要 Python。
+  可选  7-Zip                 只有 EDK II 拆 ar 会用到，且仅在 bsdtar 不可用时兜底。
+                              两者都没有就自动跳过 EDK II 并警告。
+  不需要 xz                   OpenSBI 是 .tar.xz，但 tar/bsdtar 自己经 liblzma 解压。
