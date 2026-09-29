@@ -98,8 +98,9 @@ LANG_SEL="${TSIE_LANG:-$(detect_lang)}"
 load_messages "$LANG_SEL"
 
 log()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[33m警告:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
+# 前缀本身也走文案表：写死「警告:」的话，英文运行里会突然冒出一句中文
+warn() { printf '\033[33m%s\033[0m %s\n' "$(msg warn.prefix)" "$*" >&2; }
+die()  { printf '\033[31m%s\033[0m %s\n' "$(msg error.prefix)" "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -113,7 +114,7 @@ while [ $# -gt 0 ]; do
     --lang)      # 立即校验并重载：这样「--lang en 后面跟个错参数」报的也是英文
                  case "$2" in
                    zh|en) LANG_SEL="$2"; load_messages "$LANG_SEL" ;;
-                   *) die "unknown --lang: $2 (expected zh or en)" ;;
+                   *) die "$(msg i18n.badLang "$2")" ;;
                  esac
                  shift ;;
     -h|--help)   DO_HELP=1 ;;   # 真打印在语言确定之后（否则 --lang en --help 会打成中文）
@@ -127,9 +128,13 @@ LANG_SEL="${LANG_SEL:-${TSIE_LANG:-}}"
 case "$LANG_SEL" in
   en|zh) ;;
   "") LANG_SEL="$(detect_lang)" ;;
-  *) die "unknown --lang: $LANG_SEL (expected zh or en)" ;;
+  *) die "$(msg i18n.badLang "$LANG_SEL")" ;;
 esac
 load_messages "$LANG_SEL"
+
+# 导给子进程（tools/initramfs.ts 等）：它们按同一张表输出，免得中英混着打。
+# 这里也顺带覆盖掉用户环境里可能已有的 TSIE_LANG —— 以本次选定的语言为准。
+export TSIE_LANG="$LANG_SEL"
 
 # 用法文本也是双语的，各一份文件（长文本塞进 TSV 的单元格里可读性太差）
 if [ "${DO_HELP:-0}" = 1 ]; then
@@ -621,7 +626,7 @@ bootstrap_alpine() {
   rm -rf "$t"
   local isz; isz=$(stat -c %s "$OUT_DIR/Image")
   [ "$isz" -gt 1000000 ] || die "$(msg alpine.imageTooSmall "$isz")"
-  log "  Image  ($isz B = $(awk "BEGIN{printf \"%.1f\", $isz/1048576}") MiB)"
+  log "  $(msg alpine.imageOk "$isz" "$(awk "BEGIN{printf \"%.1f\", $isz/1048576}")")"
 
   # --- initramfs：从 latest-releases.yaml 取 minirootfs（含官方 sha256 可校验）
   log "  $(msg alpine.readingYaml)"
@@ -684,7 +689,7 @@ bootstrap_alpine() {
       "$OUT_DIR/initramfs.cpio.gz" "$OUT_DIR/initramfs.cpio" \
       || die "$(msg alpine.decompressFailed)"
     local usz; usz=$(stat -c %s "$OUT_DIR/initramfs.cpio")
-    log "  initramfs.cpio     ($usz B，未压缩；引导更快)"
+    log "  $(msg alpine.decompressed "$usz")"
     INITRD_FILE="initramfs.cpio"
   else
     log "  $(msg alpine.decompressSkipped)"
@@ -723,7 +728,7 @@ main() {
 
 $(msg tail.title)
 
-  # Alpine + OpenSBI
+  # $(msg tail.alpineCmd)
 $(msg tail.earlycon)
 $initrd_note
 
