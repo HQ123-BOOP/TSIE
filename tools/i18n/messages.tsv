@@ -69,7 +69,7 @@ ar.downloadFailed	bsdtar 下载失败	bsdtar download failed
 ar.unusable	下载到的 bsdtar 无法使用（架构不符？）	The downloaded bsdtar does not run (wrong architecture?)
 
 # ---------------------------------------------------------------- ① OpenSBI
-stage.opensbi	① OpenSBI 固件	① OpenSBI firmware
+stage.opensbi	OpenSBI 固件	OpenSBI firmware
 opensbi.exists	已存在，跳过: {0}	Already present; skipping: {0}
 opensbi.directOk	GitHub 直连可用	GitHub is reachable directly
 opensbi.directDown	GitHub release 资产直连不可用	GitHub release assets are unreachable directly
@@ -83,7 +83,7 @@ opensbi.badArchive	OpenSBI tar.xz 下载不完整（tar 无法列出内容）—
 opensbi.noFwJump	解压后未找到 fw_jump.bin	fw_jump.bin not found after extraction
 
 # ---------------------------------------------------------------- ② EDK II
-stage.edk2	② EDK II (UEFI) 固件	② EDK II (UEFI) firmware
+stage.edk2	EDK II (UEFI) 固件	EDK II (UEFI) firmware
 edk2.skipped	已按 --no-edk2 跳过	Skipped (--no-edk2)
 edk2.skippedPs	已跳过（-NoEdk2）	Skipped (-NoEdk2)
 edk2.noListing	无法列出 Debian edk2 池目录，跳过 EDK II	Cannot list the Debian edk2 pool directory; skipping EDK II
@@ -104,10 +104,13 @@ edk2.inner	解内层 {0}...	Unpacking the inner {0}...
 edk2.innerFailed	解内层 {0} 失败	Failed to unpack the inner {0}
 edk2.dataIncomplete	.deb 内的 data.tar 不完整，重新下载 {0}	The data.tar inside the .deb is incomplete; re-download {0}
 edk2.notFound	未找到 {0}	Not found: {0}
+edk2.tramp	跳板 {0}（{1} 字节）：把 OpenSBI 的落点接到 pflash 上的固件	trampoline {0} ({1} bytes): connects OpenSBI's landing address to the firmware in pflash
+edk2.stripping	剥掉固件卷里的 LZMA 压缩层（否则固件自己解压要十分钟）...	Stripping the LZMA layer out of the firmware volume (otherwise the firmware spends ten minutes unpacking it)...
+edk2.stripFailed	剥 LZMA 失败（tools/uncompress-fv.ts）	Failed to strip the LZMA layer (tools/uncompress-fv.ts)
 edk2.badSize	尺寸不是 32 MiB（33554432），EDK II 可能拒绝该固件	The size is not 32 MiB (33554432); EDK II may reject this firmware
 
 # ---------------------------------------------------------------- ③ Alpine
-stage.alpine	③ Alpine 内核 + initramfs	③ Alpine kernel + initramfs
+stage.alpine	Alpine 内核 + initramfs	Alpine kernel + initramfs
 alpine.branch	Alpine 分支: {0}	Alpine branch: {0}
 alpine.noKernelList	无法列出 Alpine 内核包（网络间歇性，可重跑）	Cannot list Alpine kernel packages (the network here is intermittent; re-running usually works)
 alpine.kernel	内核包: {0}	Kernel package: {0}
@@ -117,7 +120,6 @@ alpine.extractImage	解出内核 Image（apk 内是 gzip 压缩的 vmlinuz，需
 alpine.imageOk	Image  ({0} B = {1} MiB)	Image  ({0} B = {1} MiB)
 alpine.badApk	apk 下载不完整（完整解压校验失败）—— 删掉 {0} 与同名 .part 后重跑	The apk is incomplete (a full extract fails) — delete {0} and its .part, then re-run
 alpine.apkUnpackFailed	apk 解压 boot/ 失败	Failed to unpack boot/ from the apk
-alpine.apkUnpackFailedPs	apk 解压失败	apk extraction failed
 alpine.noVmlinuz	apk 内未找到 vmlinuz	No vmlinuz inside the apk
 alpine.imageTooSmall	解出的 Image 太小（{0} B），可能不是内核	The extracted Image is too small ({0} B); it may not be a kernel
 alpine.readingYaml	读取 latest-releases.yaml 取 minirootfs 版本与校验值...	Reading latest-releases.yaml for the minirootfs version and checksum...
@@ -168,7 +170,6 @@ cpio.miniGz	mini 刻意不压缩（省掉内核 inflate 开销），请用 .cpio
 cpio.wrote	wrote {0}: {1} bytes (tar 条目 {2} → cpio 条目 {3})	wrote {0}: {1} bytes ({2} tar entries → {3} cpio entries)
 cpio.wroteCounts	可执行文件: {0} 个（其中来自归档 {1} 个），符号链接: {2} 个（均取自归档元数据，未经过磁盘）	executables: {0} ({1} of them from the archive), symlinks: {2} (all taken from archive metadata; nothing touched the disk)
 
-# 这些会出现在 bootstrap 运行的中途，所以必须跟着同一份语言走。
 # ------------------------------------------------- tools/mkfat.ts（FAT16 镜像构造：MBR + BPB + VFAT 长名）
 fat.usage	用法:\n  npx tsx tools/mkfat.ts <out.img> [--size=BYTES] [--part-type=0x0C] [--label=TSIE] NAME=HOSTPATH [NAME=HOSTPATH ...]\n\n  NAME        镜像内的路径，'/' 分隔，允许前导 '/'；中间目录会自动创建\n  HOSTPATH    宿主机上的文件，必须存在\n  --size      镜像总字节数（可带 K/M/G 后缀，1M = 1 MiB）；省略时自动：\n              文件总字节 + 2 MiB 余量，向上取整到整 MiB\n  --part-type MBR 分区类型字节，默认 0x0C（FAT16 LBA）；EDK II 的 ESP 传 0xEF\n  --label     卷标，最长 11 个字符，默认 TSIE\n\n磁盘布局: 扇区 0 是 MBR，分区从 LBA 2048（1 MiB 对齐）起；卷内 512 字节/扇区、\n  2 份 FAT、保留 1 扇区、根目录固定 512 项。簇大小自动挑：从 64 KiB 往下取第一个\n  让簇数仍 ≥ 4085 的值 —— 簇数低于 4085 时固件会按 FAT12 去解 12 位的 FAT 链。\n确定性: DOS 时间戳固定为 2026-01-01 00:00:00，卷序列号由卷标/卷扇区数/簇大小派生，\n  同样的输入两次构建得到逐字节相同的镜像。	Usage:\n  npx tsx tools/mkfat.ts <out.img> [--size=BYTES] [--part-type=0x0C] [--label=TSIE] NAME=HOSTPATH [NAME=HOSTPATH ...]\n\n  NAME        path inside the image, '/'-separated; a leading '/' is allowed and\n              intermediate directories are created automatically\n  HOSTPATH    a file on the host; it must exist\n  --size      total image size in bytes (K/M/G suffixes accepted, 1M = 1 MiB).\n              Omitted: sum of file sizes + 2 MiB slack, rounded up to a whole MiB\n  --part-type MBR partition type byte, default 0x0C (FAT16 LBA); pass 0xEF for an EDK II ESP\n  --label     volume label, at most 11 characters, default TSIE\n\nDisk layout: sector 0 is the MBR and the partition starts at LBA 2048 (1 MiB aligned);\n  inside the volume: 512-byte sectors, two FATs, one reserved sector, a fixed 512-entry\n  root directory. The cluster size is picked automatically: the largest value from 64 KiB\n  down that still leaves at least 4085 clusters, because below 4085 clusters firmware\n  parses the 12-bit FAT chain instead.\nDeterministic: DOS timestamps are fixed at 2026-01-01 00:00:00 and the volume serial is\n  derived from the label, volume sectors and cluster size, so the same input yields the\n  same bytes on every run.
 fat.errNameEmpty	镜像内的名字是空的（{0}）	the name inside the image is empty ({0})
@@ -203,3 +204,28 @@ fat.entry	  {0} → {1}（{2}，{3} 字节，{4} 簇）	  {0} → {1} ({2}, {3} 
 fat.kindDir	目录	dir
 fat.kindFile	文件	file
 fat.failed	引导盘生成失败（tools/mkfat.ts）	boot disk generation failed (tools/mkfat.ts)
+
+# --------------------------------------------- 引导路拆分（tools/bootstrap-*.sh / .ps1）
+# 三个入口各管一条引导路：direct（OpenSBI 直接跳转内核）、uboot（U-Boot 拉内核）、
+# edk2（UEFI 里把 Linux 拉起来）。步骤序号（①②③）写在调用处而不是这里 ——
+# 每条路要的素材不一样，编号自然不同。
+common.noUsage	找不到用法文本 {0}	usage text not found: {0}
+stage.uboot	U-Boot 固件	U-Boot firmware
+stage.disk	U-Boot 的 FAT 引导盘	the U-Boot FAT boot disk
+stage.esp	ESP（UEFI 系统分区）	ESP (EFI system partition)
+
+uboot.noListing	无法列出 Debian u-boot 池目录	Cannot list the Debian u-boot pool directory
+uboot.latest	最新包: {0}	Latest package: {0}
+uboot.downloadFailed	U-Boot 下载失败	U-Boot download failed
+uboot.noTool	没有可用的拆包工具（bsdtar / 7-Zip），跳过 U-Boot	No usable unpacker (bsdtar / 7-Zip); skipping U-Boot
+uboot.notFound	包内未找到 qemu-riscv64_smode/uboot.elf	qemu-riscv64_smode/uboot.elf not found inside the package
+uboot.exists	已存在，跳过: uboot.elf	Already present; skipping: uboot.elf
+uboot.extracted	从 {0} 解出 uboot.elf（{1} 字节）	Extracted uboot.elf from {0} ({1} bytes)
+uboot.diskMade	FAT 引导盘 {0}（{1} MiB）	FAT boot disk {0} ({1} MiB)
+
+esp.made	ESP {0}（{1} MiB）	ESP {0} ({1} MiB)
+
+tail.ubootCmd	U-Boot 拉内核（OpenSBI → U-Boot → 内核）	U-Boot fetches the kernel (OpenSBI → U-Boot → kernel)
+tail.ubootNote	  # U-Boot 自己去 virtio 盘上按**文件**读（fatload），再用 booti 交接 ——\n  # 与"直接跳转"的区别就在这里：内核不是固件塞进去的，是引导器读进去的。\n  # 命令脚本 uboot-cmd.txt 是自动生成的，想改引导行为就改它（比如换成 bootefi）。	  # U-Boot reads the kernel and initramfs off the virtio disk as **files** (fatload)\n  # and hands over with booti. That is the whole difference from the direct path: the\n  # kernel is not placed by the firmware, the bootloader loads it.\n  # uboot-cmd.txt is generated for you; edit it to change the boot behaviour.
+tail.edk2Cmd	EDK II (UEFI)：内核与 initramfs 在 ESP 上	EDK II (UEFI): kernel and initramfs live on the ESP
+tail.edk2Note	  # 固件启动后若没有可引导项，会落到自带的 UEFI Shell，自动执行 ESP 上的\n  # startup.nsh：先用 initrd 命令注册 initramfs，再把内核的 EFI stub 当普通\n  # EFI 程序启动（命令行作为参数传进去）。全程不需要第三方引导器。	  # With nothing bootable the firmware falls back to its own UEFI Shell, which runs\n  # startup.nsh from the ESP: the initrd command registers the initramfs first, then the\n  # kernel's EFI stub is started like any other EFI application, with the command line\n  # passed as arguments. No third-party bootloader is involved.

@@ -1,0 +1,43 @@
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 TSIE
+
+引导路 ②：U-Boot 拉内核。
+
+  OpenSBI fw_jump  ──▶  U-Boot（S 模式负载）──从 FAT 盘 fatload──▶  内核 Image + initramfs
+
+比直接跳转多一层真实的引导器：U-Boot 自己去 virtio 盘上按**文件**读内核与 initramfs
+（fatload），再用 booti 交接（命令行走 bootargs）。产物比 ① 多两样：U-Boot 固件，以及
+一块装了内核与 initramfs 的 FAT16 盘。
+
+盘由项目自己的 tools/mkfat.ts 手写生成 —— 不借 mtools / mkfs.vfat，Windows 上也没有它们。
+
+设计约定（照着改之前先读）：
+  * 版本号一律动态发现。U-Boot 取自 Debian 的 u-boot-qemu 包（池目录里取最新版本），
+    包里有两份 ELF，要的是 qemu-riscv64_smode/uboot.elf（由 SBI 固件引导的那份）。
+  * 所有产物落在 gitignored 目录（firmware/、tmp/），不得入库：U-Boot 是 GPL-2.0，
+    本项目是 Apache-2.0。
+  * 下载全部带重试；GitHub release 资产直连不通时用镜像，用之前先征求同意。
+
+用法：
+  tools/bootstrap-uboot.sh                 # 交互：GitHub 不通时询问是否用镜像
+  tools/bootstrap-uboot.sh --mirror        # 预先授权镜像（无人值守）
+  tools/bootstrap-uboot.sh --no-mirror     # 禁止镜像
+  tools/bootstrap-uboot.sh --decompress    # 预先同意解压 initramfs（无人值守；引导快 38.9%）
+  tools/bootstrap-uboot.sh --no-decompress # 不要解压，只留 .cpio.gz
+  tools/bootstrap-uboot.sh --alpine v3.24  # 固定 Alpine 分支（默认 latest-stable）
+  tools/bootstrap-uboot.sh --dir DIR       # 换输出目录（默认 tmp/boot）
+  tools/bootstrap-uboot.sh --lang en       # 输出英文（默认跟随系统区域）
+
+  PowerShell 侧参数同义、写法不同：pwsh tools/bootstrap-uboot.ps1 -Help
+
+依赖（缺失时的后果已注明）：
+  必需  curl / tar / sha256sum   Git Bash 自带
+  必需  node + tsx               打 initramfs、生成 FAT 盘都走项目自己的 TS 工具
+  可选  bsdtar / 7-Zip           解 U-Boot 的 .deb（ar 归档）用；系统已有就免下载
+                                 （Windows 自带的 C:\Windows\System32\tar.exe 就是 bsdtar）。
+                                 都没有时会征求同意，从第三方仓库拉一份静态 bsdtar 到
+                                 临时目录，用完即删。
+
+另外两条引导路：
+  tools/bootstrap-direct.sh      OpenSBI 直接跳转内核（最短、最快）
+  tools/bootstrap-edk2.sh        EDK II (UEFI) 固件 + ESP（UEFI 里把 Linux 拉起来）

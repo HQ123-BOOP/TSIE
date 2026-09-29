@@ -2,7 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 TSIE
 #
-# 一键拉取并拼装 TSIE 的引导素材：OpenSBI 固件 + EDK II (UEFI) 固件 + Alpine 内核/initramfs。
+# 三个引导脚本的共享实现（**不是**可执行入口，只被 source）：
+#
+#   tools/bootstrap-direct.sh    OpenSBI fw_jump 直接跳转内核
+#   tools/bootstrap-uboot.sh     OpenSBI → U-Boot → 内核（U-Boot 自己从 FAT 盘上拉）
+#   tools/bootstrap-edk2.sh      EDK II (UEFI) 固件 + ESP（UEFI 里把 Linux 拉起来）
+#
+# 入口脚本只负责：声明这条引导路要哪些素材、按什么顺序取、最后打印哪几条引导命令。
+# 取素材的机制（下载重试 / 镜像 / ar 拆包 / cpio / FAT）与文案都写在这里，只有一份。
 #
 # 设计约定（照着改之前先读）：
 #   * 版本号一律动态发现，不硬编码。Alpine 的包更新很快，写死的 URL 会 404
@@ -15,18 +22,8 @@
 #     objects.githubusercontent.com 超时），所以需要镜像。镜像属代理转发，
 #     脚本会先征求同意（--mirror 可预先授权）。
 #
-# 用法：
-#   tools/bootstrap.sh                 # 交互：GitHub 不通时询问是否用镜像
-#   tools/bootstrap.sh --mirror        # 预先授权镜像（无人值守）
-#   tools/bootstrap.sh --no-mirror     # 禁止镜像；OpenSBI 只从本地已有文件取
-#   tools/bootstrap.sh --no-edk2       # 跳过 EDK II（省约 70 MB）
-#   tools/bootstrap.sh --decompress    # 预先同意解压 initramfs（无人值守）
-#   tools/bootstrap.sh --no-decompress # 不要解压，只留 .cpio.gz
-#   tools/bootstrap.sh --alpine v3.24  # 固定 Alpine 分支（默认 latest-stable）
-#   tools/bootstrap.sh --dir DIR       # 换输出目录（默认 tmp/boot）
-#
-# EDK II 需要解 .deb（ar 归档）：系统自带的 bsdtar / 7-Zip 优先；都没有时会提示
-# 「将从第三方仓库下载静态 bsdtar，按原样提供、无任何担保」，同意才下，拒绝即退出。
+# EDK II / U-Boot 都要解 .deb（ar 归档）：系统自带的 bsdtar / 7-Zip 优先；都没有时
+# 会提示「将从第三方仓库下载静态 bsdtar，按原样提供、无任何担保」，同意才下，拒绝即退出。
 #
 # 依赖（缺失时的后果已注明）：
 #   必需  curl / tar / sha256sum   Git Bash 自带
@@ -35,16 +32,19 @@
 #                                  直接从 tar 头里读 mode/linkname 组装 cpio，所以
 #                                  "Windows 建不了符号链接 / 存不住执行位"都不影响它。
 #                                  已不再需要 Python。
-#   可选  bsdtar / 7-Zip           只有 EDK II 需要：.deb 是 ar 归档，而 Git Bash 的
+#   可选  bsdtar / 7-Zip           只有解 .deb 需要：它是 ar 归档，而 Git Bash 的
 #                                  GNU tar 不支持 ar。系统里已有就免下载（Windows
 #                                  自带的 C:\Windows\System32\tar.exe 就是 bsdtar）；
 #                                  都没有时会征求同意，从第三方仓库拉一份静态 bsdtar
 #                                  到临时目录，用完即删。
 #   不需要 xz                      OpenSBI 是 .tar.xz，但 tar 自己经 liblzma 解压。
+#
+# 用法文本在 tools/i18n/usage.<入口名>.<语言>.txt，由入口脚本用 bs_print_usage 打印。
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 本文件在 tools/lib/ 下，仓库根是再上两级
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT_DIR="$REPO_ROOT/tmp/boot"
 FW_DIR="$REPO_ROOT/firmware"
 # Alpine 分支：默认用 latest-stable 别名 —— 语义正确，且不会随发行版推进而失效。
@@ -56,6 +56,7 @@ MIRROR_MODE="ask"     # ask | yes | no
 DECOMPRESS="ask"      # ask | yes | no：是否额外产出一份未压缩 initramfs
 DO_EDK2=1
 INITRD_FILE="initramfs.cpio.gz"   # 最终推荐用哪一份引导（解压成功则换成 .cpio）
+EDK2_CODE_FILE="RISCV_VIRT_CODE.fd"   # EDK II 那条路用哪份 CODE 固件（剥过 LZMA 则换成 .nocomp.fd）
 
 # ---------------------------------------------------------------- 语言 / i18n
 #
@@ -102,55 +103,72 @@ log()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m %s\n' "$(msg warn.prefix)" "$*" >&2; }
 die()  { printf '\033[31m%s\033[0m %s\n' "$(msg error.prefix)" "$*" >&2; exit 1; }
 
-while [ $# -gt 0 ]; do
+# 用法文本也是双语的，每个入口各一份（长文本塞进 TSV 的单元格里可读性太差）。
+# BOOT_PATH 由入口脚本在 source 之前设好（direct / uboot / edk2）。
+bs_print_usage() {
+  local f="$REPO_ROOT/tools/i18n/usage.${BOOT_PATH:-direct}.$LANG_SEL.txt"
+  [ -f "$f" ] || die "$(msg common.noUsage "$f")"
+  cat "$f"
+}
+
+# 公共参数解析：入口脚本在**自己的** case 里对认不出来的参数调用它。
+#   bs_arg_common "$@"   →  认得就处理并设 BS_CONSUMED（1 或 2），返回 0；不认得返回 1。
+# 用 BS_CONSUMED 而不是在函数里 shift：bash 的函数改不了调用者的位置参数。
+bs_arg_common() {
+  BS_CONSUMED=1
   case "$1" in
     --mirror)    MIRROR_MODE="yes" ;;
     --no-mirror) MIRROR_MODE="no" ;;
-    --no-edk2)   DO_EDK2=0 ;;
-    --decompress)    DECOMPRESS="yes" ;;
-    --no-decompress) DECOMPRESS="no" ;;
-    --alpine)    ALPINE_BRANCH="$2"; shift ;;
-    --dir)       OUT_DIR="$2"; shift ;;
+    --alpine)    ALPINE_BRANCH="$2"; BS_CONSUMED=2 ;;
+    --dir)       OUT_DIR="$2"; BS_CONSUMED=2 ;;
     --lang)      # 立即校验并重载：这样「--lang en 后面跟个错参数」报的也是英文
-                 case "$2" in
+                 case "${2:-}" in
                    zh|en) LANG_SEL="$2"; load_messages "$LANG_SEL" ;;
-                   *) die "$(msg i18n.badLang "$2")" ;;
+                   *) die "$(msg i18n.badLang "${2:-}")" ;;
                  esac
-                 shift ;;
-    -h|--help)   DO_HELP=1 ;;   # 真打印在语言确定之后（否则 --lang en --help 会打成中文）
-    *) die "$(msg common.unknownArg "$1")" ;;
+                 BS_CONSUMED=2 ;;
+    -h|--help)   BS_DO_HELP=1 ;;   # 真打印在语言确定之后（否则 --lang en --help 会打成中文）
+    *) return 1 ;;
   esac
-  shift
-done
+  return 0
+}
 
-# 语言来源优先级：--lang > TSIE_LANG > 系统区域
-LANG_SEL="${LANG_SEL:-${TSIE_LANG:-}}"
-case "$LANG_SEL" in
-  en|zh) ;;
-  "") LANG_SEL="$(detect_lang)" ;;
-  *) die "$(msg i18n.badLang "$LANG_SEL")" ;;
-esac
-load_messages "$LANG_SEL"
+# 参数解析收尾：定语言、导出给子进程、需要就打用法。入口在自己循环结束后调用一次。
+bs_args_done() {
+  # 语言来源优先级：--lang > TSIE_LANG > 系统区域
+  LANG_SEL="${LANG_SEL:-${TSIE_LANG:-}}"
+  case "$LANG_SEL" in
+    en|zh) ;;
+    "") LANG_SEL="$(detect_lang)" ;;
+    *) die "$(msg i18n.badLang "$LANG_SEL")" ;;
+  esac
+  load_messages "$LANG_SEL"
 
-# 导给子进程（tools/initramfs.ts 等）：它们按同一张表输出，免得中英混着打。
-# 这里也顺带覆盖掉用户环境里可能已有的 TSIE_LANG —— 以本次选定的语言为准。
-export TSIE_LANG="$LANG_SEL"
+  # 导给子进程（tools/initramfs.ts 等）：它们按同一张表输出，免得中英混着打。
+  # 这里也顺带覆盖掉用户环境里可能已有的 TSIE_LANG —— 以本次选定的语言为准。
+  export TSIE_LANG="$LANG_SEL"
 
-# 用法文本也是双语的，各一份文件（长文本塞进 TSV 的单元格里可读性太差）
-if [ "${DO_HELP:-0}" = 1 ]; then
-  cat "$REPO_ROOT/tools/i18n/usage.$LANG_SEL.txt"
-  exit 0
-fi
+  if [ "${BS_DO_HELP:-0}" = 1 ]; then
+    bs_print_usage
+    exit 0
+  fi
+}
 
-need() { command -v "$1" >/dev/null 2>&1 || die "$(msg common.missingCmd "$1")"; }
-# 注意：不检查 xz。OpenSBI 是 .tar.xz，但 `tar -xf` 自己会经 liblzma 解压，
-# 不需要独立的 xz 命令（实测 GNU tar 1.35 直接解开）。ps1 侧同理，从未依赖它。
-for c in curl tar sha256sum node; do need "$c"; done
-# 不再依赖 Python：initramfs 由 tools/initramfs.ts 直接 tar→cpio（见下），复用项目
-# 自己的工具链 —— tsx 本来就在 devDependencies 里，跑模拟器也要用它。
-# 提前检查，别等下载完 70 MB 才报缺工具。
-TSX="$REPO_ROOT/node_modules/.bin/tsx"
-[ -x "$TSX" ] || die "$(msg common.missingTsx "$TSX")"
+# 依赖检查与目录准备。入口解析完参数、确定要干活之后调用一次。
+bs_init() {
+  need() { command -v "$1" >/dev/null 2>&1 || die "$(msg common.missingCmd "$1")"; }
+  # 注意：不检查 xz。OpenSBI 是 .tar.xz，但 `tar -xf` 自己会经 liblzma 解压，
+  # 不需要独立的 xz 命令（实测 GNU tar 1.35 直接解开）。ps1 侧同理，从未依赖它。
+  for c in curl tar sha256sum node; do need "$c"; done
+  # 不再依赖 Python：initramfs 由 tools/initramfs.ts 直接 tar→cpio（见下），复用项目
+  # 自己的工具链 —— tsx 本来就在 devDependencies 里，跑模拟器也要用它。
+  # 提前检查，别等下载完 70 MB 才报缺工具。
+  TSX="$REPO_ROOT/node_modules/.bin/tsx"
+  [ -x "$TSX" ] || die "$(msg common.missingTsx "$TSX")"
+
+  mkdir -p "$OUT_DIR" "$FW_DIR"
+  build_ar_candidates
+}
 
 # ------------------------------------------------- EDK II 的 ar 拆包工具选择
 #
@@ -302,9 +320,6 @@ trap cleanup_borrowed EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-
-mkdir -p "$OUT_DIR" "$FW_DIR"
-build_ar_candidates
 
 # ---------------------------------------------------------------- 下载（重试 + 续传 + 多源）
 
@@ -483,7 +498,6 @@ pick_mirror() {  # pick_mirror [用于测速的 URL，默认 OpenSBI 资产]
 # ---------------------------------------------------------------- ① OpenSBI 固件
 
 bootstrap_opensbi() {
-  log "$(msg stage.opensbi)"
   local rel="riscv-software-src/opensbi/releases/download/v1.9/opensbi-1.9-rv-bin.tar.xz"
   local url="https://github.com/${rel}"
   local tarball="$FW_DIR/opensbi-1.9-rv-bin.tar.xz"
@@ -525,7 +539,6 @@ bootstrap_opensbi() {
 # --------------------------------------------------------------- ② EDK II 固件
 
 bootstrap_edk2() {
-  log "$(msg stage.edk2)"
   [ "$DO_EDK2" = 1 ] || { log "  $(msg edk2.skipped)"; return 0; }
 
   # Debian 的 qemu-efi-riscv64 包里就是 32 MiB 的 CODE + VARS，尺寸天然合规。
@@ -540,43 +553,9 @@ bootstrap_edk2() {
   local deb="$OUT_DIR/$deb_name"
   fetch "$deb" "" "$pool$deb_name" || { warn "  $(msg edk2.downloadFailed)"; return 0; }
 
-  # 拆 ar 容器：先看系统里已有的（①bsdtar ②7-Zip），都没有才谈下载（③）。
-  if ! find_local_ar_tool "$deb"; then
-    acquire_bsdtar "$deb" || { warn "  $(msg edk2.noTool)"; return 0; }
-  fi
+  deb_unpack "$deb" './usr/share/qemu-efi-riscv64/' || { warn "  $(msg edk2.noTool)"; return 0; }
 
-  local x="$OUT_DIR/.deb-x"
-  rm -rf "$x"; mkdir -p "$x"
-  # bsdtar 与 7z 的调用语法不同：bsdtar 是 -xf ... -C，7z 是 x -y -o<dir>
-  if [ "$AR_TOOL_IS_7ZIP" = 1 ]; then
-    log "  $(msg edk2.unpack7z)"
-    "$AR_TOOL" x -y -o"$x" "$deb" >/dev/null 2>&1 || die "$(msg edk2.unpackFailed7z)"
-  else
-    log "  $(msg edk2.unpackBsdtar)"
-    "$AR_TOOL" -xf "$deb" -C "$x" 2>/dev/null || die "$(msg edk2.unpackFailedBsdtar)"
-  fi
-
-  # 内层可能是 data.tar / data.tar.xz（Debian 上游用 xz）
-  local data; data="$(ls "$x"/data.tar* 2>/dev/null | head -1)"
-  [ -n "$data" ] || die "$(msg edk2.noDataTar)"
-  case "$data" in
-    *.zst)
-      # GNU tar 未必编了 zstd，这一步交给 bsdtar（libarchive 带 zstd）
-      [ "$AR_TOOL_IS_7ZIP" = 0 ] || die "$(msg edk2.zstdNeedsBsdtar)"
-      log "  $(msg edk2.innerBsdtar "$(basename "$data")")"
-      "$AR_TOOL" -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null \
-        || die "$(msg edk2.innerFailed "$(basename "$data")")"
-      ;;
-    *)
-      # .tar / .tar.gz / .tar.xz：GNU tar 自己能解（经 liblzma / zlib），
-      # 不需要 ar 工具 —— 它只是读不了外层的 ar 而已。
-      log "  $(msg edk2.inner "$(basename "$data")")"
-      verify_archive "$data" || die "$(msg edk2.dataIncomplete "$deb_name")"
-      tar -xf "$data" -C "$x" ./usr/share/qemu-efi-riscv64/ 2>/dev/null || true
-      ;;
-  esac
-
-  local src="$x/usr/share/qemu-efi-riscv64"
+  local src="$DEB_X/usr/share/qemu-efi-riscv64"
   local f
   for f in RISCV_VIRT_CODE.fd RISCV_VIRT_VARS.fd; do
     [ -f "$src/$f" ] || die "$(msg edk2.notFound "$f")"
@@ -586,13 +565,34 @@ bootstrap_edk2() {
     # EDK II 强制要求两块各 32 MiB，尺寸不对就别让用户拿到一个会在固件里报错的产物
     [ "$sz" -eq 33554432 ] || warn "  $(msg edk2.badSize)"
   done
-  rm -rf "$x"
+  deb_cleanup
+
+  # 固件卷里压着 LZMA，剥掉后引导快约 5 倍（实测 23 分钟 → 2.5 分钟）。剥出来的那份
+  # 另存一个名字，原始产物留着（想对照或想自己试都行）。
+  if [ "${DO_STRIP:-1}" = 1 ]; then
+    strip_fv_lzma "$OUT_DIR/RISCV_VIRT_CODE.fd" "$OUT_DIR/RISCV_VIRT_CODE.nocomp.fd"
+    EDK2_CODE_FILE="RISCV_VIRT_CODE.nocomp.fd"
+  fi
+
+  build_edk2_tramp "$OUT_DIR/edk2-tramp.bin"
+}
+
+# EDK II 要一段 8 字节跳板才跑得起来，别删（删了只会看到 OpenSBI banner，之后一片安静）：
+#   * CLI 把 --kernel 装在 0x80200000 —— 那正是 OpenSBI fw_jump 的落点；
+#   * 而 EDK II 固件在 pflash 0x20000000（真实 virt 机器也是这个布局，见机器的 VIRT_FLASH）；
+#   * 两者之间差一次跳转，于是给 0x80200000 放两条指令把它接过去：
+#       lui t0, 0x20000    ; 机器码 200002b7
+#       jr  t0             ; 机器码 00028067（= jalr x0, 0(t0)）
+# 为什么不让模拟器直接跳 flash：fw_jump 的落点是编译进 OpenSBI 的，改不了；
+# 模拟器也不该为某一份固件特判一个地址。
+build_edk2_tramp() {  # build_edk2_tramp <输出文件>
+  printf '\xb7\x02\x00\x20\x67\x80\x02\x00' > "$1"
+  log "  $(msg edk2.tramp "$(basename "$1")" "$(stat -c %s "$1")")"
 }
 
 # ------------------------------------------------------------ ③ Alpine 内核 + initramfs
 
 bootstrap_alpine() {
-  log "$(msg stage.alpine)"
   local main="https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main/$ARCH/"
   local rel="https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/releases/$ARCH/"
 
@@ -696,53 +696,238 @@ bootstrap_alpine() {
   fi
 }
 
+# ------------------------------------------------- EDK II / U-Boot 共用的 .deb 拆包
+#
+# .deb 是 ar 归档，里面是 control.tar.* 与 data.tar.*（Debian 上游多数用 xz，新包开始
+# 用 zstd）。拆外层要 AR_TOOL（bsdtar 或 7-Zip），拆内层多数情况 GNU tar 自己就行，
+# 只有 zstd 得借 bsdtar（libarchive 带 zstd，GNU tar 未必编了）。
+# 解出来的内容留在 $DEB_X 下，调用者取完自己调 deb_cleanup。
+DEB_X=""
+
+deb_unpack() {  # deb_unpack <deb> <要解的 deb 内路径（目录以 / 结尾）>
+  local deb="$1" inner="$2"
+  local x="$OUT_DIR/.deb-x"; rm -rf "$x"; mkdir -p "$x"
+
+  # 拆 ar 容器：先看系统里已有的（①bsdtar ②7-Zip），都没有才谈下载（③）。
+  if ! find_local_ar_tool "$deb"; then
+    acquire_bsdtar "$deb" || return 1
+  fi
+
+  # bsdtar 与 7z 的调用语法不同：bsdtar 是 -xf ... -C，7z 是 x -y -o<dir>
+  if [ "$AR_TOOL_IS_7ZIP" = 1 ]; then
+    log "  $(msg edk2.unpack7z)"
+    "$AR_TOOL" x -y -o"$x" "$deb" >/dev/null 2>&1 || die "$(msg edk2.unpackFailed7z)"
+  else
+    log "  $(msg edk2.unpackBsdtar)"
+    "$AR_TOOL" -xf "$deb" -C "$x" 2>/dev/null || die "$(msg edk2.unpackFailedBsdtar)"
+  fi
+
+  local data; data="$(ls "$x"/data.tar* 2>/dev/null | head -1)"
+  [ -n "$data" ] || die "$(msg edk2.noDataTar)"
+  case "$data" in
+    *.zst)
+      [ "$AR_TOOL_IS_7ZIP" = 0 ] || die "$(msg edk2.zstdNeedsBsdtar)"
+      log "  $(msg edk2.innerBsdtar "$(basename "$data")")"
+      "$AR_TOOL" -xf "$data" -C "$x" "$inner" 2>/dev/null \
+        || die "$(msg edk2.innerFailed "$(basename "$data")")"
+      ;;
+    *)
+      log "  $(msg edk2.inner "$(basename "$data")")"
+      verify_archive "$data" || die "$(msg edk2.dataIncomplete "$(basename "$deb")")"
+      tar -xf "$data" -C "$x" "$inner" 2>/dev/null || true
+      ;;
+  esac
+  DEB_X="$x"
+  return 0
+}
+
+deb_cleanup() { [ -n "$DEB_X" ] && rm -rf "$DEB_X"; DEB_X=""; return 0; }
+
+# ------------------------------------------------------------- ④ U-Boot 固件
+#
+# U-Boot 作为 S 模式负载跑在 OpenSBI 之上，自己去 virtio 盘上把内核与 initramfs
+# 读进内存、再 booti 起来。Debian 的 u-boot-qemu 里有两份 ELF，别拿错：
+#   qemu-riscv64/uboot.elf        给 QEMU 当 -bios 直接跑（按裸机布局链接）
+#   qemu-riscv64_smode/uboot.elf  由 SBI 固件引导（我们要这个）
+UBOOT_POOL="https://deb.debian.org/debian/pool/main/u/u-boot/"
+
+bootstrap_uboot() {
+  if [ -f "$OUT_DIR/uboot.elf" ]; then
+    log "  $(msg uboot.exists)"
+    return 0
+  fi
+
+  local deb_name
+  deb_name=$(fetch_text "$UBOOT_POOL" 2>/dev/null \
+    | grep -oE 'u-boot-qemu_[^"]*_all\.deb' | sort -u | tail -1) || true
+  [ -n "$deb_name" ] || die "$(msg uboot.noListing)"
+  log "  $(msg uboot.latest "$deb_name")"
+
+  local deb="$OUT_DIR/$deb_name"
+  fetch "$deb" "" "$UBOOT_POOL$deb_name" || die "$(msg uboot.downloadFailed)"
+
+  deb_unpack "$deb" './usr/lib/u-boot/qemu-riscv64_smode/' || die "$(msg uboot.noTool)"
+  local src="$DEB_X/usr/lib/u-boot/qemu-riscv64_smode/uboot.elf"
+  [ -f "$src" ] || die "$(msg uboot.notFound)"
+  cp -f "$src" "$OUT_DIR/uboot.elf"
+  deb_cleanup
+  log "  $(msg uboot.extracted "$(basename "$deb_name" .deb)" "$(stat -c %s "$OUT_DIR/uboot.elf")")"
+}
+
+# ------------------------------------------------- 引导盘（FAT16，tools/mkfat.ts）
+#
+# U-Boot 的 fatload 与 UEFI 的 ESP 都按**文件**读盘，不认裸块号，所以盘上得有文件系统。
+# 镜像由 tools/mkfat.ts 手写生成（为什么不借 mtools / mkfs.vfat 见那个文件的注释），
+# 这里只负责把产物塞进去、再把"盘上叫什么"告诉调用者。
+FAT_PART_FAT16=0x0C
+FAT_PART_ESP=0xEF
+
+build_fat_disk() {  # build_fat_disk <输出.img> <分区类型> <镜像内路径=宿主文件...>
+  local img="$1" parttype="$2"; shift 2
+  "$TSX" "$REPO_ROOT/tools/mkfat.ts" "$img" "--part-type=$parttype" "$@" \
+    || die "$(msg fat.failed)"
+}
+
+# U-Boot 的命令脚本：扫盘 → 逐个 fatload 到内存 → booti。
+# 盘上就两个文件、名字固定，所以命令也固定（不现场拼字符串，便于对着 README 读）。
+#
+# ⚠️ booti 的第三个参数（设备树）不能省：这个构建的 qemu-riscv64_smode U-Boot 自己的
+# gd->fdt_blob 在交接时会变成 0（实测 "Working FDT set to 0" → "Device tree not found"），
+# 必须显式把 `$fdtcontroladdr`（U-Boot 启动时记下的控制 FDT 地址）传进去。
+uboot_cmd_script() {  # uboot_cmd_script <输出文件>
+  cat > "$1" <<EOF
+virtio scan
+part list virtio 0
+fatls virtio 0:1
+fatload virtio 0:1 \${kernel_addr_r} Image
+fatload virtio 0:1 \${ramdisk_addr_r} $(basename "$INITRD_FILE")
+setenv bootargs console=ttyS0 rdinit=/init earlycon=sbi
+booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdtcontroladdr}
+EOF
+}
+
+# U-Boot 那条路要的盘：内核 + initramfs + 命令脚本，一次做齐。
+bootstrap_uboot_disk() {
+  local img="$OUT_DIR/uboot-disk.img"
+  build_fat_disk "$img" "$FAT_PART_FAT16" \
+    "Image=$OUT_DIR/Image" \
+    "$(basename "$INITRD_FILE")=$OUT_DIR/$INITRD_FILE"
+  uboot_cmd_script "$OUT_DIR/uboot-cmd.txt"
+  log "  $(msg uboot.diskMade "$(basename "$img")" "$(( $(stat -c %s "$img") / 1048576 ))")"
+}
+
+# EDK II 的固件卷里压了一层 LZMA：原样交给模拟器，固件自己解压要十分钟（实测），
+# 而这一步纯属白烧指令。tools/uncompress-fv.ts 在盘上先把它剥掉，引导快约 5 倍。
+# 剥过的文件叫 RISCV_VIRT_CODE.nocomp.fd，两个入口打印命令时用的就是它。
+strip_fv_lzma() {  # strip_fv_lzma <原始.fd> <输出.fd>
+  log "  $(msg edk2.stripping)"
+  "$TSX" "$REPO_ROOT/tools/uncompress-fv.ts" "$1" "$2" \
+    || die "$(msg edk2.stripFailed)"
+}
+
+# EDK II 的 ESP：固件里有 UEFI Shell 与 `initrd` 命令（OvmfPkg/LinuxInitrdDynamicShellCommand），
+# 它把文件注册成 Linux initrd 的 device path，内核的 EFI stub 就会去读 —— 于是不需要
+# 任何第三方引导器。startup.nsh 是 shell 启动时自动执行的脚本，两条命令就够。
+bootstrap_esp() {
+  local esp="$OUT_DIR/esp.img"
+  local nsh="$OUT_DIR/startup.nsh"
+  {
+    echo '@echo -off'
+    echo "initrd \\$(basename "$INITRD_FILE")"
+    echo "\\Image console=ttyS0 rdinit=/init earlycon=sbi"
+  } > "$nsh"
+
+  build_fat_disk "$esp" "$FAT_PART_ESP" \
+    "startup.nsh=$nsh" \
+    "Image=$OUT_DIR/Image" \
+    "$(basename "$INITRD_FILE")=$OUT_DIR/$INITRD_FILE"
+  log "  $(msg esp.made "$(basename "$esp")" "$(( $(stat -c %s "$esp") / 1048576 ))")"
+}
+
 # ----------------------------------------------------------------------- 主流程
 
-main() {
+# 三个入口共用的开场与收尾（编号由入口自己排：每条路要的素材不一样）
+bs_banner() {
   log "$(msg common.banner)"
   log "$(msg common.repo "$REPO_ROOT")"
   log "$(msg common.outdir "$OUT_DIR")"
-  echo
-  bootstrap_opensbi
-  echo
-  bootstrap_edk2
-  echo
-  bootstrap_alpine
+}
+
+bs_list_artifacts() {
   echo
   log "$(msg common.done)"
   ls -la "$OUT_DIR" | awk 'NR>3 && $5>0 {printf "  %12d B  %s\n", $5, $9}'
+}
 
-  local fw="$FW_DIR/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin"
-  local rel_out="${OUT_DIR#$REPO_ROOT/}"
-  local fw_rel="firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin"
+bs_rel_out() { printf '%s' "${OUT_DIR#$REPO_ROOT/}"; }
+bs_fw_rel()  { printf '%s' 'firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin'; }
 
-  # 注释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
-  local initrd_note
+# initramfs 的解释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
+bs_initrd_note() {
   if [ "$INITRD_FILE" = "initramfs.cpio" ]; then
-    initrd_note="$(msg tail.uncompressed)"
+    msg tail.uncompressed
   else
-    initrd_note="$(msg tail.compressedHint "$rel_out")"
+    msg tail.compressedHint "$(bs_rel_out)"
   fi
+}
 
+# ① OpenSBI 直接跳转内核：fw_jump 落在 0x80200000，内核就在那儿等它
+tail_direct() {
   cat <<EOF
 
 $(msg tail.title)
 
   # $(msg tail.alpineCmd)
 $(msg tail.earlycon)
-$initrd_note
+$(bs_initrd_note)
 
   npx tsx src/cli.ts \\
-    --bios $fw_rel \\
-    --kernel $rel_out/Image --initrd $rel_out/$INITRD_FILE \\
+    --bios $(bs_fw_rel) \\
+    --kernel $(bs_rel_out)/Image --initrd $(bs_rel_out)/$INITRD_FILE \\
     --append "console=ttyS0 rdinit=/init earlycon=sbi" -n 1500000000 --stats
-
-  # $(msg tail.edk2)
-  npx tsx src/cli.ts \\
-    --flash-code $rel_out/RISCV_VIRT_CODE.fd \\
-    --flash-vars $rel_out/RISCV_VIRT_VARS.fd
 
 EOF
 }
 
-main
+# ② U-Boot 拉内核：OpenSBI → U-Boot → 由 U-Boot 自己从 FAT 盘上 fatload + booti
+tail_uboot() {
+  cat <<EOF
+
+$(msg tail.title)
+
+  # $(msg tail.ubootCmd)
+$(msg tail.ubootNote)
+
+  npx tsx src/cli.ts \\
+    --bios $(bs_fw_rel) \\
+    --kernel $(bs_rel_out)/uboot.elf \\
+    --disk $(bs_rel_out)/uboot-disk.img \\
+    --script $(bs_rel_out)/uboot-cmd.txt -n 3000000000 --stats
+
+EOF
+}
+
+# ③ EDK II：固件在 flash 里，内核与 initramfs 在 ESP 上。
+#
+# ⚠️ 必须带 --bios：CLI 要求 --kernel 或 --bios 至少有一个（只有 --flash-* 会被当成
+# 参数错误、打印帮助退出 2），而且 EDK II 在 RISC-V 上要用 SBI 的定时器/IPI/复位，
+# 少了 OpenSBI 根本走不到 UEFI 引导界面。旧版脚本打印的命令漏了这个开关，是坏的。
+tail_edk2() {
+  cat <<EOF
+
+$(msg tail.title)
+
+  # $(msg tail.edk2Cmd)
+$(msg tail.edk2Note)
+
+  # $(msg tail.edk2)
+  npx tsx src/cli.ts \\
+    --bios $(bs_fw_rel) \\
+    --kernel $(bs_rel_out)/edk2-tramp.bin \\
+    --flash-code $(bs_rel_out)/$EDK2_CODE_FILE \\
+    --flash-vars $(bs_rel_out)/RISCV_VIRT_VARS.fd \\
+    --disk $(bs_rel_out)/esp.img -n 3000000000 --stats
+
+EOF
+}
+

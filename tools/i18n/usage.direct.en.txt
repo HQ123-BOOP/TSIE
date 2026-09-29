@@ -1,0 +1,51 @@
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 TSIE
+
+Boot path ①: OpenSBI jumps straight into the kernel.
+
+  OpenSBI fw_jump.bin  ──jump──▶  kernel Image (+ initramfs)
+
+The shortest path: no firmware in between. fw_jump jumps to 0x80200000 by convention and
+the kernel is sitting there; the CLI hands the initramfs over with --initrd. It needs the
+least (OpenSBI plus the Alpine kernel/initramfs) and boots the fastest.
+
+Read this before changing the script:
+  * Versions are always discovered at run time, never hard-coded. Alpine's packages move
+    quickly and a pinned URL eventually 404s (the linux-lts-6.18.44 URL this README once
+    carried was already dead on 2026-09-26).
+  * Everything lands in gitignored directories (firmware/, tmp/) and must never be
+    committed: these are GPL-2.0 and other third-party artifacts, while this project is
+    Apache-2.0.
+  * Every download retries. This machine's network reaches dl-cdn and deb.debian.org only
+    intermittently - the same host succeeds one minute and times out 21 seconds later - so
+    retrying is not optional.
+  * GitHub release assets cannot be fetched directly here (github.com answers, but
+    objects.githubusercontent.com, which the 302 points at, times out), so a mirror is
+    needed. A mirror is a proxy relay, so the script asks first (--mirror pre-authorises it).
+
+Usage:
+  tools/bootstrap-direct.sh                 # interactive: asks about the mirror if GitHub is unreachable
+  tools/bootstrap-direct.sh --mirror        # pre-authorise the mirror (unattended)
+  tools/bootstrap-direct.sh --no-mirror     # forbid the mirror; take OpenSBI from local files only
+  tools/bootstrap-direct.sh --decompress    # pre-agree to unpacking the initramfs (unattended; boots 38.9% faster)
+  tools/bootstrap-direct.sh --no-decompress # do not unpack; keep only the .cpio.gz
+  tools/bootstrap-direct.sh --alpine v3.24  # pin the Alpine branch (default latest-stable)
+  tools/bootstrap-direct.sh --dir DIR       # use a different output directory (default tmp/boot)
+  tools/bootstrap-direct.sh --lang en       # English messages (default: follow the system locale)
+
+  The PowerShell twin takes the same options with its own spelling: pwsh tools/bootstrap-direct.ps1 -Help
+
+Dependencies (what happens when one is missing):
+  required  curl / tar / sha256sum  bundled with Git Bash
+  required  node + tsx              tools/initramfs.ts packs the initramfs, and tsx is a
+                                    devDependency (run npm install first). That step never
+                                    touches the disk: it reads mode and linkname straight
+                                    from the tar header, so neither "Windows cannot create
+                                    symlinks" nor "Windows cannot store execute bits"
+                                    affects it. Python is no longer needed.
+  not needed xz                     OpenSBI ships as .tar.xz, but tar decompresses it
+                                    through liblzma on its own.
+
+The other two boot paths:
+  tools/bootstrap-uboot.sh       OpenSBI → U-Boot → kernel (U-Boot fetches it from a FAT disk)
+  tools/bootstrap-edk2.sh        EDK II (UEFI) firmware plus an ESP (boots Linux from UEFI)

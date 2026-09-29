@@ -1,0 +1,42 @@
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 TSIE
+
+引导路 ③：EDK II (UEFI) 里把 Linux 拉起来。
+
+  EDK II 固件（CFI flash 里的 CODE + VARS）──BDS──▶  UEFI Shell
+      └─ 自动执行 ESP 上的 startup.nsh：先 initrd，再启动内核的 EFI stub
+
+这条路**不下载任何第三方引导器**。Debian 的 qemu-efi-riscv64 固件里自带：
+
+  * UEFI Shell（没有可引导项时 BDS 会落到它）；
+  * `initrd` 命令（OvmfPkg/LinuxInitrdDynamicShellCommand）—— 把盘上的文件注册成
+    Linux initrd 的 device path，内核的 EFI stub 便会去读它；
+  * 于是内核命令行可以像普通参数一样跟在 EFI 程序后面传进去。
+
+ESP（EFI 系统分区）是一块 FAT16 盘，上面三样东西：startup.nsh、Image（Alpine 内核，
+它带 EFI stub）、initramfs。盘由项目自己的 tools/mkfat.ts 生成。
+
+设计约定（照着改之前先读）：
+  * 这条路也要 OpenSBI（产物里的 `fw_jump.bin`）：一是模拟器的 CLI 要求 `--kernel` 或
+    `--bios` 至少有一个，二是 EDK II 在 RISC-V 上要用 SBI 的定时器/IPI/复位，
+    没有 SBI 固件根本走不到 UEFI 引导界面。所以打印的引导命令里两者都带。
+  * 版本号一律动态发现（EDK II 取自 Debian 的 qemu-efi-riscv64 包，Alpine 取自官方目录）。
+  * 所有产物落在 gitignored 目录（firmware/、tmp/），不得入库：EDK II 是第三方二进制，
+    本项目是 Apache-2.0。
+  * 两块 flash 各 32 MiB 是 EDK II 的硬要求，尺寸不对它会拒绝加载，脚本会核对。
+
+用法：
+  tools/bootstrap-edk2.sh                  # 交互：GitHub 不通时询问是否用镜像
+  tools/bootstrap-edk2.sh --mirror         # 预先授权镜像（无人值守）
+  tools/bootstrap-edk2.sh --no-mirror      # 禁止镜像
+  tools/bootstrap-edk2.sh --no-esp         # 只要固件，不建 ESP（也就不必取内核与 initramfs）
+  tools/bootstrap-edk2.sh --firmware-only  # 同上（等价写法，语义更直白）
+  tools/bootstrap-edk2.sh --alpine v3.24   # 固定 Alpine 分支（默认 latest-stable）
+  tools/bootstrap-edk2.sh --dir DIR        # 换输出目录（默认 tmp/boot）
+  tools/bootstrap-edk2.sh --lang en        # 输出英文（默认跟随系统区域）
+
+  PowerShell 侧参数同义、写法不同：pwsh tools/bootstrap-edk2.ps1 -Help
+
+另外两条引导路：
+  tools/bootstrap-direct.sh      OpenSBI 直接跳转内核（最短、最快）
+  tools/bootstrap-uboot.sh       OpenSBI → U-Boot → 内核（U-Boot 自己从 FAT 盘上拉）
