@@ -123,8 +123,22 @@ milliseconds instead of minutes.
 CI runs the same checks on every push to `main` and every pull request
 (`.github/workflows/ci.yml`): `typecheck`, `npm test`, `npm run build`, loading the built
 `dist/cli.js`, and `npm run demo` — on Ubuntu and Windows alike, with a single Node version
-(24, the active LTS). A second job enforces the SPDX headers and the ban on committing GPL or
-binary artifacts. Pushing a `v*` tag additionally builds and attaches an npm tarball to the
-GitHub Release (`.github/workflows/release.yml`), and the tag must match the version in
-`package.json`. The commands above are still what you run locally; CI only makes them
-non-optional.
+(24, the active LTS). A second job enforces the SPDX headers, the ban on committing GPL or
+binary artifacts, the UTF-8 BOM on every `.ps1`, the message catalogue (every key used, no
+dead keys, all six usage texts present), and that `-Help` / `--help` and the TypeScript tools
+answer in the selected language. Pushing a `v*` tag additionally builds and attaches an npm
+tarball to the GitHub Release (`.github/workflows/release.yml`), and the tag must match the
+version in `package.json`. The commands above are still what you run locally; CI only makes
+them non-optional.
+
+## Bootstrap scripts
+
+`tools/bootstrap-{direct,uboot,edk2}.{sh,ps1}` are one script per boot path (OpenSBI jumps
+straight into the kernel / U-Boot fetches the kernel from a FAT disk / Linux from EDK II).
+They share `tools/lib/bootstrap-common.{sh,ps1}` — downloads with resume, mirror probing,
+`.deb` unpacking and the message catalogue live there exactly once, so a fix belongs in the
+library, not in an entry. User-visible text comes from `tools/i18n/messages.tsv` (single
+source, `key<TAB>中文<TAB>English`) and the usage texts in `tools/i18n/usage.<path>.<lang>.txt`;
+never print a literal Chinese or English string from those scripts. Boot disks are generated
+by `tools/mkfat.ts` (hand-written FAT16/MBR, no mtools) and the initramfs by
+`tools/initramfs.ts`; both take their language from `TSIE_LANG`, which the scripts export.

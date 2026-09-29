@@ -38,7 +38,7 @@ or as a test bed for building RISC-V toolchains and operating systems.
 | **Display** | the virtio-gpu picture can be pushed live to a browser over WebSocket (dirty-rectangle deltas), and browser keystrokes are fed back to the guest |
 | **Firmware** | runs real firmware directly: measured OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) booting all the way to `login:`**, plus the EDK II (UEFI) boot chain (TianoCore logo on screen included). **SBI calls need an external OpenSBI — the built-in SBI firmware has been removed** |
 | **Loading** | ELF64 loading (vaddr/paddr offsets handled automatically), raw binaries, a flattened device tree (DTB) generator (with `rng-seed` entropy injection) |
-| **Tools** | one-shot fetch of all boot material (`tools/bootstrap.sh` / `.ps1`, bilingual), cpio initramfs packing (`tools/initramfs.ts`), **standalone executable builds (`npm run sea`)**, an instruction encoder (`tools/encoder.ts`), CPU profile summarising (`tools/prof-summary.ts`), instruction-level unit tests, CLI |
+| **Tools** | one bootstrap script per boot path (`tools/bootstrap-{direct,uboot,edk2}.sh` / `.ps1`, bilingual), cpio initramfs packing (`tools/initramfs.ts`), FAT16 boot-disk generation (`tools/mkfat.ts`), **standalone executable builds (`npm run sea`)**, an instruction encoder (`tools/encoder.ts`), CPU profile summarising (`tools/prof-summary.ts`), instruction-level unit tests, CLI |
 
 ## Quick start
 
@@ -49,30 +49,42 @@ npm run demo       # bare-metal "Hello, RISC-V 64!" (drives the UART directly, n
 npm run bench      # throughput benchmark
 ```
 
-### One-shot fetch of all boot material (do this before running real firmware)
+### Three boot paths, one script each (do this before running real firmware)
 
-Running OpenSBI / EDK II / Linux needs a few external pieces. `tools/bootstrap.sh` (Git Bash) and
-`tools/bootstrap.ps1` (**requires PowerShell 7+**: the 5.1 that ships with Windows is detected,
-prints an install hint and exits with code 1) fetch and assemble all of them, then print boot
-commands you can copy straight out of the terminal:
+Running real firmware and Linux needs a few external pieces. **Each boot path has its own
+independent script** — run the one you want, and it will not decide for you or drag in
+anything you do not need:
+
+| Boot path | Script (`.sh` = Git Bash, `.ps1` = PowerShell 7+) | What it fetches | Chain |
+| --- | --- | --- | --- |
+| ① OpenSBI jumps into the kernel | `tools/bootstrap-direct.sh` / `.ps1` | OpenSBI + kernel/initramfs | `fw_jump` ──jump──▶ kernel |
+| ② U-Boot fetches the kernel | `tools/bootstrap-uboot.sh` / `.ps1` | the above + U-Boot + a FAT boot disk | `fw_jump` → U-Boot ──fatload──▶ kernel |
+| ③ Linux from EDK II (UEFI) | `tools/bootstrap-edk2.sh` / `.ps1` | the above + EDK II firmware + an ESP | firmware → UEFI Shell ──startup.nsh──▶ kernel EFI stub |
+
+Each script prints boot commands you can copy straight out of the terminal. The shared machinery
+(retrying downloads with resume, mirror probing, `.deb` unpacking, the message catalogue) lives
+in `tools/lib/bootstrap-common.{sh,ps1}`, written once.
 
 ```bash
-tools/bootstrap.sh                 # interactive: asks whether to use a mirror when GitHub is unreachable
-tools/bootstrap.sh --no-edk2       # skip EDK II (saves about 70 MB)
-tools/bootstrap.sh --decompress    # pre-agree to decompressing the initramfs (unattended; boots 38.9% faster)
-tools/bootstrap.sh --help          # full usage (the content is the comment block at the top of the script)
+tools/bootstrap-direct.sh              # interactive: asks whether to use a mirror when GitHub is unreachable
+tools/bootstrap-direct.sh --help       # full usage (= tools/i18n/usage.direct.en.txt)
+tools/bootstrap-uboot.sh --decompress  # the U-Boot path: pre-agree to unpacking the initramfs (boots 38.9% faster)
+tools/bootstrap-edk2.sh --no-esp       # EDK II firmware only, no ESP
 
-# the PowerShell switches mean the same, only written differently: -Help / --help / -h all print help
-pwsh tools/bootstrap.ps1 -NoEdk2
-pwsh tools/bootstrap.ps1 -Help
+# the PowerShell switches mean the same, only written differently: -Help / --help / -h all print help.
+# PowerShell 7+ is required: the 5.1 that ships with Windows is detected, prints an install hint
+# and exits with code 1
+pwsh tools/bootstrap-uboot.ps1 -Decompress
+pwsh tools/bootstrap-edk2.ps1 -Help
 ```
 
-**Both scripts switch between Chinese and English**: `--lang en` / `-Lang en`, or the environment
+**All three switch between Chinese and English**: `--lang en` / `-Lang en`, or the environment
 variable `TSIE_LANG=en`, defaulting to the system locale (Chinese when it cannot tell).
-`--lang en --help` prints the English usage, and the `tools/initramfs.ts` called in between follows
-the same language too (the scripts pass the choice down through `TSIE_LANG`).
-The text has a **single source**, `tools/i18n/messages.tsv` (`key<TAB>Chinese<TAB>English`); TSV
-rather than JSON because bash / PowerShell / Node can all read it with zero dependencies.
+`--lang en --help` prints the English usage, and the `tools/initramfs.ts` and `tools/mkfat.ts`
+called in between follow the same language too (the scripts pass the choice down through
+`TSIE_LANG`). The text has a **single source**, `tools/i18n/messages.tsv`
+(`key<TAB>Chinese<TAB>English`); TSV rather than JSON because bash / PowerShell / Node can all
+read it with zero dependencies.
 
 Artifacts land in the gitignored `tmp/boot/` and `firmware/` — these are GPL-2.0 / third-party
 binaries and **must not enter git** (this project is Apache-2.0).
@@ -104,7 +116,7 @@ Binaries in the releases are at <https://github.com/HQ123-BOOP/TSIE/releases>.
 ### Booting OpenSBI (verified ✅)
 
 The emulator can run the real OpenSBI firmware directly (v1.9 measured working).
-(`tools/bootstrap.sh` / `.ps1` does all of this and unpacks it for you; the commands below are the
+(`tools/bootstrap-direct.sh` / `.ps1` does all of this and unpacks it for you; the commands below are the
 manual path.)
 
 ```bash
@@ -129,17 +141,40 @@ Source and build instructions are in the official repository:
 
 ### Booting U-Boot (verified ✅)
 
-It can run real U-Boot directly (as an S-mode payload) and let it drive a VirtIO block device:
+`tools/bootstrap-uboot.sh` / `.ps1` fetch the U-Boot firmware, the kernel and the initramfs in one
+go and assemble a FAT16 boot disk — U-Boot reads them off that disk **as files** (`fatload`) and
+hands over with `booti`:
 
 ```bash
-# unpack qemu-riscv64_smode/uboot.elf from Debian's u-boot-qemu package (keep it in tmp/, GPL-2.0 does not enter git)
-# attach a raw disk and use --script to inject commands into the U-Boot console:
-tsx src/cli.ts --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin \
-  --kernel tmp/uboot/uboot.elf --disk tmp/disk.raw --script <cmd-file> -n 60000000
+tools/bootstrap-uboot.sh      # OpenSBI + Alpine kernel/initramfs + U-Boot, plus the disk and command script
+npm run uboot                 # boots that set (a few minutes; you see the kernel come up)
 ```
 
-`--script` feeds every line of the file in as a console command, one at a time (with the autoboot
-stop key, for interactive firmware). Measured output:
+Measured (U-Boot 2025.01-3; the disk is generated by `tools/mkfat.ts`):
+
+```
+=> part list virtio 0
+  1  2048  53248  00000000-01  0c Boot
+=> fatls virtio 0:1
+ 22380544   Image
+  3543539   initramfs.cpio.gz
+=> fatload virtio 0:1 ${kernel_addr_r} Image
+22380544 bytes read in 37 ms (576.9 MiB/s)
+=> fatload virtio 0:1 ${ramdisk_addr_r} initramfs.cpio.gz
+3543539 bytes read in 7 ms (482.8 MiB/s)
+=> booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdtcontroladdr}
+...
+[    0.000000] Kernel command line: console=ttyS0 rdinit=/init earlycon=sbi
+```
+
+Two details worth remembering: the third `booti` argument (the device tree) **cannot be omitted** —
+in this build U-Boot's `gd->fdt_blob` turns into 0 at handover (measured: `Working FDT set to 0` →
+`Device tree not found`), so `${fdtcontroladdr}` has to be passed explicitly. And the FAT16 disk is
+written by this project itself (`tools/mkfat.ts`, no mtools / mkfs.vfat); what U-Boot reads back
+matches the host file byte for byte under `crc32`.
+
+To stop at the U-Boot prompt and type your own commands, empty `tmp/boot/uboot-cmd.txt` (or replace
+it). The driver-level self-test looks like this:
 
 ```
 => virtio scan
@@ -158,6 +193,50 @@ layout was checked against U-Boot's `virtio_mmio.h` one by one), and it advertis
 U-Boot download: the Debian package `u-boot-qemu` (`ftp.debian.org/debian/pool/main/u/u-boot/`),
 source: <https://github.com/u-boot/u-boot> (GPL-2.0 — do not commit the artifacts into an Apache-2.0
 repository).
+
+### Booting Linux from EDK II (UEFI) (verified ✅)
+
+`tools/bootstrap-edk2.sh` / `.ps1` fetch the EDK II firmware (CODE + VARS), the Alpine kernel and
+the initramfs, then assemble an ESP. The chain needs **no third-party bootloader at all** —
+everything it uses ships inside the firmware:
+
+```
+EDK II firmware ──nothing bootable, so it drops to its own UEFI Shell──▶ runs startup.nsh from the ESP:
+    initrd \initramfs.cpio.gz          # a firmware command: registers the file as the Linux initrd device path
+    \Image console=ttyS0 rdinit=/init earlycon=sbi   # the kernel's EFI stub, command line passed as arguments
+```
+
+Measured: the firmware finds the ESP and maps it as `FS0:`, runs `startup.nsh`, and the kernel
+boots all the way to a shell:
+
+```
+[  121.389155] Freeing unused kernel image (initmem) memory: 2300K
+[  121.396480] Run /init as init process
+~ #
+```
+
+Two traps the script already handles:
+
+* **An 8-byte trampoline is required.** The CLI places `--kernel` at 0x80200000 — exactly where
+  OpenSBI's `fw_jump` lands — while the EDK II firmware sits in pflash at 0x20000000, one jump away.
+  The script generates `tmp/boot/edk2-tramp.bin` (`lui t0, 0x20000; jr t0`). Without it you see the
+  OpenSBI banner and then nothing at all.
+* **The LZMA layer inside the firmware volume has to be stripped first.** Left in place, the firmware
+  spends ten minutes unpacking it (measured); the script calls `tools/uncompress-fv.ts` to produce
+  `RISCV_VIRT_CODE.nocomp.fd`, which boots about 5x faster (`--no-strip` turns it off).
+
+The script prints the boot command (`--bios` is mandatory: on RISC-V, EDK II needs SBI for its timer,
+IPIs and reset):
+
+```bash
+tsx src/cli.ts --bios fw_jump.bin --kernel tmp/boot/edk2-tramp.bin \
+  --flash-code tmp/boot/RISCV_VIRT_CODE.nocomp.fd --flash-vars tmp/boot/RISCV_VIRT_VARS.fd \
+  --disk tmp/boot/esp.img -n 3000000000 --stats
+```
+
+The EDK II setup screens are reachable too: press **ESC** in the firmware to enter UiApp (Device
+Manager / Boot Manager / Boot Maintenance Manager); measured, ConSplitter mirrors the menu text to
+the serial console.
 
 
 ### Booting Linux (Alpine, verified booting to a shell ✅)
@@ -282,8 +361,11 @@ tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --disk rootfs.ext4 \
   --append "console=ttyS0 root=/dev/vda rw" --gpu 1024x768 --pci \
   --display 8094 --input
 
-# run UEFI firmware (EDK II): CFI flash must be supplied as a CODE / VARS pair
-tsx src/cli.ts --flash-code RISCV_VIRT_CODE.fd --flash-vars RISCV_VIRT_VARS.fd
+# run UEFI firmware (EDK II): CFI flash must be supplied as a CODE / VARS pair, and an 8-byte
+# trampoline has to connect OpenSBI's landing address (0x80200000) to the firmware in pflash
+# (0x20000000) — see "Booting Linux from EDK II (UEFI)"
+tsx src/cli.ts --bios fw_jump.bin --kernel edk2-tramp.bin \
+  --flash-code RISCV_VIRT_CODE.nocomp.fd --flash-vars RISCV_VIRT_VARS.fd --disk esp.img
 
 # share a host directory with the guest (virtio-9p; on the guest side mount -t 9p ... hostshare /mnt)
 tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --disk rootfs.ext4 \
@@ -382,9 +464,11 @@ src/
 ├── machine.ts            assembles the virt machine and owns the main loop
 ├── index.ts              public API exports
 └── cli.ts                command-line entry point
-tools/bootstrap.sh        one-shot fetch of all boot material (OpenSBI + EDK II + Alpine kernel/initramfs)
-tools/bootstrap.ps1       the same, PowerShell 7 version (both scripts are bilingual, see tools/i18n/)
-tools/i18n/               message table messages.tsv + usage text (one per language, shared by three consumers)
+tools/bootstrap-direct.sh  ① OpenSBI jumps straight into the kernel (the shortest path)
+tools/bootstrap-uboot.sh   ② U-Boot fetches the kernel (fatload from a FAT disk)
+tools/bootstrap-edk2.sh    ③ EDK II (UEFI) firmware + an ESP (boots Linux from UEFI)
+tools/lib/                 what all three entries share (downloads, mirror probing, .deb unpacking, messages)
+tools/i18n/                the message catalogue messages.tsv + six usage texts (three paths × two languages)
 tools/initramfs.ts        tar.gz → cpio-newc initramfs; also the decompress / verify subcommands
 tools/uncompress-fv.ts    strips the LZMA compression layer out of EDK II firmware (UEFI boots about 5x faster)
 tools/prof-summary.ts     summarises node --cpu-prof samples, listing hot spots by self time

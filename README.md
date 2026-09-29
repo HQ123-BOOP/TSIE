@@ -37,7 +37,7 @@
 | **显示** | virtio-gpu 画面可经 WebSocket 实时推到浏览器（脏矩形增量推送），浏览器键盘回传到 guest |
 | **固件** | 直接运行真实固件：实测 OpenSBI 1.9 + U-Boot 2025.01 + **Debian 13 (trixie) 完整引导到 `login:`**，以及 EDK II (UEFI) 启动链（含 TianoCore logo 上屏）。**SBI 调用需外部 OpenSBI —— 内建 SBI 固件已移除** |
 | **加载** | ELF64 装载（自动处理 vaddr/paddr 偏移）、裸二进制、扁平设备树（DTB）生成器（含 `rng-seed` 熵注入） |
-| **工具** | 引导素材一键拉齐（`tools/bootstrap.sh` / `.ps1`，中英双语）、cpio initramfs 打包（`tools/initramfs.ts`）、**独立可执行文件构建（`npm run sea`）**、指令编码器（`tools/encoder.ts`）、CPU profile 汇总（`tools/prof-summary.ts`）、指令级单元测试、CLI |
+| **工具** | 三条引导路各一个自举脚本（`tools/bootstrap-{direct,uboot,edk2}.sh` / `.ps1`，中英双语）、cpio initramfs 打包（`tools/initramfs.ts`）、FAT16 引导盘生成（`tools/mkfat.ts`）、**独立可执行文件构建（`npm run sea`）**、指令编码器（`tools/encoder.ts`）、CPU profile 汇总（`tools/prof-summary.ts`）、指令级单元测试、CLI |
 
 ## 快速开始
 
@@ -48,33 +48,46 @@ npm run demo       # 裸机 "Hello, RISC-V 64!"（直接驱动 UART，不依赖�
 npm run bench      # 性能基准
 ```
 
-### 一键拉齐引导素材（跑真实固件前先做这个）
+### 三条引导路，各一个脚本（跑真实固件前先做这个）
 
-跑 OpenSBI / EDK II / Linux 需要几份外部素材。`tools/bootstrap.sh`（Git Bash）与
-`tools/bootstrap.ps1`（**需要 PowerShell 7+**：Windows 自带的 5.1 会被检测到，打印安装提示后以退出码 1 结束）会把它们全部拉齐、拼好，并打印可直接复制的引导命令：
+跑真实固件与 Linux 需要几份外部素材。**三条引导路各有一个独立脚本**，用哪条就跑哪个 ——
+它不会替你决定，也不会顺带拉一堆用不上的东西：
+
+| 引导路 | 脚本（`.sh` = Git Bash，`.ps1` = PowerShell 7+） | 取什么 | 引导链 |
+| --- | --- | --- | --- |
+| ① OpenSBI 直接跳转内核 | `tools/bootstrap-direct.sh` / `.ps1` | OpenSBI + 内核/initramfs | `fw_jump` ──跳转──▶ 内核 |
+| ② U-Boot 拉内核 | `tools/bootstrap-uboot.sh` / `.ps1` | ①的 + U-Boot + FAT 引导盘 | `fw_jump` → U-Boot ──fatload──▶ 内核 |
+| ③ EDK II (UEFI) 里拉起 Linux | `tools/bootstrap-edk2.sh` / `.ps1` | ①的 + EDK II 固件 + ESP | 固件 → UEFI Shell ──startup.nsh──▶ 内核 EFI stub |
+
+三个脚本各自打印可直接复制的引导命令，公共机制（下载重试与断点续传、镜像站探测、`.deb`
+拆包、文案）都在 `tools/lib/bootstrap-common.{sh,ps1}` 里只写一份。
 
 ```bash
-tools/bootstrap.sh                 # 交互：GitHub 不通时询问是否用镜像站
-tools/bootstrap.sh --no-edk2       # 跳过 EDK II（省约 70 MB）
-tools/bootstrap.sh --decompress    # 预先同意解压 initramfs（无人值守；引导快 38.9%）
-tools/bootstrap.sh --help          # 完整用法（内容就是脚本头部那段注释）
+tools/bootstrap-direct.sh              # 交互：GitHub 不通时询问是否用镜像站
+tools/bootstrap-direct.sh --help       # 完整用法（= tools/i18n/usage.direct.zh.txt）
+tools/bootstrap-uboot.sh --decompress  # U-Boot 那条路：预先同意解压 initramfs（引导快 38.9%）
+tools/bootstrap-edk2.sh --no-esp       # 只要 EDK II 固件，不建 ESP
 
-# PowerShell 侧参数同义，写法不同：-Help / --help / -h 都能出帮助
-pwsh tools/bootstrap.ps1 -NoEdk2
-pwsh tools/bootstrap.ps1 -Help
+# PowerShell 侧参数同义，写法不同：-Help / --help / -h 都能出帮助。
+# 需要 PowerShell 7+：Windows 自带的 5.1 会被检测到，打印安装提示后以退出码 1 结束
+pwsh tools/bootstrap-uboot.ps1 -Decompress
+pwsh tools/bootstrap-edk2.ps1 -Help
 ```
 
-**两个脚本都能中英切换**：`--lang en` / `-Lang en`，或环境变量 `TSIE_LANG=en`，
+**三个脚本都能中英切换**：`--lang en` / `-Lang en`，或环境变量 `TSIE_LANG=en`，
 默认跟随系统区域（认不出来时用中文）。`--lang en --help` 出的是英文用法，
-连中间调用的 `tools/initramfs.ts` 也跟着同一份语言（脚本把选择经 `TSIE_LANG` 传下去）。
-文案是**单一来源** `tools/i18n/messages.tsv`（`key<TAB>中文<TAB>English`），
-选 TSV 而不是 JSON 是因为 bash / PowerShell / Node 都能零依赖读它。
+连中间调用的 `tools/initramfs.ts`、`tools/mkfat.ts` 也跟着同一份语言
+（脚本把选择经 `TSIE_LANG` 传下去）。文案是**单一来源** `tools/i18n/messages.tsv`
+（`key<TAB>中文<TAB>English`），选 TSV 而不是 JSON 是因为 bash / PowerShell / Node
+都能零依赖读它。
 
 产物落在 gitignored 的 `tmp/boot/` 与 `firmware/` —— 这些是 GPL-2.0 / 第三方二进制，
 **不入库**（本项目是 Apache-2.0）。
 
-两个脚本都**动态发现版本号**：上游一发新版，写死的 URL 就会 404。本 README 下面那些手动
-步骤是给"想自己控制每一步"的人看的，也按同一原则写。
+三个脚本都**动态发现版本号**：上游一发新版，写死的 URL 就会 404。本 README 下面那些手动
+步骤是给"想自己控制每一步"的人看的，也按同一原则写。引导盘（U-Boot 的 FAT16、
+UEFI 的 ESP）由项目自己的 `tools/mkfat.ts` 手写生成 —— 不借 `mtools` / `mkfs.vfat`，
+Windows 上也没有它们。
 
 ### 打成独立可执行文件（用户机器上不需要装 Node）
 
@@ -98,7 +111,7 @@ npm run sea        # → tmp/sea/tsie（Windows 上是 tsie.exe），约 90–10
 ### 启动 OpenSBI（已验证 ✅）
 
 模拟器可以直接运行真实的 OpenSBI 固件（v1.9 实测通过）。
-（这一步 `tools/bootstrap.sh` / `.ps1` 会自动做完并解压，下面的命令是手动路径。）
+（这一步 `tools/bootstrap-direct.sh` / `.ps1` 会自动做完并解压，下面的命令是手动路径。）
 
 ```bash
 # 下载预编译固件（约 30 MB，包含所有平台）
@@ -121,17 +134,38 @@ ACLINT 定时器、8250 串口、16 个 PMP），并把控制权移交给 S 模�
 
 ### 启动 U-Boot（已验证 ✅）
 
-可以直接运行真实的 U-Boot（作为 S 模式负载），并让它操作 VirtIO 块设备：
+`tools/bootstrap-uboot.sh` / `.ps1` 会把 U-Boot 固件、内核与 initramfs 一次备齐，并打成一
+块 FAT16 引导盘 —— U-Boot 自己去盘上按**文件**读（`fatload`）再用 `booti` 交接：
 
 ```bash
-# 从 Debian 的 u-boot-qemu 包解出 qemu-riscv64_smode/uboot.elf（放 tmp/，GPL-2.0 不入库）
-# 挂一块 raw 磁盘，用 --script 往 U-Boot 控制台注入命令：
-tsx src/cli.ts --bios firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin \
-  --kernel tmp/uboot/uboot.elf --disk tmp/disk.raw --script <cmd-file> -n 60000000
+tools/bootstrap-uboot.sh      # 取 OpenSBI + Alpine 内核/initramfs + U-Boot，生成磁盘与命令脚本
+npm run uboot                 # 用上面那套产物跑一遍（数分钟，能看到内核启动日志）
 ```
 
-`--script` 会把文件里每行当作控制台命令逐条喂入（带 autoboot 停止键，
-用于交互式固件）。实测输出：
+实测（U-Boot 2025.01-3；盘由 `tools/mkfat.ts` 手写生成）：
+
+```
+=> part list virtio 0
+  1  2048  53248  00000000-01  0c Boot
+=> fatls virtio 0:1
+ 22380544   Image
+  3543539   initramfs.cpio.gz
+=> fatload virtio 0:1 ${kernel_addr_r} Image
+22380544 bytes read in 37 ms (576.9 MiB/s)
+=> fatload virtio 0:1 ${ramdisk_addr_r} initramfs.cpio.gz
+3543539 bytes read in 7 ms (482.8 MiB/s)
+=> booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdtcontroladdr}
+...
+[    0.000000] Kernel command line: console=ttyS0 rdinit=/init earlycon=sbi
+```
+
+两个细节值得记：`booti` 的第三个参数（设备树）**不能省** —— 这个构建的 U-Boot 在交接时
+`gd->fdt_blob` 会变成 0（实测 `Working FDT set to 0` → `Device tree not found`），必须显式
+传 `${fdtcontroladdr}`；盘上的 FAT16 是本项目自己写的（`tools/mkfat.ts`，不借 mtools /
+mkfs.vfat），U-Boot 读到的内容与宿主文件 `crc32` 逐字节一致。
+
+想让 U-Boot 停在提示符下自己敲命令，把 `tmp/boot/uboot-cmd.txt` 清空（或换成自己的命令）即可。
+VirtIO 块设备的驱动级自测长这样：
 
 ```
 => virtio scan
@@ -148,6 +182,44 @@ VirtIO 块设备按 virtio-v1.x MMIO 规范实现（寄存器布局与 U-Boot `v
 逐一核对），并声明 `VIRTIO_F_VERSION_1`，因此 modern 驱动可以直接识别。
 U-Boot 下载：Debian 包 `u-boot-qemu`（`ftp.debian.org/debian/pool/main/u/u-boot/`），
 源码：<https://github.com/u-boot/u-boot>（GPL-2.0，产物勿提交入 Apache-2.0 仓库）。
+
+### 在 EDK II (UEFI) 里启动 Linux（已验证 ✅）
+
+`tools/bootstrap-edk2.sh` / `.ps1` 取 EDK II 固件（CODE + VARS）、Alpine 内核与 initramfs，
+再组一块 ESP。引导链**完全不需要第三方引导器** —— 用的全是固件自带的东西：
+
+```
+EDK II 固件 ──没有可引导项，落到自带 UEFI Shell──▶ 执行 ESP 上的 startup.nsh：
+    initrd \initramfs.cpio.gz          # 固件自带的命令，把文件注册成 Linux initrd 的 device path
+    \Image console=ttyS0 rdinit=/init earlycon=sbi   # 内核的 EFI stub，命令行作为参数传进去
+```
+
+实测：固件认出 ESP 并挂成 `FS0:`，执行 `startup.nsh`，内核启动并一路到 shell：
+
+```
+[  121.389155] Freeing unused kernel image (initmem) memory: 2300K
+[  121.396480] Run /init as init process
+~ #
+```
+
+两个坑脚本都替你填了：
+
+* **要一段 8 字节跳板**。CLI 把 `--kernel` 装在 0x80200000 —— 那正是 OpenSBI `fw_jump` 的落点，
+  而 EDK II 固件在 pflash 0x20000000，中间差一次跳转。脚本生成 `tmp/boot/edk2-tramp.bin`
+  （`lui t0, 0x20000; jr t0`）。少了它只会看到 OpenSBI banner，之后一片安静。
+* **固件卷里的 LZMA 得先剥掉**。留着的话固件自己解压要十分钟（实测），脚本调
+  `tools/uncompress-fv.ts` 生成 `RISCV_VIRT_CODE.nocomp.fd`，引导快约 5 倍（`--no-strip` 可关）。
+
+引导命令由脚本打印（`--bios` 不能少：RISC-V 上 EDK II 要用 SBI 的定时器/IPI/复位）：
+
+```bash
+tsx src/cli.ts --bios fw_jump.bin --kernel tmp/boot/edk2-tramp.bin \
+  --flash-code tmp/boot/RISCV_VIRT_CODE.nocomp.fd --flash-vars tmp/boot/RISCV_VIRT_VARS.fd \
+  --disk tmp/boot/esp.img -n 3000000000 --stats
+```
+
+EDK II 的设置界面也在：进固件后按 **ESC** 可进 UiApp（Device Manager / Boot Manager /
+Boot Maintenance Manager），实测菜单文字会经 ConSplitter 镜像到串口。
 
 
 ### 启动 Linux（Alpine，已验证引导到 shell ✅）
@@ -261,8 +333,10 @@ tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --disk rootfs.ext4 \
   --append "console=ttyS0 root=/dev/vda rw" --gpu 1024x768 --pci \
   --display 8094 --input
 
-# 跑 UEFI 固件（EDK II）：CFI flash 必须 CODE / VARS 成对提供
-tsx src/cli.ts --flash-code RISCV_VIRT_CODE.fd --flash-vars RISCV_VIRT_VARS.fd
+# 跑 UEFI 固件（EDK II）：CFI flash 必须 CODE / VARS 成对提供，且要一段跳板把
+# OpenSBI 的落点（0x80200000）接到 pflash 上的固件（0x20000000）—— 见"在 EDK II (UEFI) 里启动 Linux"
+tsx src/cli.ts --bios fw_jump.bin --kernel edk2-tramp.bin \
+  --flash-code RISCV_VIRT_CODE.nocomp.fd --flash-vars RISCV_VIRT_VARS.fd --disk esp.img
 
 # 把宿主目录共享给 guest（virtio-9p，guest 侧 mount -t 9p ... hostshare /mnt）
 tsx src/cli.ts --bios fw_jump.bin --kernel vmlinux --disk rootfs.ext4 \
@@ -361,9 +435,11 @@ src/
 ├── machine.ts            virt 机器组装与主循环
 ├── index.ts              公共 API 导出
 └── cli.ts                命令行入口
-tools/bootstrap.sh        引导素材一键拉齐（OpenSBI + EDK II + Alpine 内核/initramfs）
-tools/bootstrap.ps1       同上，PowerShell 7 版（两个脚本都中英双语，见 tools/i18n/）
-tools/i18n/               文案表 messages.tsv + 用法文本（中英各一份，三个读取方共用）
+tools/bootstrap-direct.sh  ① OpenSBI 直接跳转内核（最短的一条路）
+tools/bootstrap-uboot.sh   ② U-Boot 拉内核（U-Boot 自己从 FAT 盘上 fatload）
+tools/bootstrap-edk2.sh    ③ EDK II (UEFI) 固件 + ESP（UEFI 里把 Linux 拉起来）
+tools/lib/                 三个入口共用的实现（下载重试、镜像探测、.deb 拆包、文案）
+tools/i18n/                文案表 messages.tsv + 六份用法文本（三条路 × 中英）
 tools/initramfs.ts        tar.gz → cpio-newc initramfs；另有 decompress / verify 子命令
 tools/uncompress-fv.ts    去掉 EDK II 固件里的 LZMA 压缩层（UEFI 启动快约 5 倍）
 tools/prof-summary.ts     汇总 node --cpu-prof 采样，按自身耗时列热点
