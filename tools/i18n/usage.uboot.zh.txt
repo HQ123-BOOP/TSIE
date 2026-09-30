@@ -11,6 +11,21 @@ SPDX-FileCopyrightText: 2026 TSIE
 
 盘由项目自己的 tools/mkfat.ts 手写生成 —— 不借 mtools / mkfs.vfat，Windows 上也没有它们。
 
+发行版（--distro）：
+  alpine（默认）  内核 + initramfs 放进我们自己做的 FAT16 盘，U-Boot 用 booti 交接
+  debian          官方 generic 云镜像整盘。GPT：p1 = rootfs(ext4)、p15 = ESP(FAT16)，
+                  ESP 上就是 Debian 自己的 GRUB；命令脚本用 `bootefi bootmgr` 让 U-Boot 的
+                  EFI 启动管理器按"可移动介质"规则去起 \EFI\BOOT\BOOTRISCV64.EFI，之后
+                  内核、initrd、root=PARTUUID 全由 GRUB 自己解析 —— 所以脚本不必在宿主侧
+                  读 ext4，也不必知道内核版本。这条路不做 FAT 盘，只写命令脚本。
+                  下载：约 312 MiB 的 tar.xz（官方 cdimage），解出约 3 GiB 的 .raw。
+                  已经下载过镜像时复用，不重新下载：
+                    tools/bootstrap-uboot.sh --debian-image /path/to/debian13.raw
+                  ⚠️ 又慢又安静：整条链约 18.2B 条指令 / 约 3.9 小时（README 实测，
+                  模拟器约 1.3 MIPS），而且镜像自带的 cmdline 带 quiet，到 login: 之前
+                  几乎没有输出 —— 别当成卡死。引导命令里的 --timebase 100000000 是必需的：
+                  默认 10 MHz 下 10M 指令就是一虚拟秒，systemd 会按虚拟时间冤杀慢任务。
+
 设计约定（照着改之前先读）：
   * 版本号一律动态发现。U-Boot 取自 Debian 的 u-boot-qemu 包（池目录里取最新版本），
     包里有两份 ELF，要的是 qemu-riscv64_smode/uboot.elf（由 SBI 固件引导的那份）。
@@ -25,6 +40,8 @@ SPDX-FileCopyrightText: 2026 TSIE
   tools/bootstrap-uboot.sh --decompress    # 预先同意解压 initramfs（无人值守；引导快 38.9%）
   tools/bootstrap-uboot.sh --no-decompress # 不要解压，只留 .cpio.gz
   tools/bootstrap-uboot.sh --alpine v3.24  # 固定 Alpine 分支（默认 latest-stable）
+  tools/bootstrap-uboot.sh --distro debian # 换成 Debian 13 整盘镜像（见上）
+  tools/bootstrap-uboot.sh --debian-image D:/img/debian13.raw   # 复用已下载的镜像
   tools/bootstrap-uboot.sh --dir DIR       # 换输出目录（默认 tmp/boot）
   tools/bootstrap-uboot.sh --lang en       # 输出英文（默认跟随系统区域）
 

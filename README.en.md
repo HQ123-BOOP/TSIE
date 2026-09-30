@@ -239,6 +239,35 @@ Manager / Boot Manager / Boot Maintenance Manager); measured, ConSplitter mirror
 the serial console.
 
 
+### Choosing a distribution: `--distro debian` (automated, measured up to GRUB loading the kernel ✅)
+
+The three bootstrap scripts fetch Alpine artifacts by default; add `--distro debian` and they fetch
+the **official Debian 13 generic cloud image as a whole disk** (~312 MiB tar.xz → ~3 GiB .raw) instead.
+The image carries its own GPT: p1 = rootfs (ext4), p15 = ESP (FAT16), and the ESP holds Debian's own
+GRUB — so the boot is handed straight to it:
+
+| Path | How the handover happens | Result |
+|---|---|---|
+| ② U-Boot | the command script runs `bootefi bootmgr`: U-Boot's EFI boot manager follows the removable-media rule to `\EFI\BOOT\BOOTRISCV64.EFI` | measured: `Booting \`Debian GNU/Linux'` → `Loading Linux 6.12.101+deb13-riscv64 ...` |
+| ③ EDK II | the firmware's BDS follows the same rule (`--disk` takes the whole image) | same (measured), and we no longer build an ESP at all |
+| ① direct jump | **cannot work** | Debian's riscv64 kernel is an EFI-stub PE image: it starts with `MZ`, not executable RISC-V instructions, so the first instruction traps. The script refuses instead |
+
+```bash
+tools/bootstrap-uboot.sh --distro debian     # fetch the image + write the U-Boot command script (no FAT disk)
+tools/bootstrap-edk2.sh  --distro debian     # fetch the image + the EDK II firmware (no ESP)
+tools/bootstrap-uboot.sh --debian-image D:/img/debian13.raw   # reuse an image you already have
+```
+
+The point of that design is that **the script never has to read ext4 on the host**: the kernel
+filename, the initrd filename and `root=PARTUUID` all live in the image's own `/boot/grub/grub.cfg`
+and are parsed by GRUB — no e2fsprogs dependency, and nothing to update when a Debian point release
+changes the kernel version.
+
+⚠️ Two things to know: the image's own cmdline carries `quiet`, so there is almost no output before
+`login:` (that is not a hang), and at the default 10 MHz timebase systemd kills slow tasks on virtual
+time — which is why the printed command carries the new CLI switch `--timebase 100000000`.
+
+
 ### Booting Linux (Alpine, verified booting to a shell ✅)
 
 Companion tool: `tools/initramfs.ts` — turns a minirootfs archive straight into a kernel-usable
@@ -309,7 +338,10 @@ Troubleshooting notes (pitfalls already stepped in, so you do not repeat them):
 The whole chain with a real distribution: OpenSBI → U-Boot `bootefi` → EFI stub kernel (6.12.101+deb13)
 → initramfs → switch_root → systemd → `serial-getty@ttyS0` → **`localhost login:`**.
 
-Three key settings are needed (for the other pitfalls see the troubleshooting notes above):
+The preparation is automated now: `tools/bootstrap-uboot.sh --distro debian` (or
+`bootstrap-edk2.sh --distro debian`) fetches the official whole-disk image and prints the boot
+command, handing the boot over to the GRUB the image carries (see the section above). What follows
+are the three key settings that were needed to bring this chain up.
 
 1. **Disk**: the Debian 13 generic riscv64 image (GPT: p1=rootfs ext4, p15=ESP); over VirtIO, U-Boot
    `load`s the kernel and initrd straight from p1 (no GRUB / ESP contents needed).

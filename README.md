@@ -222,6 +222,33 @@ EDK II 的设置界面也在：进固件后按 **ESC** 可进 UiApp（Device Man
 Boot Maintenance Manager），实测菜单文字会经 ConSplitter 镜像到串口。
 
 
+### 换发行版：`--distro debian`（脚本已自动化，实测到 GRUB 装载内核 ✅）
+
+三个引导脚本默认取 Alpine 素材；加 `--distro debian` 就换成 **Debian 13 官方 generic
+云镜像整盘**（约 312 MiB 的 tar.xz → 约 3 GiB 的 .raw）。镜像自带 GPT：p1 = rootfs(ext4)、
+p15 = ESP(FAT16)，ESP 上就是 Debian 自己的 GRUB —— 引导直接交给它：
+
+| 路 | 交接方式 | 结果 |
+|---|---|---|
+| ② U-Boot | 命令脚本 `bootefi bootmgr`：U-Boot 的 EFI 启动管理器按"可移动介质"规则枚举到 `\EFI\BOOT\BOOTRISCV64.EFI` | 实测 `Booting \`Debian GNU/Linux'` → `Loading Linux 6.12.101+deb13-riscv64 ...` |
+| ③ EDK II | 固件的 BDS 自己走同一条规则（`--disk` 直接给整盘） | 同上（实测），且不再需要我们做 ESP |
+| ① 直跳 | **不行** | Debian 的 riscv64 内核是 EFI stub 的 PE 镜像：开头是 `MZ`，不是能执行的 RISC-V 指令，直跳第一条就是非法指令。脚本会当场报错退出 |
+
+```bash
+tools/bootstrap-uboot.sh --distro debian     # 下载镜像 + 写 U-Boot 命令脚本（不做 FAT 盘）
+tools/bootstrap-edk2.sh  --distro debian     # 下载镜像 + EDK II 固件（不做 ESP）
+tools/bootstrap-uboot.sh --debian-image D:/img/debian13.raw   # 已有镜像就复用，不重下
+```
+
+这个设计的关键收益是**脚本不必在宿主侧读 ext4**：内核文件名、initrd 文件名、`root=PARTUUID`
+全在镜像自己的 `/boot/grub/grub.cfg` 里，由 GRUB 解析 —— 没有 e2fsprogs 依赖，也不会因为
+Debian 点版本换了内核版本而失效。
+
+⚠️ 两点必须知道：镜像自带的 cmdline 带 `quiet`，到 `login:` 之前几乎没有输出（不是卡死）；
+默认 10 MHz 时基下 systemd 会按虚拟时间冤杀慢任务，所以脚本打印的命令带上了新的 CLI 开关
+`--timebase 100000000`。
+
+
 ### 启动 Linux（Alpine，已验证引导到 shell ✅）
 
 配套工具：`tools/initramfs.ts` —— 直接把 minirootfs 归档转成内核可用的 cpio-newc
@@ -287,7 +314,9 @@ virtio-gpu 也在同一条链上完成 mode-set 并出图（见下节）。
 真实发行版全链路：OpenSBI → U-Boot `bootefi` → EFI stub 内核（6.12.101+deb13）
 → initramfs → switch_root → systemd → `serial-getty@ttyS0` → **`localhost login:`**。
 
-需要的三个关键配置（其余坑见上文排障要点）：
+准备工作已自动化：`tools/bootstrap-uboot.sh --distro debian`（或 `bootstrap-edk2.sh
+--distro debian`）会取回官方整盘镜像并打印引导命令，交接交给镜像自带的 GRUB（见上一节）。
+下面记的是这条链跑通时踩出来的三个关键配置。
 
 1. **磁盘**：Debian 13 generic riscv64 镜像（GPT：p1=rootfs ext4、p15=ESP），
    U-Boot 经 VirtIO 从 p1 直接 `load` 内核与 initrd（不需要 GRUB/ESP 内容）。

@@ -45,16 +45,25 @@ echo
 log "① $(msg stage.opensbi)"
 bootstrap_opensbi
 echo
+# 第二条要的东西按发行版分岔：Alpine 是内核 + initramfs，Debian 是它自己的整盘镜像。
+# --firmware-only 两边一样，都表示"不要素材，只要固件"。
 if [ "${DO_ALPINE:-1}" = 1 ]; then
-  log "② $(msg stage.alpine)"
-  bootstrap_alpine
+  if [ "$DISTRO" = debian ]; then
+    log "② $(msg stage.debian)"
+    bootstrap_debian
+  else
+    log "② $(msg stage.alpine)"
+    bootstrap_alpine
+  fi
   echo
   log "③ $(msg stage.edk2)"
 else
   log "② $(msg stage.edk2)"
 fi
 bootstrap_edk2
-if [ "$DO_ESP" = 1 ]; then
+# ESP 只有 Alpine 那条路要做：Debian 镜像的 p15 上就是它自己的 ESP，上面是 GRUB，
+# 固件的 BDS 会按"可移动介质"规则去 \EFI\BOOT\BOOTRISCV64.EFI 把它起来。
+if [ "$DO_ESP" = 1 ] && [ "$DISTRO" = alpine ]; then
   echo
   log "④ $(msg stage.esp)"
   bootstrap_esp

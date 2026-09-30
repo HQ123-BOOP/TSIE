@@ -27,6 +27,14 @@
   行为与 tools/bootstrap-edk2.sh 逐项对齐，机制与文案在 tools/lib/bootstrap-common.ps1
   （三个入口共用的唯一一份）。用法文本在 tools/i18n/usage.edk2.<语言>.txt。
 
+  素材按发行版分岔（-Distro）：
+    alpine（默认）  内核 + initramfs 放进我们自己做的 ESP，BDS 落到 UEFI Shell 后由
+                    startup.nsh 先 initrd 再启动内核
+    debian          官方 generic 云镜像整盘：ESP 与 GRUB 都是镜像自带的（p15），固件的
+                    BDS 按"可移动介质"规则直接起来 \EFI\BOOT\BOOTRISCV64.EFI，之后
+                    内核/initrd/root= 由 GRUB 自己解析 —— 所以这条路不再做 ESP，
+                    脚本也不需要在宿主侧读 ext4。已下载过镜像可用 -DebianImage 复用。
+
   设计约定（照着改之前先读）：
     * 版本号一律动态发现（EDK II 取自 Debian 的 qemu-efi-riscv64 包，Alpine 取自官方目录）。
     * 所有产物落在 gitignored 目录（firmware/、tmp/），不得入库：EDK II 是第三方二进制，
@@ -43,6 +51,8 @@
   pwsh tools/bootstrap-edk2.ps1 -FirmwareOnly          # 同上（等价写法，语义更直白）
   pwsh tools/bootstrap-edk2.ps1 -NoStrip               # 不剥 LZMA（产物与上游一致，但慢）
   pwsh tools/bootstrap-edk2.ps1 -Alpine v3.24 -Dir tmp/boot-pinned
+  pwsh tools/bootstrap-edk2.ps1 -Distro debian          # 用官方 Debian 13 整盘镜像
+  pwsh tools/bootstrap-edk2.ps1 -DebianImage G:/tslinux/debian13.raw   # 复用已下载的镜像
   pwsh tools/bootstrap-edk2.ps1 -Lang en               # 英文输出（默认跟随系统区域）
   pwsh tools/bootstrap-edk2.ps1 --lang en --help       # 英文用法文本
 
@@ -85,6 +95,8 @@ param(
   [switch]$Strip,       # 剥掉固件卷里的 LZMA 层（默认就剥，引导快约 5 倍）
   [switch]$NoStrip,     # 不剥 LZMA：产物与上游一致，但每次引导要多烧十分钟
   [string]$Alpine,      # Alpine 分支（默认 latest-stable 别名，在共享库里）
+  [string]$Distro,      # 素材发行版 alpine|debian（默认 alpine；-DebianImage 会自动切到 debian）
+  [string]$DebianImage, # 本地已有的 Debian generic .raw：给了就按 debian 走，且不下载
   [string]$Dir,         # 换输出目录（默认 tmp/boot）
   [string]$Lang,        # 输出语言 zh|en（默认跟随系统区域；也可用 TSIE_LANG）
   # 接住没人认领的位置参数。PowerShell 不认 `--name` 这种写法（只认 `-name`），
@@ -126,16 +138,25 @@ Write-Host ''
 Write-LogRaw "① $(Msg 'stage.opensbi')"
 Install-OpenSbi
 Write-Host ''
+# 第二条要的东西按发行版分岔：Alpine 是内核 + initramfs，Debian 是它自己的整盘镜像。
+# -FirmwareOnly 两边一样，都表示"不要素材，只要固件"。
 if ($script:DoAlpine) {
-  Write-LogRaw "② $(Msg 'stage.alpine')"
-  Install-Alpine
+  if ($script:DistroSel -eq 'debian') {
+    Write-LogRaw "② $(Msg 'stage.debian')"
+    Install-Debian
+  } else {
+    Write-LogRaw "② $(Msg 'stage.alpine')"
+    Install-Alpine
+  }
   Write-Host ''
   Write-LogRaw "③ $(Msg 'stage.edk2')"
 } else {
   Write-LogRaw "② $(Msg 'stage.edk2')"
 }
 Install-Edk2
-if ($script:DoEsp) {
+# ESP 只有 Alpine 那条路要做：Debian 镜像的 p15 上就是它自己的 ESP，上面是 GRUB，
+# 固件的 BDS 会按"可移动介质"规则去 \EFI\BOOT\BOOTRISCV64.EFI 把它起来。
+if ($script:DoEsp -and $script:DistroSel -ne 'debian') {
   Write-Host ''
   Write-LogRaw "④ $(Msg 'stage.esp')"
   Install-Esp

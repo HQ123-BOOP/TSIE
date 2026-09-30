@@ -9,6 +9,14 @@ SPDX-FileCopyrightText: 2026 TSIE
 initramfs 由 CLI 的 --initrd 交给内核。要的东西最少（OpenSBI + Alpine 内核/initramfs），
 引导也最快。
 
+发行版（--distro）：
+  这条路只跑 alpine。Debian 的 riscv64 内核是 EFI stub 的 PE 镜像（文件开头是 MZ，
+  不是能执行的 RISC-V 指令），fw_jump 直跳过去第一条就是非法指令 —— 它必须由固件按
+  EFI 方式加载，也就是必须走另外两条路：
+    tools/bootstrap-uboot.sh --distro debian
+    tools/bootstrap-edk2.sh  --distro debian
+  （--distro debian / --debian-image 在这里会当场报错退出，不会白下载。）
+
 设计约定（照着改之前先读）：
   * 版本号一律动态发现，不硬编码。Alpine 的包更新很快，写死的 URL 会 404
     （README 里那个 linux-lts-6.18.44 在 2026-09-26 就已经是 404）。

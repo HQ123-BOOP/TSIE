@@ -16,6 +16,23 @@ SPDX-FileCopyrightText: 2026 TSIE
 ESP（EFI 系统分区）是一块 FAT16 盘，上面三样东西：startup.nsh、Image（Alpine 内核，
 它带 EFI stub）、initramfs。盘由项目自己的 tools/mkfat.ts 生成。
 
+发行版（--distro）：
+  alpine（默认）  内核 + initramfs 放进我们自己做的 ESP，BDS 落到 UEFI Shell 后由
+                  startup.nsh 先 initrd 再启动内核
+  debian          官方 generic 云镜像整盘。GPT：p1 = rootfs(ext4)、p15 = ESP(FAT16)，
+                  ESP 上就是 Debian 自己的 GRUB；把它整盘交给 --disk，固件的 BDS 会按
+                  "可移动介质"规则直接去起 \EFI\BOOT\BOOTRISCV64.EFI（实测日志：
+                  `Booting \`Debian GNU/Linux'` → `Loading Linux 6.12.x+deb13-riscv64 ...`），
+                  之后内核、initrd、root=PARTUUID 全由 GRUB 从镜像里解析。这条路不再做 ESP，
+                  脚本也不需要在宿主侧读 ext4。
+                  下载：约 312 MiB 的 tar.xz（官方 cdimage），解出约 3 GiB 的 .raw。
+                  已经下载过镜像时复用，不重新下载：
+                    tools/bootstrap-edk2.sh --debian-image /path/to/debian13.raw
+                  ⚠️ 又慢又安静：整条链约 18.2B 条指令 / 约 3.9 小时（README 实测），
+                  而且镜像自带的 cmdline 带 quiet，到 login: 之前几乎没有输出 —— 别当成卡死。
+                  引导命令里的 --timebase 100000000 是必需的：默认 10 MHz 下 10M 指令就是
+                  一虚拟秒，systemd 会按虚拟时间冤杀慢任务。
+
 设计约定（照着改之前先读）：
   * 这条路也要 OpenSBI（产物里的 `fw_jump.bin`）：一是模拟器的 CLI 要求 `--kernel` 或
     `--bios` 至少有一个，二是 EDK II 在 RISC-V 上要用 SBI 的定时器/IPI/复位，
@@ -32,6 +49,8 @@ ESP（EFI 系统分区）是一块 FAT16 盘，上面三样东西：startup.nsh�
   tools/bootstrap-edk2.sh --no-esp         # 只要固件，不建 ESP（也就不必取内核与 initramfs）
   tools/bootstrap-edk2.sh --firmware-only  # 同上（等价写法，语义更直白）
   tools/bootstrap-edk2.sh --alpine v3.24   # 固定 Alpine 分支（默认 latest-stable）
+  tools/bootstrap-edk2.sh --distro debian  # 换成 Debian 13 整盘镜像（见上）
+  tools/bootstrap-edk2.sh --debian-image D:/img/debian13.raw   # 复用已下载的镜像
   tools/bootstrap-edk2.sh --dir DIR        # 换输出目录（默认 tmp/boot）
   tools/bootstrap-edk2.sh --lang en        # 输出英文（默认跟随系统区域）
 

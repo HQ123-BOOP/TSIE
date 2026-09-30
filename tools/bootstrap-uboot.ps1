@@ -16,6 +16,14 @@
   行为与 tools/bootstrap-uboot.sh 逐项对齐，机制与文案在 tools/lib/bootstrap-common.ps1
   （三个入口共用的唯一一份）。用法文本在 tools/i18n/usage.uboot.<语言>.txt。
 
+  素材按发行版分岔（-Distro）：
+    alpine（默认）  内核 + initramfs 放进我们自己做的 FAT16 盘，booti 交接
+    debian          官方 generic 云镜像整盘（GPT：p1 rootfs ext4、p15 ESP + GRUB），
+                    -Disk 指向它，命令脚本用 bootefi bootmgr 让 U-Boot 的 EFI 启动管理器
+                    去起镜像自带 ESP 上的 GRUB，之后内核/initrd/root= 全由 GRUB 自己解析
+                    （所以脚本不必在宿主侧读 ext4）。已下载过镜像可用 -DebianImage 复用；
+                    这条路只写命令脚本，不做盘。
+
   设计约定（照着改之前先读）：
     * 版本号一律动态发现。U-Boot 取自 Debian 的 u-boot-qemu 包（池目录里取最新版本），
       包里有两份 ELF，要的是 qemu-riscv64_smode/uboot.elf（由 SBI 固件引导的那份）。
@@ -29,6 +37,8 @@
   pwsh tools/bootstrap-uboot.ps1 -Mirror -NoDecompress
   pwsh tools/bootstrap-uboot.ps1 -Decompress            # 无人值守时预先同意解压 initramfs
   pwsh tools/bootstrap-uboot.ps1 -Alpine v3.24 -Dir tmp/boot-pinned
+  pwsh tools/bootstrap-uboot.ps1 -Distro debian         # 用官方 Debian 13 整盘镜像
+  pwsh tools/bootstrap-uboot.ps1 -DebianImage G:/tslinux/debian13.raw   # 复用已下载的镜像
   pwsh tools/bootstrap-uboot.ps1 -Lang en               # 英文输出（默认跟随系统区域）
   pwsh tools/bootstrap-uboot.ps1 --lang en --help       # 英文用法文本
 
@@ -69,6 +79,8 @@ param(
   [switch]$Decompress,  # 预先同意解压 initramfs（无人值守）
   [switch]$NoDecompress,# U-Boot 从盘上读的那份 initramfs 不要解压
   [string]$Alpine,      # Alpine 分支（默认 latest-stable 别名，在共享库里）
+  [string]$Distro,      # 素材发行版 alpine|debian（默认 alpine；-DebianImage 会自动切到 debian）
+  [string]$DebianImage, # 本地已有的 Debian generic .raw：给了就按 debian 走，且不下载
   [string]$Dir,         # 换输出目录（默认 tmp/boot）
   [string]$Lang,        # 输出语言 zh|en（默认跟随系统区域；也可用 TSIE_LANG）
   # 接住没人认领的位置参数。PowerShell 不认 `--name` 这种写法（只认 `-name`），
@@ -99,13 +111,23 @@ Write-Host ''
 Write-LogRaw "① $(Msg 'stage.opensbi')"
 Install-OpenSbi
 Write-Host ''
-Write-LogRaw "② $(Msg 'stage.alpine')"
-Install-Alpine
+if ($script:DistroSel -eq 'debian') {
+  Write-LogRaw "② $(Msg 'stage.debian')"
+  Install-Debian
+} else {
+  Write-LogRaw "② $(Msg 'stage.alpine')"
+  Install-Alpine
+}
 Write-Host ''
 Write-LogRaw "③ $(Msg 'stage.uboot')"
 Install-Uboot
 Write-Host ''
-Write-LogRaw "④ $(Msg 'stage.disk')"
-Install-UbootDisk
+if ($script:DistroSel -eq 'debian') {
+  Write-LogRaw "④ $(Msg 'stage.ubootCmds')"
+  Install-UbootCmds
+} else {
+  Write-LogRaw "④ $(Msg 'stage.disk')"
+  Install-UbootDisk
+}
 Show-BsArtifacts
 Show-TailUboot

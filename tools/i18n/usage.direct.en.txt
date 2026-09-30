@@ -9,6 +9,15 @@ The shortest path: no firmware in between. fw_jump jumps to 0x80200000 by conven
 the kernel is sitting there; the CLI hands the initramfs over with --initrd. It needs the
 least (OpenSBI plus the Alpine kernel/initramfs) and boots the fastest.
 
+Distribution (--distro):
+  This path only runs alpine. Debian's riscv64 kernel is an EFI-stub PE image (it starts
+  with "MZ" rather than executable RISC-V instructions), so a direct jump traps on the very
+  first instruction. It must be loaded by firmware — that is, it needs one of the other two
+  paths:
+    tools/bootstrap-uboot.sh --distro debian
+    tools/bootstrap-edk2.sh  --distro debian
+  (--distro debian / --debian-image fail here immediately instead of downloading anything.)
+
 Read this before changing the script:
   * Versions are always discovered at run time, never hard-coded. Alpine's packages move
     quickly and a pinned URL eventually 404s (the linux-lts-6.18.44 URL this README once

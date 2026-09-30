@@ -142,3 +142,13 @@ source, `key<TAB>中文<TAB>English`) and the usage texts in `tools/i18n/usage.<
 never print a literal Chinese or English string from those scripts. Boot disks are generated
 by `tools/mkfat.ts` (hand-written FAT16/MBR, no mtools) and the initramfs by
 `tools/initramfs.ts`; both take their language from `TSIE_LANG`, which the scripts export.
+
+`--distro alpine|debian` (`-Distro` / `-DebianImage` on the PowerShell side) selects the
+artifacts: **alpine** (default) is a kernel plus an initramfs built from the minirootfs and
+works on all three paths; **debian** is the official Debian 13 generic cloud image as a whole
+disk (GPT: p1 rootfs ext4, p15 ESP carrying its own GRUB), so the boot is handed to that
+GRUB — `bootefi bootmgr` on the U-Boot path, the firmware's BDS on the EDK II path. Path ①
+refuses `--distro debian` outright: Debian's riscv64 kernel is an EFI-stub PE image starting
+with `MZ`, so a direct jump traps on the first instruction. Do not reach for ext4 parsing on
+the host (there is no e2fsprogs in the dependency set): the kernel filename, the initrd and
+`root=PARTUUID` come from the image's own `/boot/grub/grub.cfg`.

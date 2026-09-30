@@ -39,13 +39,23 @@ echo
 log "① $(msg stage.opensbi)"
 bootstrap_opensbi
 echo
-log "② $(msg stage.alpine)"
-bootstrap_alpine
+if [ "$DISTRO" = debian ]; then
+  log "② $(msg stage.debian)"
+  bootstrap_debian
+else
+  log "② $(msg stage.alpine)"
+  bootstrap_alpine
+fi
 echo
 log "③ $(msg stage.uboot)"
 bootstrap_uboot
 echo
-log "④ $(msg stage.disk)"
-bootstrap_uboot_disk
+if [ "$DISTRO" = debian ]; then
+  log "④ $(msg stage.ubootCmds)"
+  bootstrap_uboot_cmds
+else
+  log "④ $(msg stage.disk)"
+  bootstrap_uboot_disk
+fi
 bs_list_artifacts
 tail_uboot

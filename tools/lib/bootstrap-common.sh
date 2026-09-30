@@ -11,6 +11,16 @@
 # 入口脚本只负责：声明这条引导路要哪些素材、按什么顺序取、最后打印哪几条引导命令。
 # 取素材的机制（下载重试 / 镜像 / ar 拆包 / cpio / FAT）与文案都写在这里，只有一份。
 #
+# 素材有两种发行版可选（--distro）：
+#   alpine（默认）  内核 + minirootfs 打成的 initramfs，三条路都能跑，体积小、引导快
+#   debian          官方 generic 云镜像整盘，只有两条带 UEFI 的路能跑（见下）
+# 两者不共通的部分都在这里，入口脚本只按 DISTRO 选调用哪个函数。
+#
+# Debian 为什么跑不了路 ①：它的 riscv64 内核是 EFI stub 的 PE 镜像（文件开头是 MZ，
+# 不是能执行的 RISC-V 指令），fw_jump 直跳过去第一条指令就是非法指令；必须由固件按
+# EFI 方式加载。所以 --distro debian 在 direct 那条路上直接报错退出，而不是下一个
+# 到 0x80200000 也起不来的镜像。
+#
 # 设计约定（照着改之前先读）：
 #   * 版本号一律动态发现，不硬编码。Alpine 的包更新很快，写死的 URL 会 404
 #     （README 里那个 linux-lts-6.18.44 在 2026-09-26 就已经是 404）。
@@ -51,6 +61,18 @@ FW_DIR="$REPO_ROOT/firmware"
 # （曾想自己算"最高版本号"，但那既多余又有 bug：v4.0 编码成 4000 会小于 v3.24 的 3024。）
 # 需要固定分支时用 --alpine v3.24。
 ALPINE_BRANCH="latest-stable"
+
+# 发行版：alpine | debian。见文件头的"素材有两种发行版可选"。
+DISTRO="alpine"
+
+# Debian 素材：官方 cloud 镜像（GPT：p1 = rootfs(ext4)、p15 = ESP(FAT16)，ESP 上是
+# Debian 自己的 GRUB）。不按"内核 + initramfs 两件套"抓，是因为 Debian 在 riscv64 上
+# 没有那套东西：vmlinuz 是 EFI stub 的 PE 镜像，根文件系统也不在 initramfs 里。
+# latest/ 这个别名与 Alpine 的 latest-stable 同理：语义正确，且不会随点版本推进失效。
+DEBIAN_BASE="https://cdimage.debian.org/images/cloud/trixie/latest"
+DEBIAN_TAR="debian-13-generic-riscv64.tar.xz"
+DEBIAN_IMAGE=""      # --debian-image：本地已有的 .raw，给了就不下载
+DEBIAN_RAW=""        # bootstrap_debian 定下来的那份镜像（要交给模拟器的路径）
 
 MIRROR_MODE="ask"     # ask | yes | no
 DECOMPRESS="ask"      # ask | yes | no：是否额外产出一份未压缩 initramfs
@@ -120,6 +142,14 @@ bs_arg_common() {
     --mirror)    MIRROR_MODE="yes" ;;
     --no-mirror) MIRROR_MODE="no" ;;
     --alpine)    ALPINE_BRANCH="$2"; BS_CONSUMED=2 ;;
+    --distro)
+                 case "${2:-}" in
+                   alpine|debian) DISTRO="$2" ;;
+                   *) die "$(msg distro.bad "${2:-}")" ;;
+                 esac
+                 BS_CONSUMED=2 ;;
+    # 给了本地镜像就按 debian 走：单给一个"哪儿来的镜像"却没换发行版，没有第二种解释
+    --debian-image) DEBIAN_IMAGE="$2"; DISTRO="debian"; BS_CONSUMED=2 ;;
     --dir)       OUT_DIR="$2"; BS_CONSUMED=2 ;;
     --lang)      # 立即校验并重载：这样「--lang en 后面跟个错参数」报的也是英文
                  case "${2:-}" in
@@ -696,6 +726,55 @@ bootstrap_alpine() {
   fi
 }
 
+# ------------------------------------------------- ②' Debian 13 磁盘镜像（整盘）
+#
+# 素材是一整块 GPT 盘：p1 = rootfs(ext4)、p15 = ESP(FAT16)，ESP 上就是 Debian 自己的
+# GRUB（\EFI\BOOT\BOOTRISCV64.EFI）。引导交给它：
+#   U-Boot：bootefi bootmgr  —— EFI 启动管理器按"可移动介质"路径枚举到那个 .efi
+#   EDK II：固件的 BDS 自己找同一个路径（同样是 removable media 规则）
+# 好处是不需要在宿主侧读 ext4 —— 脚本的依赖里没有、也不该有 e2fsprogs：
+# 内核版本、PARTUUID、initrd 文件名全在镜像自己的 /boot/grub/grub.cfg 里，由 GRUB 解析。
+#
+# 代价要写清楚（用法文本里也说）：这条路是"真发行版全量引导"，README 实测约 18.2B 条
+# 指令 / 3.9 小时（模拟器约 1.3 MIPS）；而镜像自带的 grub.cfg 里带 quiet，所以到
+# login: 之前几乎没有输出。
+bootstrap_debian() {
+  local raw="${DEBIAN_IMAGE:-}"
+
+  if [ -n "$raw" ]; then
+    [ -f "$raw" ] || die "$(msg debian.imageMissing "$raw")"
+    log "  $(msg debian.usingLocal "$raw")"
+    DEBIAN_RAW="$(bs_node_path "$raw")"
+  else
+    local tarball="$OUT_DIR/$DEBIAN_TAR"
+    if [ -f "$tarball" ] && verify_archive "$tarball" -J; then
+      log "  $(msg debian.tarExists "$DEBIAN_TAR")"
+    else
+      log "  $(msg debian.downloading "$DEBIAN_TAR")"
+      fetch "$tarball" "" "$DEBIAN_BASE/$DEBIAN_TAR" || die "$(msg debian.downloadFailed)"
+      verify_archive "$tarball" -J || die "$(msg debian.badArchive)"
+    fi
+
+    log "  $(msg debian.extracting)"
+    tar -xJf "$tarball" -C "$OUT_DIR" || die "$(msg debian.extractFailed)"
+    raw="$(ls "$OUT_DIR"/debian-*.raw 2>/dev/null | head -1)"
+    [ -n "$raw" ] || die "$(msg debian.noRaw "$OUT_DIR")"
+    # 命令是在仓库根跑的，仓库内的产物按相对路径打印
+    case "$raw" in
+      "$REPO_ROOT"/*) DEBIAN_RAW="${raw#$REPO_ROOT/}" ;;
+      *)              DEBIAN_RAW="$(bs_node_path "$raw")" ;;
+    esac
+  fi
+
+  # 两道体检：大小与 GPT 签名。3 GiB 的下载出现截断是完全可能的（fetch 会校验
+  # Content-Length，这里再挡一道"文件本身就不是一块盘"的情况）。
+  local sz; sz=$(stat -c %s "$raw")
+  [ "$sz" -ge 1073741824 ] || die "$(msg debian.tooSmall "$raw" "$sz")"
+  dd if="$raw" bs=512 skip=1 count=1 2>/dev/null | head -c 8 | grep -q 'EFI PART' \
+    || die "$(msg debian.noGpt "$raw")"
+  log "  $(msg debian.imageOk "$raw" "$(awk "BEGIN{printf \"%.1f\", $sz/1073741824}")")"
+}
+
 # ------------------------------------------------- EDK II / U-Boot 共用的 .deb 拆包
 #
 # .deb 是 ar 归档，里面是 control.tar.* 与 data.tar.*（Debian 上游多数用 xz，新包开始
@@ -806,6 +885,18 @@ booti \${kernel_addr_r} \${ramdisk_addr_r}:\${filesize} \${fdtcontroladdr}
 EOF
 }
 
+# Debian 那条路的命令脚本：盘上不是我们放的 Image/initramfs，而是它自己的 GPT 盘，
+# 内核、initrd、root= 全在 ESP 上那个 GRUB 的 grub.cfg 里。`bootefi bootmgr` 让 U-Boot
+# 的 EFI 启动管理器按"可移动介质"规则去枚举 \EFI\BOOT\BOOTRISCV64.EFI，之后 GRUB 接手。
+# `part list` 只为把分区表打进日志 —— 这条路出问题时，第一眼要看的就是它。
+uboot_cmd_script_debian() {  # uboot_cmd_script_debian <输出文件>
+  cat > "$1" <<EOF
+virtio scan
+part list virtio 0
+bootefi bootmgr
+EOF
+}
+
 # U-Boot 那条路要的盘：内核 + initramfs + 命令脚本，一次做齐。
 bootstrap_uboot_disk() {
   local img="$OUT_DIR/uboot-disk.img"
@@ -814,6 +905,12 @@ bootstrap_uboot_disk() {
     "$(basename "$INITRD_FILE")=$OUT_DIR/$INITRD_FILE"
   uboot_cmd_script "$OUT_DIR/uboot-cmd.txt"
   log "  $(msg uboot.diskMade "$(basename "$img")" "$(( $(stat -c %s "$img") / 1048576 ))")"
+}
+
+# Debian 那条路不用做盘（盘就是镜像本身），但命令脚本要写。
+bootstrap_uboot_cmds() {
+  uboot_cmd_script_debian "$OUT_DIR/uboot-cmd.txt"
+  log "  $(msg uboot.cmdMade "uboot-cmd.txt" "$(wc -l < "$OUT_DIR/uboot-cmd.txt" | tr -d ' ')")"
 }
 
 # EDK II 的固件卷里压了一层 LZMA：原样交给模拟器，固件自己解压要十分钟（实测），
@@ -859,7 +956,22 @@ bs_list_artifacts() {
   ls -la "$OUT_DIR" | awk 'NR>3 && $5>0 {printf "  %12d B  %s\n", $5, $9}'
 }
 
-bs_rel_out() { printf '%s' "${OUT_DIR#$REPO_ROOT/}"; }
+bs_rel_out() {
+  # 产物目录在仓库里就打印相对路径（命令是在仓库根跑的）；-Dir 指到仓库外时，
+  # 打印成 node 认得的写法 —— 否则 Git Bash 的 /g/xxx 到 node 手里会变成 C:\g\xxx。
+  case "$OUT_DIR" in
+    "$REPO_ROOT"/*) printf '%s' "${OUT_DIR#$REPO_ROOT/}" ;;
+    *)              bs_node_path "$OUT_DIR" ;;
+  esac
+}
+# 打印给 node 的路径：Git Bash 里用户写 /g/xxx 是合法的，但 node 会当成 C:\g\xxx，
+# 于是同一份镜像在脚本里找得到、交给模拟器却找不到。命令行的出现形式统一成 G:/xxx。
+bs_node_path() {  # bs_node_path <路径>
+  case "$1" in
+    /[a-zA-Z]/*) printf '%s' "$(printf '%s' "$1" | sed -E 's#^/([a-zA-Z])/#\U\1:/#')" ;;
+    *)           printf '%s' "$1" ;;
+  esac
+}
 bs_fw_rel()  { printf '%s' 'firmware/opensbi-1.9-rv-bin/share/opensbi/lp64/generic/firmware/fw_jump.bin'; }
 
 # initramfs 的解释文字随"这次到底产出了哪一份"变，避免打印一条指向不存在文件的命令
@@ -890,7 +1002,26 @@ EOF
 }
 
 # ② U-Boot 拉内核：OpenSBI → U-Boot → 由 U-Boot 自己从 FAT 盘上 fatload + booti
+#    Debian 时盘换成镜像本身，交接方式也换成 EFI（它的内核是 EFI stub，booti 不认）。
 tail_uboot() {
+  if [ "$DISTRO" = debian ]; then
+    cat <<EOF
+
+$(msg tail.title)
+
+  # $(msg tail.debianUbootCmd)
+$(msg tail.debianNote)
+
+  npx tsx src/cli.ts \\
+    --bios $(bs_fw_rel) \\
+    --kernel $(bs_rel_out)/uboot.elf \\
+    --disk $DEBIAN_RAW \\
+    --script $(bs_rel_out)/uboot-cmd.txt \\
+    --timebase 100000000 -n 20000000000 --stats
+
+EOF
+    return 0
+  fi
   cat <<EOF
 
 $(msg tail.title)
@@ -913,6 +1044,26 @@ EOF
 # 参数错误、打印帮助退出 2），而且 EDK II 在 RISC-V 上要用 SBI 的定时器/IPI/复位，
 # 少了 OpenSBI 根本走不到 UEFI 引导界面。旧版脚本打印的命令漏了这个开关，是坏的。
 tail_edk2() {
+  if [ "$DISTRO" = debian ]; then
+    cat <<EOF
+
+$(msg tail.title)
+
+  # $(msg tail.debianEdk2Cmd)
+$(msg tail.debianNote)
+
+  # $(msg tail.edk2)
+  npx tsx src/cli.ts \\
+    --bios $(bs_fw_rel) \\
+    --kernel $(bs_rel_out)/edk2-tramp.bin \\
+    --flash-code $(bs_rel_out)/$EDK2_CODE_FILE \\
+    --flash-vars $(bs_rel_out)/RISCV_VIRT_VARS.fd \\
+    --disk $DEBIAN_RAW \\
+    --timebase 100000000 -n 20000000000 --stats
+
+EOF
+    return 0
+  fi
   cat <<EOF
 
 $(msg tail.title)

@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 TSIE
 #
 # 三个 PowerShell 引导脚本的共享实现（**不是**可执行入口，只被点源）：
@@ -13,6 +13,12 @@
 # 这是 tools/lib/bootstrap-common.sh 的孪生：函数一一对应
 # （log/warn/die → Write-Log/Write-Warn/Write-Die，fetch → Invoke-Fetch，
 #   bootstrap_uboot_disk → Install-UbootDisk …），行为也逐项对齐。
+#
+# 素材有两种发行版可选（-Distro）：
+#   alpine（默认）  内核 + minirootfs 打成的 initramfs，三条路都能跑，体积小、引导快
+#   debian          官方 generic 云镜像整盘，只有两条带 UEFI 的路能跑
+# 与 .sh 侧同规则；Debian 为什么跑不了路 ① 见那边的文件头（内核是 EFI stub 的 PE 镜像，
+# 开头是 MZ，直跳过去第一条指令就是非法指令）。
 #
 # 设计约定（照着改之前先读）：
 #   * 版本号一律动态发现，不硬编码。Alpine 的包更新很快，写死的 URL 会 404
@@ -68,6 +74,15 @@ $script:Arch = 'riscv64'
 # 不指望它更快。多一个源就自动获得"换源重试"，且校验值仍取自官方 manifest。
 $script:AlpineMirror = 'https://mirrors.ustc.edu.cn/alpine'
 
+# 发行版：alpine | debian（见文件头的"素材有两种发行版可选"）
+$script:DistroSel = 'alpine'
+# Debian 素材：官方 cloud 镜像（GPT：p1 = rootfs(ext4)、p15 = ESP(FAT16)，ESP 上是
+# Debian 自己的 GRUB）。不按"内核 + initramfs 两件套"抓，理由是 .sh 侧文件头里写的那些。
+$script:DebianBase  = 'https://cdimage.debian.org/images/cloud/trixie/latest'
+$script:DebianTar   = 'debian-13-generic-riscv64.tar.xz'
+$script:DebianImagePath = ''      # -DebianImage：本地已有的 .raw，给了就不下载
+$script:DebianRaw   = ''      # Install-Debian 定下来的那份镜像（要交给模拟器的路径）
+
 $script:MirrorMode = 'ask'          # ask | yes | no
 $script:MirrorOk   = $false         # 本轮是否已就"用镜像"取得同意（问过一次就不再问）
 # 名字不叫 $script:Decompress：入口的 -Decompress 是个 [switch] 参数，而参数变量就在入口的
@@ -94,6 +109,15 @@ $script:BsDoHelp   = $false
 $script:MsgFile = Join-Path $script:RepoRoot 'tools\i18n\messages.tsv'
 $script:MsgTable = @{}
 $script:MsgLoaded = $false
+
+# 中文 Windows 的控制台默认是 GBK/936，而本文件里的文案是 UTF-8。这里**最早**就把输出
+# 编码定成 UTF-8，理由有两个：
+#   * 参数解析阶段的报错（拼错的开关、-Lang fr、-Distro 给了别的值）也走 Write-Die，
+#     那时 Initialize-BsEnv 还没跑；不定的话这些行会按 GBK 编出去 —— 重定向到文件或管给
+#     grep 时就是乱码，CI 里那条"非法 TSIE_LANG 要报错"的检查正是这样读的。
+#   * 之后所有子进程（node / tsx / curl）的输出也是 UTF-8，解码必须与之一致。
+#     Initialize-BsEnv 里那一次保留着：同一件事，谁先跑到都不吃亏。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 # 跟随系统区域：明确是英文才算英文，其余（含认不出来）一律中文 —— 与 .sh 的
 # detect_lang 同规则，理由也一样：本项目的文档与注释以中文为主，中文是更合理的默认。
@@ -244,6 +268,13 @@ function Read-BsCommonArg {
     '^--no-mirror$' { $script:MirrorMode = 'no';  return 1 }
     '^--alpine$'    { if ($Argv.Count -lt 2) { Write-Die 'ps.unknownArg' $one }
                       $script:AlpineBranch = $Argv[1]; return 2 }
+    '^--distro$'    { if ($Argv.Count -lt 2) { Write-Die 'ps.unknownArg' $one }
+                      if ($Argv[1] -in @('alpine', 'debian')) { $script:DistroSel = $Argv[1] }
+                      else { Write-Die 'distro.bad' $Argv[1] }
+                      return 2 }
+    # 给了本地镜像就按 debian 走：单给一个"哪儿来的镜像"却没换发行版，没有第二种解释
+    '^--debian-image$' { if ($Argv.Count -lt 2) { Write-Die 'ps.unknownArg' $one }
+                      $script:DebianImagePath = $Argv[1]; $script:DistroSel = 'debian'; return 2 }
     '^--dir$'       { if ($Argv.Count -lt 2) { Write-Die 'ps.unknownArg' $one }
                       $script:OutDir = $Argv[1]; return 2 }
     '^--lang$'      {
@@ -267,6 +298,12 @@ function Initialize-BsArgs {
   if ($Mirror)   { $script:MirrorMode = 'yes' }
   if ($NoMirror) { $script:MirrorMode = 'no' }
   if ($Alpine)   { $script:AlpineBranch = $Alpine }
+  if ($Distro) {
+    if ($Distro -in @('alpine', 'debian')) { $script:DistroSel = $Distro }
+    else { Write-Die 'distro.bad' $Distro }
+  }
+  # 与 .sh 侧一致：给了本地镜像就按 debian 走（-Distro alpine -DebianImage x 时后者赢）
+  if ($DebianImage) { $script:DebianImagePath = $DebianImage; $script:DistroSel = 'debian' }
   if ($Dir)      { $script:OutDir = $Dir }
   if ($Help)     { $script:BsDoHelp = $true }
 
@@ -547,6 +584,59 @@ function Select-Mirror {
   $script:GithubProxy = "https://$best.gh-proxy.org/"
   Write-Log 'mirror.chosen' "$best.gh-proxy.org", ([int]$bestSpeed)
   return $true
+}
+
+# ------------------------------------------------- ②' Debian 13 磁盘镜像（整盘）
+#
+# 与 .sh 的 bootstrap_debian 一一对应：素材是官方 generic 云镜像的整块 GPT 盘
+# （p1 = rootfs(ext4)、p15 = ESP(FAT16)，ESP 上是 Debian 自己的 GRUB）。详细理由见
+# tools/lib/bootstrap-common.sh 同名段落 —— 核心是"宿主侧不读 ext4"，内核版本、
+# PARTUUID、initrd 文件名全交给镜像自带的 grub.cfg。
+function Install-Debian {
+  $raw = $script:DebianImagePath
+
+  if ($raw) {
+    if (-not (Test-Path -LiteralPath $raw)) { Write-Die 'debian.imageMissing' $raw }
+    Write-Log 'debian.usingLocal' $raw -Pad 2
+    $script:DebianRaw = $raw.Replace('\', '/')
+  } else {
+    $tar = Join-Path $script:OutDir $script:DebianTar
+    if ((Test-Path -LiteralPath $tar) -and (Test-Archive -Path $tar -TarFlags @('-J'))) {
+      Write-Log 'debian.tarExists' $script:DebianTar -Pad 2
+    } else {
+      Write-Log 'debian.downloading' $script:DebianTar -Pad 2
+      try { Invoke-Fetch -OutFile $tar -Url "$script:DebianBase/$script:DebianTar" }
+      catch { Write-Die 'debian.downloadFailed' }
+      if (-not (Test-Archive -Path $tar -TarFlags @('-J'))) { Write-Die 'debian.badArchive' }
+    }
+
+    Write-Log 'debian.extracting' -Pad 2
+    & $script:Tar -xJf $tar -C $script:OutDir
+    if ($LASTEXITCODE -ne 0) { Write-Die 'debian.extractFailed' }
+    $found = Get-ChildItem -LiteralPath $script:OutDir -Filter 'debian-*.raw' -File |
+      Select-Object -First 1
+    if (-not $found) { Write-Die 'debian.noRaw' $script:OutDir }
+    $raw = $found.FullName
+    # 命令是在仓库根跑的，仓库内的产物按相对路径打印（与 Get-BsRelOut 同规则）
+    $root = $script:RepoRoot.TrimEnd('\') + '\'
+    if ($found.FullName.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $script:DebianRaw = $found.FullName.Substring($root.Length).Replace('\', '/')
+    } else {
+      $script:DebianRaw = $found.FullName.Replace('\', '/')
+    }
+  }
+
+  # 两道体检：大小与 GPT 签名（下载截断是真实发生过的失败模式，见 .sh 侧注释）
+  $sz = (Get-Item -LiteralPath $raw).Length
+  if ($sz -lt 1073741824) { Write-Die 'debian.tooSmall' $raw, $sz }
+  $fs = [System.IO.File]::OpenRead($raw)
+  try {
+    $fs.Seek(512, [System.IO.SeekOrigin]::Begin) | Out-Null
+    $buf = New-Object byte[] 8
+    $fs.Read($buf, 0, 8) | Out-Null
+  } finally { $fs.Dispose() }
+  if ([System.Text.Encoding]::ASCII.GetString($buf) -ne 'EFI PART') { Write-Die 'debian.noGpt' $raw }
+  Write-Log 'debian.imageOk' $raw, ('{0:N1}' -f ($sz / 1GB)) -Pad 2
 }
 
 # ------------------------------------------------- EDK II / U-Boot 共用的 .deb 拆包
@@ -949,6 +1039,20 @@ function New-UbootCmdScript {
   Set-Content -LiteralPath $OutFile -Value (($lines -join "`n") + "`n") -NoNewline -Encoding ascii
 }
 
+# Debian 那条路的命令脚本：盘上不是我们放的 Image/initramfs，而是它自己的 GPT 盘，
+# 内核、initrd、root= 全在 ESP 上那个 GRUB 的 grub.cfg 里。`bootefi bootmgr` 让 U-Boot
+# 的 EFI 启动管理器按"可移动介质"规则去枚举 \EFI\BOOT\BOOTRISCV64.EFI，之后 GRUB 接手。
+# `part list` 只为把分区表打进日志 —— 这条路出问题时，第一眼要看的就是它。
+function New-UbootCmdScriptDebian {
+  param([string]$OutFile)
+  $lines = @(
+    'virtio scan'
+    'part list virtio 0'
+    'bootefi bootmgr'
+  )
+  Set-Content -LiteralPath $OutFile -Value (($lines -join "`n") + "`n") -NoNewline -Encoding ascii
+}
+
 # U-Boot 那条路要的盘：内核 + initramfs + 命令脚本，一次做齐。
 function Install-UbootDisk {
   $img = Join-Path $script:OutDir 'uboot-disk.img'
@@ -958,6 +1062,13 @@ function Install-UbootDisk {
   )
   New-UbootCmdScript (Join-Path $script:OutDir 'uboot-cmd.txt')
   Write-Log 'uboot.diskMade' (Split-Path -Leaf $img), ([int][math]::Floor((Get-Item -LiteralPath $img).Length / 1MB)) -Pad 2
+}
+
+# Debian 那条路不用做盘（盘就是镜像本身），但命令脚本要写。
+function Install-UbootCmds {
+  $cmd = Join-Path $script:OutDir 'uboot-cmd.txt'
+  New-UbootCmdScriptDebian $cmd
+  Write-Log 'uboot.cmdMade' 'uboot-cmd.txt', (@(Get-Content -LiteralPath $cmd).Count) -Pad 2
 }
 
 # EDK II 的 ESP：固件里有 UEFI Shell 与 `initrd` 命令（OvmfPkg/LinuxInitrdDynamicShellCommand），
@@ -1039,6 +1150,24 @@ $(Get-BsInitrdNote)
 
 # ② U-Boot 拉内核：OpenSBI → U-Boot → 由 U-Boot 自己从 FAT 盘上 fatload + booti
 function Show-TailUboot {
+  if ($script:DistroSel -eq 'debian') {
+    Write-Host @"
+
+$(Msg 'tail.title')
+
+  # $(Msg 'tail.debianUbootCmd')
+$(Msg 'tail.debianNote')
+
+  npx tsx src/cli.ts ``
+    --bios $(Get-BsFwRel) ``
+    --kernel $(Get-BsRelOut)/uboot.elf ``
+    --disk $($script:DebianRaw) ``
+    --script $(Get-BsRelOut)/uboot-cmd.txt ``
+    --timebase 100000000 -n 20000000000 --stats
+
+"@
+    return
+  }
   Write-Host @"
 
 $(Msg 'tail.title')
@@ -1061,6 +1190,26 @@ $(Msg 'tail.ubootNote')
 # 参数错误、打印帮助退出 2），而且 EDK II 在 RISC-V 上要用 SBI 的定时器/IPI/复位，
 # 少了 OpenSBI 根本走不到 UEFI 引导界面。旧版脚本打印的命令漏了这个开关，是坏的。
 function Show-TailEdk2 {
+  if ($script:DistroSel -eq 'debian') {
+    Write-Host @"
+
+$(Msg 'tail.title')
+
+  # $(Msg 'tail.debianEdk2Cmd')
+$(Msg 'tail.debianNote')
+
+  # $(Msg 'tail.edk2')
+  npx tsx src/cli.ts ``
+    --bios $(Get-BsFwRel) ``
+    --kernel $(Get-BsRelOut)/edk2-tramp.bin ``
+    --flash-code $(Get-BsRelOut)/$($script:Edk2CodeFile) ``
+    --flash-vars $(Get-BsRelOut)/RISCV_VIRT_VARS.fd ``
+    --disk $($script:DebianRaw) ``
+    --timebase 100000000 -n 20000000000 --stats
+
+"@
+    return
+  }
   Write-Host @"
 
 $(Msg 'tail.title')

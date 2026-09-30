@@ -68,6 +68,10 @@ ar.viaMirror	改走镜像下载 {0}...	Downloading {0} through the mirror...
 ar.downloadFailed	bsdtar 下载失败	bsdtar download failed
 ar.unusable	下载到的 bsdtar 无法使用（架构不符？）	The downloaded bsdtar does not run (wrong architecture?)
 
+# ---------------------------------------------------------------- 发行版选择
+distro.bad	--distro 只认 alpine 或 debian（给了 {0}）	--distro accepts alpine or debian (got {0})
+distro.directNoDebian	路 ①（fw_jump 直跳内核）跑不了 Debian：它的 riscv64 内核是 EFI stub 的 PE 镜像，文件开头是 MZ，不是能执行的 RISC-V 指令，直跳过去第一条就是非法指令。请改用 tools/bootstrap-uboot.{sh,ps1} 或 tools/bootstrap-edk2.{sh,ps1} —— 这两条路都带固件，按 EFI 方式加载。	Path ① (fw_jump jumping straight into the kernel) cannot run Debian: its riscv64 kernel is an EFI-stub PE image that starts with "MZ" rather than executable RISC-V instructions, so the very first instruction traps. Use tools/bootstrap-uboot.{sh,ps1} or tools/bootstrap-edk2.{sh,ps1} instead — both carry firmware and load the kernel as EFI.
+
 # ---------------------------------------------------------------- ① OpenSBI
 stage.opensbi	OpenSBI 固件	OpenSBI firmware
 opensbi.exists	已存在，跳过: {0}	Already present; skipping: {0}
@@ -111,6 +115,8 @@ edk2.badSize	尺寸不是 32 MiB（33554432），EDK II 可能拒绝该固件	Th
 
 # ---------------------------------------------------------------- ③ Alpine
 stage.alpine	Alpine 内核 + initramfs	Alpine kernel + initramfs
+stage.debian	Debian 13 磁盘镜像	Debian 13 disk image
+stage.ubootCmds	U-Boot 命令脚本	U-Boot command script
 alpine.branch	Alpine 分支: {0}	Alpine branch: {0}
 alpine.noKernelList	无法列出 Alpine 内核包（网络间歇性，可重跑）	Cannot list Alpine kernel packages (the network here is intermittent; re-running usually works)
 alpine.kernel	内核包: {0}	Kernel package: {0}
@@ -137,8 +143,26 @@ alpine.decompressed	initramfs.cpio     ({0} B，未压缩；引导更快)	initra
 alpine.decompressSkipped	跳过了，只留 initramfs.cpio.gz（随时可补做：tools/initramfs.ts decompress）	Skipped; only initramfs.cpio.gz remains (do it any time with: tools/initramfs.ts decompress)
 alpine.decompressFailed	initramfs 解压失败（tools/initramfs.ts decompress）	initramfs decompression failed (tools/initramfs.ts decompress)
 
+# ---------------------------------------------------------------- ③' Debian（官方 generic 整盘镜像）
+debian.usingLocal	用本地镜像（不下载）: {0}	Using the local image (no download): {0}
+debian.imageMissing	--debian-image 指的文件不存在: {0}	--debian-image points at a file that does not exist: {0}
+debian.downloading	下载官方 generic 云镜像 {0}（约 312 MiB；下一步解出 3 GiB 的 .raw）...	Downloading the official generic cloud image {0} (~312 MiB; the next step unpacks a 3 GiB .raw)...
+debian.tarExists	已有 {0} 且校验通过，跳过下载	{0} is already here and verified; skipping the download
+debian.downloadFailed	镜像下载失败（可重跑，会从断点续传）	Image download failed (re-run; it resumes from where it stopped)
+debian.badArchive	镜像 tar.xz 不完整（完整解压校验失败）—— 删掉重跑	The image tarball is incomplete (a full extract fails) — delete it and re-run
+debian.extracting	解出 .raw 磁盘镜像（约 3 GiB）...	Extracting the .raw disk image (~3 GiB)...
+debian.extractFailed	tar 解压失败	tar extraction failed
+debian.noRaw	解压结果里没有 debian-*.raw: {0}	No debian-*.raw among the extracted files: {0}
+debian.tooSmall	镜像太小（{1} B），不像是完整的云镜像: {0}	The image is too small ({1} B) to be a complete cloud image: {0}
+debian.noGpt	镜像 LBA 1 上没有 GPT 签名（EFI PART）: {0}	No GPT signature ("EFI PART") at LBA 1 of the image: {0}
+debian.imageOk	镜像就绪: {0}（{1} GiB）	Image ready: {0} ({1} GiB)
+
 # ---------------------------------------------------------------- 收尾指引
 tail.title	引导命令（在仓库根执行）：	Boot commands (run them from the repository root):
+tail.debianUbootCmd	Debian 13：U-Boot 的 EFI 启动管理器去起镜像自带 ESP 上的 GRUB	Debian 13: U-Boot's EFI boot manager starts the GRUB on the image's own ESP
+tail.debianEdk2Cmd	Debian 13：固件的 BDS 自己找镜像 ESP 上的 \EFI\BOOT\BOOTRISCV64.EFI，再交给 GRUB	Debian 13: the firmware's BDS finds \EFI\BOOT\BOOTRISCV64.EFI on the image's ESP and hands over to GRUB
+tail.debianNote	  # 引导的是完整发行版：盘就是镜像本身（GPT：p1 rootfs ext4、p15 ESP）。内核、initrd、\n  # root=PARTUUID 全在镜像自带的 grub.cfg 里，由 GRUB 自己解析 —— 脚本不必在宿主侧读 ext4。\n  # 又慢又安静：README 实测整条链约 18.2B 条指令 / 约 3.9 小时，且 cmdline 带 quiet，\n  # 到 login: 之前几乎没有输出，别当成卡死。\n  # --timebase 100000000 是必需的：默认 10 MHz 下 10M 指令就是一虚拟秒，systemd 会按\n  # 虚拟时间冤杀慢任务，serial-getty 起不来。	  # Boots a complete distribution: the disk is the image itself (GPT: p1 rootfs ext4, p15 ESP).\n  # Kernel, initrd and root=PARTUUID live in the image's own grub.cfg, parsed by GRUB, so the\n  # script never reads ext4 on the host. Slow and quiet: the README measured ~18.2B instructions\n  # / ~3.9 hours, and the cmdline carries quiet, so expect almost no output before login: —\n  # that is not a hang. --timebase 100000000 is required: at 10 MHz one virtual second is 10M\n  # instructions and systemd kills slow tasks on virtual time, so serial-getty never comes up.
+uboot.cmdMade	{0}（{1} 行；交给 U-Boot 逐行喂入）	{0} ({1} lines; fed to U-Boot line by line)
 tail.alpineCmd	Alpine + OpenSBI（到 BusyBox shell）	Alpine + OpenSBI (to a BusyBox shell)
 tail.earlycon	  # 必须带 earlycon=sbi：Alpine 内核编了 SBI earlycon 驱动，有它约 150M 指令内\n  # 就能看到输出；没有它内核会把 printk 攒在 ring buffer 里，直到 16550 控制台\n  # 注册（约 350-400M 指令）才一次性倒出 —— 看起来像卡死。	  # Always pass earlycon=sbi: the Alpine kernel has the SBI earlycon driver, and with\n  # it you see output within about 150M instructions. Without it the kernel buffers\n  # printk until the 16550 console registers (350-400M instructions) and then dumps\n  # everything at once, which looks exactly like a hang.
 tail.uncompressed	  # 用的是未压缩的 initramfs.cpio：内核认不出压缩就直接按裸 cpio 用，\n  # 省掉在模拟器里跑 inflate。同机同核实测（两条路都到 shell）：\n  #   initramfs.cpio.gz   1,270,638,213 条指令   到 /init 用 t=120.26s\n  #   initramfs.cpio        776,011,912 条指令   到 /init 用 t=64.67s\n  # 省 4.95 亿条（38.9%）。差别不是能不能起来，是快多少。\n  # （虚拟秒与指令数不成正比：内核的 time 走被抖动的 mtime，指令数才是准的。）	  # This run booted the uncompressed initramfs.cpio: the kernel does not recognise a\ncompression format and uses the archive as a plain cpio, skipping the inflate pass.\nMeasured on one machine with one kernel (both reach a shell):\n  initramfs.cpio.gz   1,270,638,213 instructions, /init at t=120.26s\n  initramfs.cpio        776,011,912 instructions, /init at t=64.67s\nThat is 495M instructions, 38.9%. The difference is speed, not whether it boots.\n(Virtual seconds are not proportional to instructions: the kernel's time comes from a\njittered mtime. Trust instret.)

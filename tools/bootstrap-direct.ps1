@@ -12,6 +12,10 @@
   initramfs 由 CLI 的 --initrd 交给内核。要的东西最少（OpenSBI + Alpine 内核/initramfs），
   引导也最快。
 
+  这条路只跑 Alpine：Debian 的 riscv64 内核是 EFI stub 的 PE 镜像（文件开头是 MZ），
+  fw_jump 直跳过去第一条指令就是非法指令 —— 必须由固件按 EFI 方式加载，也就是必须走
+  另外两条路。所以 -Distro debian / -DebianImage 在这里直接报错退出。
+
   行为与 tools/bootstrap-direct.sh 逐项对齐，机制与文案在 tools/lib/bootstrap-common.ps1
   （三个入口共用的唯一一份）。用法文本在 tools/i18n/usage.direct.<语言>.txt。
 
@@ -72,6 +76,8 @@ param(
   [switch]$Decompress,  # 预先同意解压 initramfs（无人值守）
   [switch]$NoDecompress,# 不要解压，只留 .cpio.gz
   [string]$Alpine,      # Alpine 分支（默认 latest-stable 别名，在共享库里）
+  [string]$Distro,      # 素材发行版 alpine|debian（这条路只认 alpine，见 -DebianImage）
+  [string]$DebianImage, # 本地已有的 Debian generic .raw（这条路用不上，给了会报错）
   [string]$Dir,         # 换输出目录（默认 tmp/boot）
   [string]$Lang,        # 输出语言 zh|en（默认跟随系统区域；也可用 TSIE_LANG）
   # 接住没人认领的位置参数。PowerShell 不认 `--name` 这种写法（只认 `-name`），
@@ -94,6 +100,9 @@ Initialize-BsArgs -Extra @{
   '--decompress'    = { $script:DecompressMode = 'yes' }
   '--no-decompress' = { $script:DecompressMode = 'no' }
 }
+# Debian 在这条路上没有任何可行做法（见 .DESCRIPTION 里的说明），所以不下载、不生成，
+# 直接说清楚退出去 —— 而不是下一个到 0x80200000 也起不来的镜像。
+if ($script:DistroSel -ne 'alpine') { Write-Die 'distro.directNoDebian' }
 Initialize-BsEnv
 
 # 编号写在调用处，不进文案表（.sh 侧同样：`log "① $(msg stage.opensbi)"`）
