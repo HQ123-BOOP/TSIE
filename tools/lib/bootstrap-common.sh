@@ -407,7 +407,12 @@ fetch_one() {  # fetch_one <url> <输出文件>
   fi
 
   local i have
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  # 次数按体积给：Alpine 的内核 22 MB，10 次绰绰有余；Debian 的整盘镜像 312 MB，
+  # 这条链路一次尝试只能推进几十 MB（实测 20-90 KB/s，还会被服务端掐断），10 次不够，
+  # 会在离终点不远的地方放弃。续传本身是安全的，所以大方一点，代价只是失败时多等一会儿。
+  local tries=10
+  if [ -n "$total" ] && [ "$total" -gt 67108864 ]; then tries=40; fi
+  for i in $(seq 1 "$tries"); do
     curl -fsSL -C - --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 300 \
          -4 --noproxy '*' -o "$part" "$url" || true
     if [ ! -s "$part" ]; then
@@ -427,7 +432,7 @@ fetch_one() {  # fetch_one <url> <输出文件>
       mv -f "$part" "$out"; rm -f "$part.src"; return 0
     fi
     warn "    $(msg fetch.progress "$have" "$total" "$(awk "BEGIN{printf \"%.0f\", $have*100/$total}")")"
-    sleep $((i*2))
+    sleep $((i < 8 ? i*2 : 15))
   done
   return 1
 }

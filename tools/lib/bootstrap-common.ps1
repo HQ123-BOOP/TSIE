@@ -450,7 +450,13 @@ function Invoke-FetchOne {
   if ($total) { Write-Log 'fetch.size' $total -Pad 4 }
   else { Write-Warn 'fetch.noSize' -Pad 4 }
 
-  for ($i = 1; $i -le 10; $i++) {
+  # 次数按体积给：Alpine 的内核 22 MB，10 次绰绰有余；Debian 的整盘镜像 312 MB，
+  # 这条链路一次尝试只能推进几十 MB（实测 20-90 KB/s，还会被服务端掐断），10 次不够，
+  # 会在离终点不远的地方放弃。续传本身是安全的，所以大方一点，代价只是失败时多等一会儿。
+  $tries = 10
+  if ($total -and $total -gt 67108864) { $tries = 40 }
+
+  for ($i = 1; $i -le $tries; $i++) {
     # -C - 断点续传：本机网络会在 45 KB/s 与 5 KB/s 之间摆，纯重试会从 0 重来。
     & $script:Curl -fsSL -C - --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 300 `
       -4 --noproxy '*' -o $part $Url 2>$null
@@ -466,7 +472,7 @@ function Invoke-FetchOne {
       }
       $pct = '{0:N0}' -f ($have * 100 / $total)
       Write-Warn 'fetch.progress' $have, $total, $pct -Pad 4
-      Start-Sleep -Seconds ($i * 2)
+      Start-Sleep -Seconds ([Math]::Min($i * 2, 15))
       continue
     }
     Write-Warn 'fetch.retry' $i, ($i * 3) -Pad 4
