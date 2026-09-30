@@ -592,6 +592,24 @@ function Select-Mirror {
   return $true
 }
 
+# Debian 镜像 tar 的成员名。一次 `tar -tJf` 顺带把完整性也验了：xz 是单条实心流，截断会让
+# tar 读到底时报错（不像多流拼接的 apk，光列目录看不出问题）。故意**不**走 Test-Archive：
+# 那会把成员数据也解出来丢掉，而真实的成员是 3 GiB —— 实测 PowerShell 里这一下能卡十几分钟。
+#   tar 读不通（截断/不是 xz）→ throw；读通了但没有 .raw 成员 → 返回空串。
+function Get-DebianTarMember {
+  param([string]$TarPath)
+  $list = Join-Path $script:OutDir '.debian-tar-list.txt'
+  & $script:Tar -tJf $TarPath > $list 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    Remove-Item -Force $list -ErrorAction SilentlyContinue
+    throw "tar -tJf failed: $TarPath"
+  }
+  $m = Get-Content -LiteralPath $list | Where-Object { $_ -match '\.raw$' } | Select-Object -First 1
+  Remove-Item -Force $list -ErrorAction SilentlyContinue
+  if ($m) { return $m.Trim() }
+  return ''
+}
+
 # ------------------------------------------------- ②' Debian 13 磁盘镜像（整盘）
 #
 # 与 .sh 的 bootstrap_debian 一一对应：素材是官方 generic 云镜像的整块 GPT 盘
@@ -607,28 +625,31 @@ function Install-Debian {
     $script:DebianRaw = $raw.Replace('\', '/')
   } else {
     $tar = Join-Path $script:OutDir $script:DebianTar
-    if ((Test-Path -LiteralPath $tar) -and (Test-Archive -Path $tar -TarFlags @('-J'))) {
+    $member = ''
+    if (Test-Path -LiteralPath $tar) {
+      try { $member = Get-DebianTarMember $tar } catch { $member = '' }
+    }
+    if ($member) {
       Write-Log 'debian.tarExists' $script:DebianTar -Pad 2
     } else {
       Write-Log 'debian.downloading' $script:DebianTar -Pad 2
       try { Invoke-Fetch -OutFile $tar -Url "$script:DebianBase/$script:DebianTar" }
       catch { Write-Die 'debian.downloadFailed' }
-      if (-not (Test-Archive -Path $tar -TarFlags @('-J'))) { Write-Die 'debian.badArchive' }
+      try { $member = Get-DebianTarMember $tar } catch { Write-Die 'debian.badArchive' }
+      if (-not $member) { Write-Die 'debian.noRaw' $script:DebianTar }
     }
 
     Write-Log 'debian.extracting' -Pad 2
-    & $script:Tar -xJf $tar -C $script:OutDir
+    # 只解那一个成员（实测上游叫 disk.raw，不是 debian-13-…raw）
+    & $script:Tar -xJf $tar -C $script:OutDir $member
     if ($LASTEXITCODE -ne 0) { Write-Die 'debian.extractFailed' }
-    $found = Get-ChildItem -LiteralPath $script:OutDir -Filter 'debian-*.raw' -File |
-      Select-Object -First 1
-    if (-not $found) { Write-Die 'debian.noRaw' $script:OutDir }
-    $raw = $found.FullName
+    $raw = Join-Path $script:OutDir $member
     # 命令是在仓库根跑的，仓库内的产物按相对路径打印（与 Get-BsRelOut 同规则）
     $root = $script:RepoRoot.TrimEnd('\') + '\'
-    if ($found.FullName.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
-      $script:DebianRaw = $found.FullName.Substring($root.Length).Replace('\', '/')
+    if ($raw.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $script:DebianRaw = $raw.Substring($root.Length).Replace('\', '/')
     } else {
-      $script:DebianRaw = $found.FullName.Replace('\', '/')
+      $script:DebianRaw = $raw.Replace('\', '/')
     }
   }
 

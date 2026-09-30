@@ -152,7 +152,7 @@ debian.downloadFailed	镜像下载失败（可重跑，会从断点续传）	Ima
 debian.badArchive	镜像 tar.xz 不完整（完整解压校验失败）—— 删掉重跑	The image tarball is incomplete (a full extract fails) — delete it and re-run
 debian.extracting	解出 .raw 磁盘镜像（约 3 GiB）...	Extracting the .raw disk image (~3 GiB)...
 debian.extractFailed	tar 解压失败	tar extraction failed
-debian.noRaw	解压结果里没有 debian-*.raw: {0}	No debian-*.raw among the extracted files: {0}
+debian.noRaw	镜像 tar 里没有 .raw 成员: {0}	No .raw member inside the image tarball: {0}
 debian.tooSmall	镜像太小（{1} B），不像是完整的云镜像: {0}	The image is too small ({1} B) to be a complete cloud image: {0}
 debian.noGpt	镜像 LBA 1 上没有 GPT 签名（EFI PART）: {0}	No GPT signature ("EFI PART") at LBA 1 of the image: {0}
 debian.imageOk	镜像就绪: {0}（{1} GiB）	Image ready: {0} ({1} GiB)

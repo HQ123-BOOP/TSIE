@@ -743,27 +743,44 @@ bootstrap_alpine() {
 # 代价要写清楚（用法文本里也说）：这条路是"真发行版全量引导"，README 实测约 18.2B 条
 # 指令 / 3.9 小时（模拟器约 1.3 MIPS）；而镜像自带的 grub.cfg 里带 quiet，所以到
 # login: 之前几乎没有输出。
+# Debian 镜像 tar 的成员名。一次 `tar -tJf` 顺带把完整性也验了：xz 是单条实心流，
+# 截断会让 tar 读到底时报错（不像多流拼接的 apk，光列目录看不出问题）。
+# 故意**不**走 verify_archive：那会把成员数据也解出来写进 /dev/null，而真实的成员是 3 GiB，
+# 白烧一遍 3 GiB 的 I/O 什么也换不来。
+#   tar 本身有问题（截断/不是 xz）→ 返回 1；tar 读通了但没有 .raw 成员 → 返回 0 且打印空串。
+debian_tar_member() {  # debian_tar_member <tar>
+  local list="$OUT_DIR/.debian-tar-list.txt"
+  tar -tJf "$1" > "$list" 2>/dev/null || { rm -f "$list"; return 1; }
+  grep -m1 -E '\.raw$' "$list" || true
+  rm -f "$list"
+  return 0
+}
+
 bootstrap_debian() {
-  local raw="${DEBIAN_IMAGE:-}"
+  local raw="${DEBIAN_IMAGE:-}" tarball member
 
   if [ -n "$raw" ]; then
     [ -f "$raw" ] || die "$(msg debian.imageMissing "$raw")"
     log "  $(msg debian.usingLocal "$raw")"
     DEBIAN_RAW="$(bs_node_path "$raw")"
   else
-    local tarball="$OUT_DIR/$DEBIAN_TAR"
-    if [ -f "$tarball" ] && verify_archive "$tarball" -J; then
+    tarball="$OUT_DIR/$DEBIAN_TAR"
+    member=""
+    if [ -f "$tarball" ]; then member=$(debian_tar_member "$tarball") || member=""; fi
+
+    if [ -n "$member" ]; then
       log "  $(msg debian.tarExists "$DEBIAN_TAR")"
     else
       log "  $(msg debian.downloading "$DEBIAN_TAR")"
       fetch "$tarball" "" "$DEBIAN_BASE/$DEBIAN_TAR" || die "$(msg debian.downloadFailed)"
-      verify_archive "$tarball" -J || die "$(msg debian.badArchive)"
+      member=$(debian_tar_member "$tarball") || die "$(msg debian.badArchive)"
+      [ -n "$member" ] || die "$(msg debian.noRaw "$DEBIAN_TAR")"
     fi
 
     log "  $(msg debian.extracting)"
-    tar -xJf "$tarball" -C "$OUT_DIR" || die "$(msg debian.extractFailed)"
-    raw="$(ls "$OUT_DIR"/debian-*.raw 2>/dev/null | head -1)"
-    [ -n "$raw" ] || die "$(msg debian.noRaw "$OUT_DIR")"
+    # 只解那一个成员：tar 里可能还有别的东西，而且我们只需要 .raw
+    tar -xJf "$tarball" -C "$OUT_DIR" "$member" || die "$(msg debian.extractFailed)"
+    raw="$OUT_DIR/$member"
     # 命令是在仓库根跑的，仓库内的产物按相对路径打印
     case "$raw" in
       "$REPO_ROOT"/*) DEBIAN_RAW="${raw#$REPO_ROOT/}" ;;
