@@ -47,6 +47,8 @@ interface Args {
   initrd?: string;
   append: string;
   memory: bigint;
+  /** 虚拟时钟频率（Hz）。默认 10 MHz：10M 指令 = 1 虚拟秒 */
+  timebase?: number;
   loadAt?: bigint;
   maxInstructions: number;
   trace: boolean;
@@ -101,6 +103,11 @@ FreeBSD® (not yet tested).
                             guest 侧 mount -t 9p -o trans=virtio,version=9p2000.L
                             hostshare /mnt）
       --load-at <addr>      内核加载地址（默认 0x80200000）
+      --timebase <hz>       虚拟时钟（设备树里的 timebase-frequency）频率，默认 10 MHz。
+                            模拟器约 2-4 MIPS，比真机慢约百倍，于是同一个"虚拟秒"要烧
+                            更多指令：10 MHz 下 10M 指令就是一秒，内核 soft lockup 与
+                            systemd 各服务超时会按虚拟时间冤杀慢任务、起不来 getty。
+                            引导完整发行版（Debian 等）用 100000000（100 MHz）
       --misaligned <mode>   非对齐访存策略：slow（默认，逐字节模拟，与真实 virt 硬件一致）
                             或 trap（语义精确：抛 misaligned 异常，用于规范一致性测试）
       --script <file>       把文件中的每一行作为控制台输入逐条喂入（无人值守验证）
@@ -218,6 +225,12 @@ function parseArgs(argv: string[]): Args {
       case '--load-at':
         args.loadAt = parseNumber(next());
         break;
+      case '--timebase': {
+        const hz = Number(parseNumber(next()));
+        if (!Number.isFinite(hz) || hz <= 0) throw new Error(`--timebase 需要一个正数频率: ${hz}`);
+        args.timebase = hz;
+        break;
+      }
       case '-n':
       case '--max':
         args.maxInstructions = Number(parseNumber(next()));
@@ -323,6 +336,7 @@ async function main(): Promise<number> {
   try {
     machine = new Machine({
       memSize: args.memory,
+      timebaseFrequency: args.timebase,
       bios: args.bios ? readFile(args.bios) : undefined,
       disk: args.disk ? new FileDisk(args.disk) : undefined,
       flash:
